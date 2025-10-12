@@ -38,7 +38,18 @@ services:
       - TOPIC=ev.test
       - GROUP=ev-group-1
 
+  ev_central:
+    build: ./ev_central
+    depends_on:
+      - kafka
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - TOPIC_STATE=ev.cp.state
+      - TOPIC_REQUEST=ev.supply.request
+      - GROUP=ev-group-central
+    volumes:
+      - ./ev_central/data:/app/data
+
 networks:
   default:
     name: kafkanet
-

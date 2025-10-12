@@ -2,5 +2,5 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py .
-CMD ["python", "app.py"]
+COPY ev_central.py .
+CMD ["python", "ev_central.py", "8080", "kafka:9092"]
