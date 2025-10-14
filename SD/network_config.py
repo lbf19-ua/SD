@@ -5,7 +5,7 @@
 PC1_IP = "192.168.1.100"
 
 # PC2 - EV_Central (este PC actual)  
-PC2_IP = "192.168.1.235"  # IP actual de este PC
+PC2_IP = "172.27.135.138"  # IP actual de este PC
 
 # PC3 - EV_CP (Monitor & Engine)
 PC3_IP = "192.168.1.101"
