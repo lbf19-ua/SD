@@ -47,7 +47,29 @@ python EV_Driver/EV_Driver.py
 python EV_CP_M/EV_CP_M.py
 ```
 4. Ejecutar Engine (en otra terminal):
+
+**Modo básico (solo prueba):**
 ```bash
+python EV_CP_E/EV_CP_E.py
+```
+
+**Modo interactivo (con simulación de fallos):**
+```bash
+python EV_CP_E/EV_CP_E.py --interactive
+```
+
+### 🎮 **Simulación Interactiva del Motor (EV_CP_E)**
+
+Una vez ejecutado en modo `--interactive`, podrás:
+
+- **Tecla 'K' + ENTER**: Simular fallo del motor (estado KO) 🔴
+- **Tecla 'O' + ENTER**: Restaurar funcionamiento normal (estado OK) 🟢  
+- **Tecla 'Q' + ENTER**: Salir de la simulación ❌
+
+Durante un fallo simulado:
+- El motor no puede iniciar nuevas cargas
+- Las cargas en curso se detienen automáticamente
+- Los eventos se publican en Kafka para monitoreo
 python EV_CP_E/EV_CP_E.py
 ```
 
@@ -81,7 +103,16 @@ ping 192.168.1.227
 - **EV_CP_M** (PC3) → **EV_Central** (PC2)  
 - **EV_CP_E** (PC3) → **EV_Central** (PC2)
 
-## 🐛 Solución de Problemas
+## � Kafka Topics y Trazabilidad
+
+- Topics activos:
+	- driver-events, central-events, cp-events (cp-events unifica Monitor y Engine)
+- Cada mensaje incluye:
+	- message_id (único por evento)
+	- correlation_id (misma sesión/conversación)
+	- key de Kafka por entidad (driver_id/cp_id/engine_id) para mantener el orden por clave
+
+## �🐛 Solución de Problemas
 
 ### Error "Connection Refused":
 - Verificar que EV_Central está ejecutándose

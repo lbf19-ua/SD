@@ -10,10 +10,11 @@ import json
 # Añadir el directorio padre al path para importar network_config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from network_config import MONITOR_CONFIG
+from event_utils import generate_message_id, current_timestamp
 
 # Configuración de Kafka
 KAFKA_BROKER = 'localhost:9092'  # Cambia si tu broker está en otra IP
-KAFKA_TOPIC_PRODUCE = 'monitor-events'
+KAFKA_TOPIC_PRODUCE = 'cp-events'
 
 class EV_CP_M:
     def __init__(self, central_ip='localhost', central_port=5000, engine_ip='localhost', engine_port=5001, cp_id="CP_001"):
@@ -28,6 +29,7 @@ class EV_CP_M:
         self.monitoring = False
         self.health_status = "OK"
         self.producer = None
+        self.correlation_id = None  # Correlación por sesión de monitorización
 
     def initialize_kafka_producer(self):
         """Inicializa el productor de Kafka"""
@@ -53,25 +55,32 @@ class EV_CP_M:
         try:
             print(f"[MONITOR] {self.monitor_id} connecting to Central at {self.central_ip}:{self.central_port}")
 
+            # Generar correlation_id para la sesión de monitorización
+            if not self.correlation_id:
+                self.correlation_id = generate_message_id()
+
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(10)  # Timeout de 10 segundos
                 s.connect((self.central_ip, self.central_port))
                 self.connected_to_central = True
 
                 # Mensaje de registro como indica la especificación
-                registration_message = f"{self.monitor_id} {self.cp_id} registration request"
+                registration_message = f"{self.monitor_id} {self.cp_id} registration request [cid={self.correlation_id}]"
                 s.sendall(registration_message.encode())
 
                 # Publicar evento de registro en Kafka
                 if self.producer:
                     event = {
+                        'message_id': generate_message_id(),
+                        'component': 'monitor',
                         'cp_id': self.cp_id,
                         'monitor_id': self.monitor_id,
                         'action': 'register_to_central',
-                        'timestamp': time.time(),
+                        'timestamp': current_timestamp(),
+                        'correlation_id': self.correlation_id,
                         'status': 'connecting'
                     }
-                    self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                    self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=self.cp_id.encode())
                     self.producer.flush()
 
                 # Recibir respuesta del central
@@ -85,13 +94,16 @@ class EV_CP_M:
                     # Publicar evento de autenticación exitosa
                     if self.producer:
                         event = {
+                            'message_id': generate_message_id(),
+                            'component': 'monitor',
                             'cp_id': self.cp_id,
                             'monitor_id': self.monitor_id,
                             'action': 'authenticated_with_central',
-                            'timestamp': time.time(),
+                            'timestamp': current_timestamp(),
+                            'correlation_id': self.correlation_id,
                             'status': 'success'
                         }
-                        self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                        self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=self.cp_id.encode())
                         self.producer.flush()
                     
                     return True
@@ -124,7 +136,8 @@ class EV_CP_M:
                 self.connected_to_engine = True
 
                 # Identificarse ante el Engine
-                connection_message = f"{self.monitor_id} {self.cp_id} monitor connection"
+                # Incluir correlation_id en el mensaje de conexión al Engine
+                connection_message = f"{self.monitor_id} {self.cp_id} monitor connection [cid={self.correlation_id}]"
                 s.sendall(connection_message.encode())
 
                 # Recibir respuesta del engine
@@ -134,13 +147,16 @@ class EV_CP_M:
 
                 if self.producer:
                     event = {
+                        'message_id': generate_message_id(),
+                        'component': 'monitor',
                         'cp_id': self.cp_id,
                         'monitor_id': self.monitor_id,
                         'action': 'connected_to_engine',
-                        'timestamp': time.time(),
+                        'timestamp': current_timestamp(),
+                        'correlation_id': self.correlation_id,
                         'engine_response': response_text
                     }
-                    self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                    self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=self.cp_id.encode())
                     self.producer.flush()
 
                 return True
@@ -184,7 +200,7 @@ class EV_CP_M:
                     s.connect((self.engine_ip, self.engine_port))
                     
                     # Enviar mensaje de comprobación de estado
-                    health_check_msg = f"{self.monitor_id} {self.cp_id} health_check"
+                    health_check_msg = f"{self.monitor_id} {self.cp_id} health_check [cid={self.correlation_id}]"
                     s.sendall(health_check_msg.encode())
                     
                     # Recibir respuesta
@@ -213,15 +229,18 @@ class EV_CP_M:
                     # Publicar evento de monitorización en Kafka
                     if self.producer:
                         event = {
+                            'message_id': generate_message_id(),
+                            'component': 'monitor',
                             'cp_id': self.cp_id,
                             'monitor_id': self.monitor_id,
                             'action': 'health_check',
                             'status': self.health_status,
                             'engine_response': response_text,
                             'consecutive_failures': consecutive_failures,
-                            'timestamp': time.time()
+                            'timestamp': current_timestamp(),
+                            'correlation_id': self.correlation_id
                         }
-                        self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                        self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=self.cp_id.encode())
                         
             except (ConnectionRefusedError, socket.timeout, OSError):
                 consecutive_failures += 1
@@ -249,7 +268,7 @@ class EV_CP_M:
                 s.connect((self.central_ip, self.central_port))
                 
                 # Mensaje de avería como se especifica
-                failure_message = f"{self.monitor_id} {self.cp_id} ENGINE_FAILURE"
+                failure_message = f"{self.monitor_id} {self.cp_id} ENGINE_FAILURE [cid={self.correlation_id}]"
                 s.sendall(failure_message.encode())
                 
                 response = s.recv(1024)
@@ -258,13 +277,16 @@ class EV_CP_M:
                 # Publicar evento de reporte de fallo en Kafka
                 if self.producer:
                     event = {
+                        'message_id': generate_message_id(),
+                        'component': 'monitor',
                         'cp_id': self.cp_id,
                         'monitor_id': self.monitor_id,
                         'action': 'report_engine_failure',
-                        'timestamp': time.time(),
+                        'timestamp': current_timestamp(),
+                        'correlation_id': self.correlation_id,
                         'central_response': response.decode()
                     }
-                    self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                    self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=self.cp_id.encode())
                     self.producer.flush()
                     
         except Exception as e:
