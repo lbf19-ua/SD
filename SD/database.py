@@ -124,6 +124,7 @@ def seed_test_data():
         ('laura_fernandez', 'laura321', 'laura@gmail.com', 'driver', 165.50),
         ('admin', 'admin123', 'admin@ev.com', 'admin', 0.0),
         ('operator1', 'oper123', 'operator1@ev.com', 'operator', 0.0),
+        ('lbf19', 'lbf19', 'lbf19@ev.com', 'admin', 0.0),
     ]
     
     for username, password, email, role, balance in test_users:

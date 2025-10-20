@@ -362,6 +362,27 @@ async def process_kafka_event(event):
             f"⚠️ {cp_id} fuera de línea"
         )
         await broadcast_alert(alert)
+        
+    elif action == 'cp_error_simulated':
+        cp_id = event.get('cp_id')
+        error_type = event.get('error_type', 'error')
+        alert = monitor_instance.add_alert(
+            'critical',
+            f"🚨 Admin simuló {error_type} en {cp_id}"
+        )
+        await broadcast_alert(alert)
+        # Actualizar dashboard inmediatamente
+        await broadcast_monitor_data()
+        
+    elif action == 'cp_error_fixed':
+        cp_id = event.get('cp_id')
+        alert = monitor_instance.add_alert(
+            'success',
+            f"✅ Admin reparó {cp_id}, ahora disponible"
+        )
+        await broadcast_alert(alert)
+        # Actualizar dashboard inmediatamente
+        await broadcast_monitor_data()
 
 async def broadcast_alert(alert):
     """Broadcast una alerta a todos los clientes WebSocket"""
@@ -381,6 +402,32 @@ async def broadcast_alert(alert):
                         await client.send_str(message)
                     else:
                         await client.send(message)
+        except:
+            disconnected_clients.add(client)
+    
+    # Remover clientes desconectados
+    for client in disconnected_clients:
+        shared_state.connected_clients.discard(client)
+
+async def broadcast_monitor_data():
+    """Broadcast datos actualizados del monitor a todos los clientes"""
+    if not shared_state.connected_clients:
+        return
+    
+    monitor_data = monitor_instance.get_monitor_data()
+    message = json.dumps({
+        'type': 'monitor_data',
+        'data': monitor_data
+    })
+    
+    disconnected_clients = set()
+    for client in shared_state.connected_clients:
+        try:
+            # Compatibilidad con aiohttp WebSockets
+            if hasattr(client, 'send_str'):
+                await client.send_str(message)
+            else:
+                await client.send(message)
         except:
             disconnected_clients.add(client)
     

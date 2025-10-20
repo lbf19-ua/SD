@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Restart EV Charging Servers",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"c:\\Users\\luisb\\Desktop\\SD\\SD\\restart_all.ps1"
+			],
+			"isBackground": false,
+			"group": "build"
+		}
+	]
+}

@@ -440,6 +440,16 @@
                     showRefreshIndicator();
                     break;
 
+                case 'cp_error':
+                    addEventLog(`⚠️ ${data.message}`);
+                    showRefreshIndicator();
+                    break;
+
+                case 'cp_fixed':
+                    addEventLog(`✅ ${data.message}`);
+                    showRefreshIndicator();
+                    break;
+
                 case 'user_login':
                     addEventLog(`👤 Usuario conectado: ${data.username}`);
                     break;
@@ -467,6 +477,20 @@
             updateUsersTable();
         }
 
+        function normalizeStatus(status) {
+            switch ((status || '').toLowerCase()) {
+                case 'unavailable':
+                    return 'offline';
+                case 'error':
+                    return 'fault';
+                case 'maintenance':
+                case 'out_of_order':
+                    return 'out_of_service';
+                default:
+                    return status;
+            }
+        }
+
         function updateCPTable() {
             const tbody = document.getElementById('cpBody');
             tbody.innerHTML = '';
@@ -479,18 +503,38 @@
             dashboardData.charging_points.forEach(cp => {
                 const row = document.createElement('tr');
                 
+                // Estados según especificación página 4:
+                // Verde: disponible/suministrando
+                // Gris: desconectado
+                // Rojo: averiado
+                // Naranja: fuera de servicio
+                
                 let statusClass = 'status-available';
                 let statusText = 'Disponible';
                 let dotColor = 'green';
 
-                if (cp.status === 'charging') {
-                    statusClass = 'status-charging';
-                    statusText = 'Cargando';
-                    dotColor = 'yellow';
-                } else if (cp.status === 'offline') {
+                const normStatus = normalizeStatus(cp.status);
+                if (normStatus === 'available' || normStatus === 'charging') {
+                    statusClass = normStatus === 'charging' ? 'status-charging' : 'status-available';
+                    statusText = normStatus === 'charging' ? 'Suministrando' : 'Disponible';
+                    dotColor = 'green';
+                } else if (normStatus === 'offline') {
                     statusClass = 'status-offline';
-                    statusText = 'Fuera de línea';
+                    statusText = 'Desconectado';
+                    dotColor = 'gray';
+                } else if (normStatus === 'fault') {
+                    statusClass = 'status-fault';
+                    statusText = 'Averiado';
                     dotColor = 'red';
+                } else if (normStatus === 'out_of_service') {
+                    statusClass = 'status-out_of_service';
+                    statusText = 'Fuera de Servicio';
+                    dotColor = 'orange';
+                } else {
+                    // Estado desconocido
+                    statusClass = 'status-offline';
+                    statusText = normStatus || 'Desconocido';
+                    dotColor = 'gray';
                 }
 
                 row.innerHTML = `

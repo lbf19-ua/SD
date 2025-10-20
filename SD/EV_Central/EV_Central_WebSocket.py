@@ -322,6 +322,21 @@ async def broadcast_kafka_event(event):
             'cp_id': event.get('cp_id'),
             'status': event.get('status')
         })
+    elif action == 'cp_error_simulated':
+        message = json.dumps({
+            'type': 'cp_error',
+            'cp_id': event.get('cp_id'),
+            'error_type': event.get('error_type'),
+            'status': event.get('new_status'),
+            'message': f"⚠️ Error simulado en {event.get('cp_id')}: {event.get('error_type')}"
+        })
+    elif action == 'cp_error_fixed':
+        message = json.dumps({
+            'type': 'cp_fixed',
+            'cp_id': event.get('cp_id'),
+            'status': event.get('new_status'),
+            'message': f"✅ {event.get('cp_id')} reparado y disponible"
+        })
     else:
         message = json.dumps({
             'type': 'system_event',
@@ -333,6 +348,36 @@ async def broadcast_kafka_event(event):
     for client in shared_state.connected_clients:
         try:
             await client.send(message)
+        except:
+            disconnected_clients.add(client)
+    
+    # Remover clientes desconectados
+    for client in disconnected_clients:
+        shared_state.connected_clients.discard(client)
+    
+    # Si es un evento de cambio de estado de CP, enviar datos completos actualizados
+    if action in ['cp_error_simulated', 'cp_error_fixed', 'cp_status_change']:
+        await broadcast_dashboard_data()
+
+async def broadcast_dashboard_data():
+    """Broadcast datos actualizados del dashboard a todos los clientes"""
+    if not shared_state.connected_clients:
+        return
+    
+    dashboard_data = central_instance.get_dashboard_data()
+    message = json.dumps({
+        'type': 'dashboard_data',
+        'data': dashboard_data
+    })
+    
+    disconnected_clients = set()
+    for client in shared_state.connected_clients:
+        try:
+            # Compatibilidad con aiohttp WebSockets
+            if hasattr(client, 'send_str'):
+                await client.send_str(message)
+            else:
+                await client.send(message)
         except:
             disconnected_clients.add(client)
     

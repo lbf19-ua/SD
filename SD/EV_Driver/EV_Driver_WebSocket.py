@@ -34,8 +34,8 @@ SERVER_PORT = 8001  # Un solo puerto para HTTP y WebSocket
 class SharedState:
     def __init__(self):
         self.connected_clients = set()
-        self.current_user = None
-        self.charging_session = None
+        self.client_users = {}  # Mapeo: {client_id: username}
+        self.charging_sessions = {}  # Diccionario: {username: session_data}
         self.lock = threading.Lock()
 
 shared_state = SharedState()
@@ -69,6 +69,21 @@ class EV_DriverWS:
             user = db.authenticate_user(username, password)
             if user:
                 print(f"[DRIVER] ✅ User {username} authenticated successfully")
+                
+                # Verificar si tiene una sesión activa
+                active_session = db.get_active_session_for_user(user['id'])
+                session_data = None
+                if active_session:
+                    # Obtener datos del CP
+                    cp = db.get_charging_point_by_id(active_session['cp_id'])
+                    session_data = {
+                        'session_id': active_session['id'],
+                        'cp_id': active_session['cp_id'],
+                        'location': cp.get('location', 'Unknown') if cp else 'Unknown',
+                        'start_time': active_session['start_time']
+                    }
+                    print(f"[DRIVER] 🔄 User {username} has active session at {active_session['cp_id']}")
+                
                 return {
                     'success': True,
                     'user': {
@@ -77,7 +92,8 @@ class EV_DriverWS:
                         'email': user['email'],
                         'balance': user['balance'],
                         'role': user['role']
-                    }
+                    },
+                    'active_session': session_data
                 }
             else:
                 print(f"[DRIVER] ❌ Authentication failed for {username}")
@@ -93,6 +109,11 @@ class EV_DriverWS:
             user = db.get_user_by_username(username)
             if not user:
                 return {'success': False, 'message': 'User not found'}
+            
+            # Verificar si ya tiene una sesión activa
+            active_session = db.get_active_session_for_user(user['id'])
+            if active_session:
+                return {'success': False, 'message': 'You already have an active charging session'}
             
             # Verificar balance mínimo
             if user['balance'] < 5.0:
@@ -192,6 +213,121 @@ class EV_DriverWS:
             print(f"[DRIVER] ❌ Stop charging error: {e}")
             return {'success': False, 'message': str(e)}
 
+    def simulate_cp_error(self, cp_id, error_type='malfunction'):
+        """Simula un error en un punto de carga (solo para admin)"""
+        try:
+            # Verificar que el CP existe
+            cp = db.get_charging_point_by_id(cp_id)
+            if not cp:
+                return {'success': False, 'message': f'Charging point {cp_id} not found'}
+            
+            # Marcar el CP con error
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            
+            # Mapear el tipo de error al estado correcto
+            # Los estados válidos son: available, charging, fault, out_of_service, offline
+            if error_type == 'fault':
+                new_status = 'fault'
+            elif error_type == 'out_of_service':
+                new_status = 'out_of_service'
+            elif error_type == 'offline':
+                new_status = 'offline'
+            else:
+                new_status = error_type  # Usar el error_type directamente
+            
+            cursor.execute("""
+                UPDATE charging_points
+                SET status = ?
+                WHERE cp_id = ?
+            """, (new_status, cp_id))
+            
+            conn.commit()
+            conn.close()
+            
+            # Publicar evento en Kafka para que otros componentes se enteren
+            if self.producer:
+                event = {
+                    'message_id': generate_message_id(),
+                    'driver_id': self.driver_id,
+                    'action': 'cp_error_simulated',
+                    'cp_id': cp_id,
+                    'error_type': error_type,
+                    'new_status': new_status,
+                    'timestamp': current_timestamp()
+                }
+                self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=cp_id.encode())
+                self.producer.flush()
+            
+            print(f"[DRIVER] ⚠️ Admin simulated {error_type} on {cp_id}")
+            return {
+                'success': True,
+                'cp_id': cp_id,
+                'error_type': error_type,
+                'new_status': new_status
+            }
+            
+        except Exception as e:
+            print(f"[DRIVER] ❌ Simulate error failed: {e}")
+            return {'success': False, 'message': str(e)}
+
+    def fix_cp_error(self, cp_id):
+        """Corrige un error en un punto de carga (solo para admin)"""
+        try:
+            # Verificar que el CP existe
+            cp = db.get_charging_point_by_id(cp_id)
+            if not cp:
+                return {'success': False, 'message': f'Charging point {cp_id} not found'}
+            
+            # Marcar el CP como disponible
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE charging_points
+                SET status = 'available'
+                WHERE cp_id = ?
+            """, (cp_id,))
+            
+            conn.commit()
+            conn.close()
+            
+            # Publicar evento en Kafka para que otros componentes se enteren
+            if self.producer:
+                event = {
+                    'message_id': generate_message_id(),
+                    'driver_id': self.driver_id,
+                    'action': 'cp_error_fixed',
+                    'cp_id': cp_id,
+                    'new_status': 'available',
+                    'timestamp': current_timestamp()
+                }
+                self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=cp_id.encode())
+                self.producer.flush()
+            
+            print(f"[DRIVER] ✅ Admin fixed {cp_id}, now available")
+            return {
+                'success': True,
+                'cp_id': cp_id,
+                'new_status': 'available'
+            }
+            
+        except Exception as e:
+            print(f"[DRIVER] ❌ Fix error failed: {e}")
+            return {'success': False, 'message': str(e)}
+    
+    def get_all_charging_points_status(self):
+        """Obtiene el estado de todos los puntos de carga (para admin)"""
+        try:
+            cps = db.get_all_charging_points()
+            return {
+                'success': True,
+                'charging_points': cps
+            }
+        except Exception as e:
+            print(f"[DRIVER] ❌ Get CPs error: {e}")
+            return {'success': False, 'message': str(e)}
+
     def get_session_status(self, username):
         """Obtiene el estado de la sesión actual del usuario"""
         try:
@@ -231,14 +367,34 @@ async def websocket_handler(websocket, path):
                 )
                 
                 if result['success']:
-                    with shared_state.lock:
-                        shared_state.current_user = result['user']
+                    username = result['user']['username']
                     
-                    await websocket.send(json.dumps({
+                    # Si hay sesión activa, restaurarla en el shared_state
+                    if result.get('active_session'):
+                        session = result['active_session']
+                        cp = db.get_charging_point_by_id(session['cp_id'])
+                        with shared_state.lock:
+                            shared_state.charging_sessions[username] = {
+                                'username': username,
+                                'session_id': session['session_id'],
+                                'cp_id': session['cp_id'],
+                                'start_time': session['start_time'],
+                                'energy': 0.0,
+                                'cost': 0.0,
+                                'tariff': cp.get('tariff_per_kwh', 0.30) if cp else 0.30
+                            }
+                    
+                    response = {
                         'type': 'login_response',
                         'success': True,
                         'user': result['user']
-                    }))
+                    }
+                    
+                    # Incluir sesión activa si existe
+                    if result.get('active_session'):
+                        response['active_session'] = result['active_session']
+                    
+                    await websocket.send(json.dumps(response))
                 else:
                     await websocket.send(json.dumps({
                         'type': 'login_response',
@@ -253,7 +409,7 @@ async def websocket_handler(websocket, path):
                 
                 if result['success']:
                     with shared_state.lock:
-                        shared_state.charging_session = {
+                        shared_state.charging_sessions[username] = {
                             'username': username,
                             'session_id': result['session_id'],
                             'cp_id': result['cp_id'],
@@ -283,7 +439,9 @@ async def websocket_handler(websocket, path):
                 
                 if result['success']:
                     with shared_state.lock:
-                        shared_state.charging_session = None
+                        # Eliminar la sesión del usuario específico
+                        if username in shared_state.charging_sessions:
+                            del shared_state.charging_sessions[username]
                     
                     await websocket.send(json.dumps({
                         'type': 'charging_stopped',
@@ -295,6 +453,57 @@ async def websocket_handler(websocket, path):
                     await websocket.send(json.dumps({
                         'type': 'error',
                         'message': result.get('message', 'Failed to stop charging')
+                    }))
+            
+            elif msg_type == 'simulate_error':
+                # Simular error en CP (solo admin)
+                cp_id = data.get('cp_id')
+                error_type = data.get('error_type', 'malfunction')
+                result = driver_instance.simulate_cp_error(cp_id, error_type)
+                
+                if result['success']:
+                    await websocket.send(json.dumps({
+                        'type': 'error_simulated',
+                        'cp_id': result['cp_id'],
+                        'error_type': result['error_type'],
+                        'new_status': result['new_status']
+                    }))
+                else:
+                    await websocket.send(json.dumps({
+                        'type': 'error',
+                        'message': result.get('message', 'Failed to simulate error')
+                    }))
+            
+            elif msg_type == 'fix_error':
+                # Corregir error en CP (solo admin)
+                cp_id = data.get('cp_id')
+                result = driver_instance.fix_cp_error(cp_id)
+                
+                if result['success']:
+                    await websocket.send(json.dumps({
+                        'type': 'error_fixed',
+                        'cp_id': result['cp_id'],
+                        'new_status': result['new_status']
+                    }))
+                else:
+                    await websocket.send(json.dumps({
+                        'type': 'error',
+                        'message': result.get('message', 'Failed to fix error')
+                    }))
+            
+            elif msg_type == 'get_all_cps':
+                # Obtener todos los CPs (solo admin)
+                result = driver_instance.get_all_charging_points_status()
+                
+                if result['success']:
+                    await websocket.send(json.dumps({
+                        'type': 'all_cps_status',
+                        'charging_points': result['charging_points']
+                    }))
+                else:
+                    await websocket.send(json.dumps({
+                        'type': 'error',
+                        'message': result.get('message', 'Failed to get CPs')
                     }))
                     
     except websockets.exceptions.ConnectionClosed:
@@ -329,14 +538,34 @@ async def websocket_handler_http(request):
                         )
                         
                         if result['success']:
-                            with shared_state.lock:
-                                shared_state.current_user = result['user']
+                            username = result['user']['username']
                             
-                            await ws.send_str(json.dumps({
+                            # Si hay sesión activa, restaurarla en el shared_state
+                            if result.get('active_session'):
+                                session = result['active_session']
+                                cp = db.get_charging_point_by_id(session['cp_id'])
+                                with shared_state.lock:
+                                    shared_state.charging_sessions[username] = {
+                                        'username': username,
+                                        'session_id': session['session_id'],
+                                        'cp_id': session['cp_id'],
+                                        'start_time': session['start_time'],
+                                        'energy': 0.0,
+                                        'cost': 0.0,
+                                        'tariff': cp.get('tariff_per_kwh', 0.30) if cp else 0.30
+                                    }
+                            
+                            response = {
                                 'type': 'login_response',
                                 'success': True,
                                 'user': result['user']
-                            }))
+                            }
+                            
+                            # Incluir sesión activa si existe
+                            if result.get('active_session'):
+                                response['active_session'] = result['active_session']
+                            
+                            await ws.send_str(json.dumps(response))
                         else:
                             await ws.send_str(json.dumps({
                                 'type': 'login_response',
@@ -351,7 +580,7 @@ async def websocket_handler_http(request):
                         
                         if result['success']:
                             with shared_state.lock:
-                                shared_state.charging_session = {
+                                shared_state.charging_sessions[username] = {
                                     'username': username,
                                     'session_id': result['session_id'],
                                     'cp_id': result['cp_id'],
@@ -382,7 +611,9 @@ async def websocket_handler_http(request):
                         
                         if result['success']:
                             with shared_state.lock:
-                                shared_state.charging_session = None
+                                # Eliminar la sesión del usuario específico
+                                if username in shared_state.charging_sessions:
+                                    del shared_state.charging_sessions[username]
                             
                             await ws.send_str(json.dumps({
                                 'type': 'charging_stopped',
@@ -394,6 +625,57 @@ async def websocket_handler_http(request):
                             await ws.send_str(json.dumps({
                                 'type': 'error',
                                 'message': result.get('message', 'Failed to stop charging')
+                            }))
+                    
+                    elif msg_type == 'simulate_error':
+                        # Simular error en CP (solo admin)
+                        cp_id = data.get('cp_id')
+                        error_type = data.get('error_type', 'malfunction')
+                        result = driver_instance.simulate_cp_error(cp_id, error_type)
+                        
+                        if result['success']:
+                            await ws.send_str(json.dumps({
+                                'type': 'error_simulated',
+                                'cp_id': result['cp_id'],
+                                'error_type': result['error_type'],
+                                'new_status': result['new_status']
+                            }))
+                        else:
+                            await ws.send_str(json.dumps({
+                                'type': 'error',
+                                'message': result.get('message', 'Failed to simulate error')
+                            }))
+                    
+                    elif msg_type == 'fix_error':
+                        # Corregir error en CP (solo admin)
+                        cp_id = data.get('cp_id')
+                        result = driver_instance.fix_cp_error(cp_id)
+                        
+                        if result['success']:
+                            await ws.send_str(json.dumps({
+                                'type': 'error_fixed',
+                                'cp_id': result['cp_id'],
+                                'new_status': result['new_status']
+                            }))
+                        else:
+                            await ws.send_str(json.dumps({
+                                'type': 'error',
+                                'message': result.get('message', 'Failed to fix error')
+                            }))
+                    
+                    elif msg_type == 'get_all_cps':
+                        # Obtener todos los CPs (solo admin)
+                        result = driver_instance.get_all_charging_points_status()
+                        
+                        if result['success']:
+                            await ws.send_str(json.dumps({
+                                'type': 'all_cps_status',
+                                'charging_points': result['charging_points']
+                            }))
+                        else:
+                            await ws.send_str(json.dumps({
+                                'type': 'error',
+                                'message': result.get('message', 'Failed to get CPs')
                             }))
                             
                 except json.JSONDecodeError:
@@ -436,19 +718,21 @@ async def broadcast_updates():
         await asyncio.sleep(2)
         
         with shared_state.lock:
-            if shared_state.charging_session:
+            # Actualizar TODAS las sesiones activas
+            for username, session in list(shared_state.charging_sessions.items()):
                 # Simular incremento de energía basado en tiempo transcurrido
-                elapsed = time.time() - shared_state.charging_session['start_time']
+                elapsed = time.time() - session['start_time']
                 # Simular carga a 7.4 kW (carga lenta típica)
-                shared_state.charging_session['energy'] = (elapsed / 3600) * 7.4  # kWh
-                shared_state.charging_session['cost'] = shared_state.charging_session['energy'] * shared_state.charging_session['tariff']
+                session['energy'] = (elapsed / 3600) * 7.4  # kWh
+                session['cost'] = session['energy'] * session['tariff']
                 
                 # Broadcast a todos los clientes conectados
                 if shared_state.connected_clients:
                     message = json.dumps({
                         'type': 'charging_update',
-                        'energy': round(shared_state.charging_session['energy'], 2),
-                        'cost': round(shared_state.charging_session['cost'], 2)
+                        'username': username,  # Incluir username para que el cliente filtre
+                        'energy': round(session['energy'], 2),
+                        'cost': round(session['cost'], 2)
                     })
                     
                     disconnected_clients = set()

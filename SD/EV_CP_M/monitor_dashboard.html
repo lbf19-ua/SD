@@ -136,20 +136,24 @@
         }
 
         .cp-card.status-available::before {
-            background: #28a745;
+            background: #28a745; /* Verde - Activado */
         }
 
         .cp-card.status-charging::before {
-            background: #ffc107;
+            background: #28a745; /* Verde - Suministrando */
         }
 
         .cp-card.status-offline::before {
-            background: #dc3545;
+            background: #6c757d; /* Gris - Desconectado */
         }
 
         .cp-card.status-fault::before {
-            background: #dc3545;
+            background: #dc3545; /* Rojo - Averiado */
             animation: blink 1s infinite;
+        }
+
+        .cp-card.status-out_of_service::before {
+            background: #fd7e14; /* Naranja - Parado/Fuera de servicio */
         }
 
         @keyframes blink {
@@ -186,18 +190,23 @@
         }
 
         .status-charging .cp-status-badge {
-            background: #fff3cd;
-            color: #856404;
+            background: #d4edda;
+            color: #155724;
         }
 
         .status-offline .cp-status-badge {
-            background: #f8d7da;
-            color: #721c24;
+            background: #e2e3e5;
+            color: #383d41;
         }
 
         .status-fault .cp-status-badge {
             background: #f8d7da;
             color: #721c24;
+        }
+
+        .status-out_of_service .cp-status-badge {
+            background: #ffe5cc;
+            color: #cc5200;
         }
 
         .cp-info {
@@ -485,27 +494,64 @@
             });
         }
 
+        // Normaliza estados legacy a los 4 oficiales
+        function normalizeStatus(status) {
+            switch ((status || '').toLowerCase()) {
+                case 'unavailable':
+                    return 'offline';
+                case 'error':
+                    return 'fault';
+                case 'maintenance':
+                case 'out_of_order':
+                    return 'out_of_service';
+                case 'charging':
+                case 'available':
+                case 'fault':
+                case 'out_of_service':
+                case 'offline':
+                    return status;
+                default:
+                    return status || 'offline';
+            }
+        }
+
         function createCPCard(cp) {
             const card = document.createElement('div');
-            card.className = `cp-card status-${cp.status}`;
+            const normStatus = normalizeStatus(cp.status);
+            card.className = `cp-card status-${normStatus}`;
             card.id = `cp-${cp.cp_id}`;
 
+                // Estados según especificación página 4:
+                // Verde: disponible/suministrando (conectado y funcionando)
+                // Gris: desconectado (no conectado físicamente)
+                // Rojo: averiado (conectado pero con error, no usable)
+                // Naranja: fuera de servicio (Central indica no disponible)
+            
             let statusIcon = '🟢';
-            let statusText = 'Disponible';
+                let statusText = 'Disponible';
             let dotColor = 'green';
 
-            if (cp.status === 'charging') {
-                statusIcon = '🟡';
-                statusText = 'Cargando';
-                dotColor = 'yellow';
-            } else if (cp.status === 'offline') {
-                statusIcon = '🔴';
-                statusText = 'Fuera de línea';
-                dotColor = 'red';
-            } else if (cp.status === 'fault') {
+                if (normStatus === 'available' || normStatus === 'charging') {
+                    statusIcon = normStatus === 'charging' ? '⚡' : '🟢';
+                    statusText = normStatus === 'charging' ? 'Suministrando' : 'Disponible';
+                dotColor = 'green';
+                } else if (normStatus === 'offline') {
+                statusIcon = '⚫';
+                statusText = 'Desconectado';
+                dotColor = 'gray';
+                } else if (normStatus === 'fault') {
                 statusIcon = '❌';
-                statusText = 'Fallo';
+                statusText = 'Averiado';
                 dotColor = 'red';
+                } else if (normStatus === 'out_of_service') {
+                statusIcon = '🔶';
+                    statusText = 'Fuera de Servicio';
+                dotColor = 'orange';
+            } else {
+                    // Estado desconocido - mostrar en gris
+                statusIcon = '⚫';
+                    statusText = normStatus || 'Desconocido';
+                dotColor = 'gray';
             }
 
             const currentPower = cp.current_power || 0;
