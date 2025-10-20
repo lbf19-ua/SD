@@ -1,4 +1,5 @@
 import socket
+import threading
 import time
 import random
 import sys
@@ -7,9 +8,24 @@ import threading
 import select
 # Kafka imports
 from kafka import KafkaProducer
-import json
 
-# Añadir el directorio padre al path para importar network_config
+# -----------------------------------------------------------------------------
+# Carga de configuración
+# -----------------------------------------------------------------------------
+# Estructura esperada en network_config.py:
+# ENGINE_CONFIG = {
+#     "central_ip": "127.0.0.1",
+#     "central_port": 5000,
+#     "engine_id": "CP01",
+#     "engine_ip": "0.0.0.0",
+#     "engine_port": 5100,
+#     "location": "Alicante-01",
+#     "price_eur_kwh": 0.35,
+#     "kafka_broker": "localhost:9092",
+#     "kafka_topic_engine": "engine-events"
+# }
+# -----------------------------------------------------------------------------
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from network_config import ENGINE_CONFIG
 from event_utils import generate_message_id, current_timestamp
