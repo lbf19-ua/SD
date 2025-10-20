@@ -2,13 +2,13 @@
 # Modifica estas IPs según tu red
 
 # PC1 - EV_Driver (ejemplo)
-PC1_IP = "192.168.1.100"
+PC1_IP = "172.21.0.1"
 
 # PC2 - EV_Central (este PC actual)  
-PC2_IP = "172.27.135.138"  # IP actual de este PC
+PC2_IP = "172.21.0.1"  # IP actual de este PC
 
 # PC3 - EV_CP (Monitor & Engine)
-PC3_IP = "192.168.1.101"
+PC3_IP = "172.21.0.1"
 
 # Puerto del servidor central
 CENTRAL_PORT = 5000

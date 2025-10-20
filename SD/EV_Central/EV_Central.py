@@ -81,6 +81,17 @@ class EV_Central:
                     response = "Central: Monitor connection acknowledged"
                     self.connected_clients[addr] = "Monitor"
                 elif "EV_CP_E" in message:
+                    # Registrar punto de carga cuando se conecta
+                    # Formato esperado: "EV_CP_E CP_ID location [cid=...]"
+                    try:
+                        parts = message.split()
+                        if len(parts) >= 3:
+                            cp_id = parts[1]
+                            location = " ".join(parts[2:]).split("[cid=")[0].strip()
+                            db.register_or_update_charging_point(cp_id, location, status='available')
+                            print(f"[CENTRAL] Registered/updated charging point {cp_id} at {location}")
+                    except Exception as e:
+                        print(f"[CENTRAL] Error registering CP: {e}")
                     response = "Central: Engine connection acknowledged"
                     self.connected_clients[addr] = "Engine"
                 else:

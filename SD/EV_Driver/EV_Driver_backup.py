@@ -2,38 +2,18 @@ import socket
 import time
 import sys
 import os
-import asyncio
-import json
-import threading
-from pathlib import Path
-
-# WebSocket y HTTP server
-import websockets
-from aiohttp import web
-
 # Kafka imports
 from kafka import KafkaProducer
+import json
 
 # Añadir el directorio padre al path para importar network_config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from network_config import DRIVER_CONFIG
 from event_utils import generate_message_id, current_timestamp
 
-# Configuración
-KAFKA_BROKER = 'localhost:9092'
+# Configuración de Kafka
+KAFKA_BROKER = 'localhost:9092'  # Cambia si tu broker está en otra IP
 KAFKA_TOPIC_PRODUCE = 'driver-events'
-WS_PORT = 8001
-HTTP_PORT = 8001
-
-# Estado global compartido entre threads
-class SharedState:
-    def __init__(self):
-        self.connected_clients = set()
-        self.current_user = None
-        self.charging_session = None
-        self.lock = threading.Lock()
-
-shared_state = SharedState()
 
 class EV_Driver:
     def __init__(self, central_ip='localhost', central_port=5000, driver_id="Driver_001", 
