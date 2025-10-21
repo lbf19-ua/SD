@@ -1,12 +1,13 @@
 """
 Database module for EV Charging System
-SQLite database with users, charging points, sessions, and event logs
+SQLite database with users, charging points, sesiones, and event logs
 """
 import sqlite3
 import hashlib
 from pathlib import Path
 from datetime import datetime
 import json
+import sys
 
 # Ruta de la base de datos (en la carpeta SD)
 DB_PATH = Path(__file__).parent / "ev_charging.db"
@@ -29,10 +30,10 @@ def init_database():
     
     # Tabla de usuarios (drivers)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
+        CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
+            nombre TEXT UNIQUE NOT NULL,
+            contraseña TEXT NOT NULL,
             email TEXT,
             role TEXT DEFAULT 'driver',
             balance REAL DEFAULT 100.0,
@@ -46,10 +47,10 @@ def init_database():
         CREATE TABLE IF NOT EXISTS charging_points (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cp_id TEXT UNIQUE NOT NULL,
-            location TEXT,
-            status TEXT DEFAULT 'available',
-            max_power_kw REAL DEFAULT 22.0,
-            tariff_per_kwh REAL DEFAULT 0.30,
+            localizacion TEXT,
+            estado TEXT DEFAULT 'available',
+            max_kw REAL DEFAULT 22.0,
+            tarifa_kwh REAL DEFAULT 0.30,
             last_maintenance REAL,
             active INTEGER DEFAULT 1
         )
@@ -57,18 +58,18 @@ def init_database():
     
     # Tabla de sesiones de carga
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS charging_sessions (
+        CREATE TABLE IF NOT EXISTS charging_sesiones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             cp_id TEXT NOT NULL,
-            correlation_id TEXT,
+            correlacion_id TEXT,
             start_time REAL NOT NULL,
             end_time REAL,
-            energy_kwh REAL DEFAULT 0.0,
-            cost REAL DEFAULT 0.0,
-            status TEXT DEFAULT 'active',
-            payment_status TEXT DEFAULT 'pending',
-            FOREIGN KEY(user_id) REFERENCES users(id),
+            energia_kwh REAL DEFAULT 0.0,
+            coste REAL DEFAULT 0.0,
+            estado TEXT DEFAULT 'active',
+            pago_estado TEXT DEFAULT 'pending',
+            FOREIGN KEY(user_id) REFERENCES usuarios(id),
             FOREIGN KEY(cp_id) REFERENCES charging_points(cp_id)
         )
     """)
@@ -77,27 +78,27 @@ def init_database():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS event_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            correlation_id TEXT,
-            message_id TEXT,
-            event_type TEXT,
+            correlacion_id TEXT,
+            mensaje_id TEXT,
+            tipo_evento TEXT,
             component TEXT,
-            details TEXT,
+            detalles TEXT,
             timestamp REAL DEFAULT (julianday('now'))
         )
     """)
     
     # Índices para mejorar rendimiento
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON charging_sessions(user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_cp ON charging_sessions(cp_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON charging_sessions(status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_correlation ON event_log(correlation_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_user ON charging_sesiones(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_cp ON charging_sesiones(cp_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_estado ON charging_sesiones(estado)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_correlacion ON event_log(correlacion_id)")
     
     conn.commit()
     conn.close()
     print(f"[DB] Database initialized at {DB_PATH}")
 
 
-def hash_password(password: str) -> str:
+def constraseña(password: str) -> str:
     """Genera hash SHA256 de una contraseña"""
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -127,12 +128,12 @@ def seed_test_data():
         ('lbf19', 'lbf19', 'lbf19@ev.com', 'admin', 0.0),
     ]
     
-    for username, password, email, role, balance in test_users:
+    for nombre, password, email, role, balance in test_users:
         try:
             cursor.execute("""
-                INSERT INTO users (username, password_hash, email, role, balance)
+                INSERT INTO usuarios (nombre, contraseña, email, role, balance)
                 VALUES (?, ?, ?, ?, ?)
-            """, (username, hash_password(password), email, role, balance))
+            """, (nombre, constraseña(password), email, role, balance))
         except sqlite3.IntegrityError:
             pass  # Usuario ya existe
     
@@ -150,12 +151,12 @@ def seed_test_data():
         ('CP_010', 'Parking Residencial Sur', 'available', 11.0, 0.26),
     ]
     
-    for cp_id, location, status, max_power, tariff in test_cps:
+    for cp_id, localizacion, estado, max_power, tariff in test_cps:
         try:
             cursor.execute("""
-                INSERT INTO charging_points (cp_id, location, status, max_power_kw, tariff_per_kwh)
+                INSERT INTO charging_points (cp_id, localizacion, estado, max_kw, tarifa_kwh)
                 VALUES (?, ?, ?, ?, ?)
-            """, (cp_id, location, status, max_power, tariff))
+            """, (cp_id, localizacion, estado, max_power, tariff))
         except sqlite3.IntegrityError:
             pass  # CP ya existe
     
@@ -166,70 +167,61 @@ def seed_test_data():
     # Generar sesiones completadas de los últimos 30 días
     base_time = datetime.now().timestamp()
     
-    test_sessions = [
-        # Sesiones de driver1
+    test_sesiones = [
         (1, 'CP_001', base_time - 86400*5, base_time - 86400*5 + 3600*2, 25.5, 'completed'),
         (1, 'CP_003', base_time - 86400*3, base_time - 86400*3 + 3600*1.5, 12.8, 'completed'),
         (1, 'CP_002', base_time - 86400*1, base_time - 86400*1 + 3600*3, 45.2, 'completed'),
         
-        # Sesiones de driver2
         (2, 'CP_001', base_time - 86400*7, base_time - 86400*7 + 3600*2.5, 30.0, 'completed'),
         (2, 'CP_004', base_time - 86400*4, base_time - 86400*4 + 3600*1, 15.5, 'completed'),
         
-        # Sesiones de maria_garcia
         (6, 'CP_005', base_time - 86400*10, base_time - 86400*10 + 3600*4, 18.5, 'completed'),
         (6, 'CP_001', base_time - 86400*6, base_time - 86400*6 + 3600*2, 22.0, 'completed'),
         (6, 'CP_003', base_time - 86400*2, base_time - 86400*2 + 3600*1, 10.2, 'completed'),
         
-        # Sesiones de juan_lopez
         (7, 'CP_002', base_time - 86400*8, base_time - 86400*8 + 3600*3, 52.3, 'completed'),
         (7, 'CP_006', base_time - 86400*5, base_time - 86400*5 + 3600*2, 35.8, 'completed'),
         
-        # Sesiones de ana_martinez
         (8, 'CP_007', base_time - 86400*12, base_time - 86400*12 + 3600*1.5, 28.0, 'completed'),
         (8, 'CP_008', base_time - 86400*9, base_time - 86400*9 + 3600*0.5, 75.0, 'completed'),
         (8, 'CP_001', base_time - 86400*4, base_time - 86400*4 + 3600*2, 24.5, 'completed'),
         
-        # Sesiones de pedro_sanchez
         (9, 'CP_003', base_time - 86400*15, base_time - 86400*15 + 3600*3, 16.2, 'completed'),
         (9, 'CP_005', base_time - 86400*11, base_time - 86400*11 + 3600*4, 19.8, 'completed'),
         
-        # Sesiones de laura_fernandez
         (10, 'CP_009', base_time - 86400*20, base_time - 86400*20 + 3600*1, 60.0, 'completed'),
         (10, 'CP_006', base_time - 86400*14, base_time - 86400*14 + 3600*2.5, 42.5, 'completed'),
         (10, 'CP_002', base_time - 86400*7, base_time - 86400*7 + 3600*3.5, 55.0, 'completed'),
     ]
     
-    for user_id, cp_id, start_time, end_time, energy_kwh, status in test_sessions:
+    for user_id, cp_id, start_time, end_time, energia_kwh, estado in test_sesiones:
         try:
-            # Obtener tarifa del CP
-            cursor.execute("SELECT tariff_per_kwh FROM charging_points WHERE cp_id = ?", (cp_id,))
+            cursor.execute("SELECT tarifa_kwh FROM charging_points WHERE cp_id = ?", (cp_id,))
             result = cursor.fetchone()
-            tariff = result['tariff_per_kwh'] if result else 0.30
-            cost = energy_kwh * tariff
+            tariff = result['tarifa_kwh'] if result else 0.30
+            coste = energia_kwh * tariff
             
             cursor.execute("""
-                INSERT INTO charging_sessions (user_id, cp_id, start_time, end_time, energy_kwh, cost, status, payment_status)
+                INSERT INTO charging_sesiones (user_id, cp_id, start_time, end_time, energia_kwh, coste, estado, pago_estado)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 'completed')
-            """, (user_id, cp_id, start_time, end_time, energy_kwh, cost, status))
+            """, (user_id, cp_id, start_time, end_time, energia_kwh, coste, estado))
         except Exception as e:
-            pass  # Ignorar errores en datos de prueba
+            pass  
     
-    # Eventos de log de prueba
     test_events = [
-        ('corr_001', 'msg_001', 'AUTH', 'EV_Driver', '{"username": "driver1", "result": "success"}'),
+        ('corr_001', 'msg_001', 'AUTH', 'EV_Driver', '{"nombre": "driver1", "result": "success"}'),
         ('corr_002', 'msg_002', 'REQUEST_CHARGE', 'EV_Driver', '{"user": "driver1", "cp": "CP_001"}'),
-        ('corr_003', 'msg_003', 'CHARGE_START', 'EV_CP_E', '{"cp_id": "CP_001", "session": 1}'),
-        ('corr_004', 'msg_004', 'CHARGE_COMPLETE', 'EV_Central', '{"session": 1, "energy": 25.5}'),
-        ('corr_005', 'msg_005', 'AUTH', 'EV_Driver', '{"username": "maria_garcia", "result": "success"}'),
+        ('corr_003', 'msg_003', 'CHARGE_START', 'EV_CP_E', '{"cp_id": "CP_001", "sesion": 1}'),
+        ('corr_004', 'msg_004', 'CHARGE_COMPLETE', 'EV_Central', '{"sesion": 1, "energia": 25.5}'),
+        ('corr_005', 'msg_005', 'AUTH', 'EV_Driver', '{"nombre": "maria_garcia", "result": "success"}'),
     ]
     
-    for corr_id, msg_id, event_type, component, details in test_events:
+    for corr_id, msg_id, tipo_evento, component, detalles in test_events:
         try:
             cursor.execute("""
-                INSERT INTO event_log (correlation_id, message_id, event_type, component, details)
+                INSERT INTO event_log (correlacion_id, mensaje_id, tipo_evento, component, detalles)
                 VALUES (?, ?, ?, ?, ?)
-            """, (corr_id, msg_id, event_type, component, details))
+            """, (corr_id, msg_id, tipo_evento, component, detalles))
         except Exception:
             pass
     
@@ -237,10 +229,7 @@ def seed_test_data():
     conn.close()
     print(f"[DB] Test data seeded successfully with extended data")
 
-
-# === Funciones de autenticación ===
-
-def authenticate_user(username: str, password: str) -> dict | None:
+def autentificación_usuario(nombre: str, password: str) -> dict | None:
     """
     Autentica un usuario.
     Retorna dict con datos del usuario si es válido, None si no.
@@ -248,12 +237,12 @@ def authenticate_user(username: str, password: str) -> dict | None:
     conn = get_connection()
     cursor = conn.cursor()
     
-    password_hash = hash_password(password)
+    contraseña = constraseña(password)
     cursor.execute("""
-        SELECT id, username, email, role, balance, active
-        FROM users
-        WHERE username = ? AND password_hash = ? AND active = 1
-    """, (username, password_hash))
+        SELECT id, nombre, email, role, balance, active
+        FROM usuarios
+        WHERE nombre = ? AND contraseña = ? AND active = 1
+    """, (nombre, contraseña))
     
     row = cursor.fetchone()
     conn.close()
@@ -261,7 +250,7 @@ def authenticate_user(username: str, password: str) -> dict | None:
     if row:
         return {
             'id': row['id'],
-            'username': row['username'],
+            'nombre': row['nombre'],
             'email': row['email'],
             'role': row['role'],
             'balance': row['balance'],
@@ -276,8 +265,8 @@ def get_user_by_id(user_id: int) -> dict | None:
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT id, username, email, role, balance, active
-        FROM users
+        SELECT id, nombre, email, role, balance, active
+        FROM usuarios
         WHERE id = ?
     """, (user_id,))
     
@@ -289,16 +278,16 @@ def get_user_by_id(user_id: int) -> dict | None:
     return None
 
 
-def get_user_by_username(username: str) -> dict | None:
-    """Obtiene datos de un usuario por username"""
+def get_user_by_nombre(nombre: str) -> dict | None:
+    """Obtiene datos de un usuario por nombre"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT id, username, email, role, balance, active
-        FROM users
-        WHERE username = ?
-    """, (username,))
+        SELECT id, nombre, email, role, balance, active
+        FROM usuarios
+        WHERE nombre = ?
+    """, (nombre,))
     
     row = cursor.fetchone()
     conn.close()
@@ -307,16 +296,13 @@ def get_user_by_username(username: str) -> dict | None:
         return dict(row)
     return None
 
-
-# === Funciones de puntos de carga ===
-
 def get_charging_point(cp_id: str) -> dict | None:
     """Obtiene información de un punto de carga"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT id, cp_id, location, status, max_power_kw, tariff_per_kwh, active
+        SELECT id, cp_id, localizacion, estado, max_kw, tarifa_kwh, active
         FROM charging_points
         WHERE cp_id = ?
     """, (cp_id,))
@@ -329,61 +315,57 @@ def get_charging_point(cp_id: str) -> dict | None:
     return None
 
 
-def update_cp_status(cp_id: str, status: str):
+def update_cp_estado(cp_id: str, estado: str):
     """Actualiza el estado de un punto de carga"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
         UPDATE charging_points
-        SET status = ?
+        SET estado = ?
         WHERE cp_id = ?
-    """, (status, cp_id))
+    """, (estado, cp_id))
     
     conn.commit()
     conn.close()
 
 
-def register_or_update_charging_point(cp_id: str, location: str, max_power_kw: float = 22.0, 
-                                     tariff_per_kwh: float = 0.30, status: str = 'available'):
+def register_or_update_charging_point(cp_id: str, localizacion: str, max_kw: float = 22.0, 
+                                     tarifa_kwh: float = 0.30, estado: str = 'available'):
     """
     Registra un nuevo punto de carga o actualiza uno existente.
     Útil cuando los CP se conectan dinámicamente al sistema.
     """
     conn = get_connection()
     cursor = conn.cursor()
-    
-    # Verificar si ya existe
     cursor.execute("SELECT id FROM charging_points WHERE cp_id = ?", (cp_id,))
     existing = cursor.fetchone()
     
     if existing:
-        # Actualizar estado
         cursor.execute("""
             UPDATE charging_points
-            SET status = ?, location = ?, max_power_kw = ?, tariff_per_kwh = ?
+            SET estado = ?, localizacion = ?, max_kw = ?, tarifa_kwh = ?
             WHERE cp_id = ?
-        """, (status, location, max_power_kw, tariff_per_kwh, cp_id))
+        """, (estado, localizacion, max_kw, tarifa_kwh, cp_id))
     else:
-        # Insertar nuevo
         cursor.execute("""
-            INSERT INTO charging_points (cp_id, location, status, max_power_kw, tariff_per_kwh)
+            INSERT INTO charging_points (cp_id, localizacion, estado, max_kw, tarifa_kwh)
             VALUES (?, ?, ?, ?, ?)
-        """, (cp_id, location, status, max_power_kw, tariff_per_kwh))
+        """, (cp_id, localizacion, estado, max_kw, tarifa_kwh))
     
     conn.commit()
     conn.close()
 
 
-def get_available_charging_points():
+def disponibilidad_charging_points():
     """Obtiene lista de puntos de carga disponibles"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT cp_id, location, max_power_kw, tariff_per_kwh
+        SELECT cp_id, localizacion, max_kw, tarifa_kwh
         FROM charging_points
-        WHERE status = 'available' AND active = 1
+        WHERE estado = 'available' AND active = 1
     """)
     
     rows = cursor.fetchall()
@@ -398,7 +380,7 @@ def get_all_charging_points():
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT cp_id, location, status, max_power_kw, tariff_per_kwh, active
+        SELECT cp_id, localizacion, estado, max_kw, tarifa_kwh, active
         FROM charging_points
     """)
     
@@ -408,9 +390,7 @@ def get_all_charging_points():
     return [dict(row) for row in rows]
 
 
-# === Funciones de sesiones de carga ===
-
-def create_charging_session(user_id: int, cp_id: str, correlation_id: str = None) -> int:
+def create_charging_sesion(user_id: int, cp_id: str, correlacion_id: str = None) -> int:
     """
     Crea una nueva sesión de carga.
     Retorna el ID de la sesión creada.
@@ -421,95 +401,89 @@ def create_charging_session(user_id: int, cp_id: str, correlation_id: str = None
     start_time = datetime.now().timestamp()
     
     cursor.execute("""
-        INSERT INTO charging_sessions (user_id, cp_id, correlation_id, start_time, status)
+        INSERT INTO charging_sesiones (user_id, cp_id, correlacion_id, start_time, estado)
         VALUES (?, ?, ?, ?, 'active')
-    """, (user_id, cp_id, correlation_id, start_time))
+    """, (user_id, cp_id, correlacion_id, start_time))
     
-    session_id = cursor.lastrowid
+    sesion_id = cursor.lastrowid
     
-    # Marcar el CP como ocupado
     cursor.execute("""
         UPDATE charging_points
-        SET status = 'charging'
+        SET estado = 'charging'
         WHERE cp_id = ?
     """, (cp_id,))
     
     conn.commit()
     conn.close()
     
-    return session_id
+    return sesion_id
 
 
-def end_charging_session(session_id: int, energy_kwh: float) -> dict:
+def end_charging_sesion(sesion_id: int, energia_kwh: float) -> dict:
     """
     Finaliza una sesión de carga, calcula el costo y actualiza el balance del usuario.
-    Retorna dict con session_id, cost, y updated_balance.
+    Retorna dict con sesion_id, coste, y updated_balance.
     """
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Obtener datos de la sesión
     cursor.execute("""
-        SELECT s.id, s.user_id, s.cp_id, s.start_time, cp.tariff_per_kwh
-        FROM charging_sessions s
+        SELECT s.id, s.user_id, s.cp_id, s.start_time, cp.tarifa_kwh
+        FROM charging_sesiones s
         JOIN charging_points cp ON s.cp_id = cp.cp_id
-        WHERE s.id = ? AND s.status = 'active'
-    """, (session_id,))
+        WHERE s.id = ? AND s.estado = 'active'
+    """, (sesion_id,))
     
     row = cursor.fetchone()
     if not row:
         conn.close()
         return None
     
-    session = dict(row)
+    sesion = dict(row)
     end_time = datetime.now().timestamp()
-    cost = energy_kwh * session['tariff_per_kwh']
+    coste = energia_kwh * sesion['tarifa_kwh']
     
-    # Actualizar sesión
     cursor.execute("""
-        UPDATE charging_sessions
-        SET end_time = ?, energy_kwh = ?, cost = ?, status = 'completed'
+        UPDATE charging_sesiones
+        SET end_time = ?, energia_kwh = ?, coste = ?, estado = 'completed'
         WHERE id = ?
-    """, (end_time, energy_kwh, cost, session_id))
+    """, (end_time, energia_kwh, coste, sesion_id))
     
-    # Descontar del balance del usuario
     cursor.execute("""
-        UPDATE users
+        UPDATE usuarios
         SET balance = balance - ?
         WHERE id = ?
-    """, (cost, session['user_id']))
+    """, (coste, sesion['user_id']))
     
-    # Liberar el punto de carga
     cursor.execute("""
         UPDATE charging_points
-        SET status = 'available'
+        SET estado = 'available'
         WHERE cp_id = ?
-    """, (session['cp_id'],))
+    """, (sesion['cp_id'],))
     
-    # Obtener balance actualizado
-    cursor.execute("SELECT balance FROM users WHERE id = ?", (session['user_id'],))
+    cursor.execute("SELECT balance FROM usuarios WHERE id = ?", (sesion['user_id'],))
     new_balance = cursor.fetchone()['balance']
     
     conn.commit()
     conn.close()
     
     return {
-        'session_id': session_id,
-        'cost': cost,
-        'energy_kwh': energy_kwh,
+        'sesion_id': sesion_id,
+        'coste': coste,
+        'energia_kwh': energia_kwh,
         'updated_balance': new_balance
     }
 
 
-def get_active_session_for_user(user_id: int) -> dict | None:
+def get_active_sesion_for_user(user_id: int) -> dict | None:
     """Obtiene la sesión activa de un usuario, si existe"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT id, user_id, cp_id, correlation_id, start_time, status
-        FROM charging_sessions
-        WHERE user_id = ? AND status = 'active'
+        SELECT id, user_id, cp_id, correlacion_id, start_time, estado
+        FROM charging_sesiones
+        WHERE user_id = ? AND estado = 'active'
         ORDER BY start_time DESC
         LIMIT 1
     """, (user_id,))
@@ -522,14 +496,14 @@ def get_active_session_for_user(user_id: int) -> dict | None:
     return None
 
 
-def get_user_sessions(user_id: int, limit: int = 10):
+def get_user_sesiones(user_id: int, limit: int = 10):
     """Obtiene el historial de sesiones de un usuario"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT id, cp_id, start_time, end_time, energy_kwh, cost, status
-        FROM charging_sessions
+        SELECT id, cp_id, start_time, end_time, energia_kwh, coste, estado
+        FROM charging_sesiones
         WHERE user_id = ?
         ORDER BY start_time DESC
         LIMIT ?
@@ -540,104 +514,84 @@ def get_user_sessions(user_id: int, limit: int = 10):
     
     return [dict(row) for row in rows]
 
-
-# === Funciones de log de eventos ===
-
-def log_event(correlation_id: str, message_id: str, event_type: str, 
-              component: str, details: dict = None):
+def log_event(correlacion_id: str, mensaje_id: str, tipo_evento: str, 
+              component: str, detalles: dict = None):
     """Registra un evento en el log de auditoría"""
     conn = get_connection()
     cursor = conn.cursor()
     
-    details_json = json.dumps(details) if details else None
+    detalles_json = json.dumps(detalles) if detalles else None
     
     cursor.execute("""
-        INSERT INTO event_log (correlation_id, message_id, event_type, component, details)
+        INSERT INTO event_log (correlacion_id, mensaje_id, tipo_evento, component, detalles)
         VALUES (?, ?, ?, ?, ?)
-    """, (correlation_id, message_id, event_type, component, details_json))
+    """, (correlacion_id, mensaje_id, tipo_evento, component, detalles_json))
     
     conn.commit()
     conn.close()
 
 
-if __name__ == "__main__":
-    print("=== Inicializando base de datos EV Charging ===")
-    init_database()
-    seed_test_data()
-    
-    print("\n=== Usuarios de prueba ===")
-    print("username: driver1, password: pass123, balance: 150.0")
-    print("username: driver2, password: pass456, balance: 200.0")
-    print("username: admin, password: admin123")
-    
-    print("\n=== Puntos de carga disponibles ===")
-    cps = get_available_charging_points()
-    for cp in cps:
-        print(f"  {cp['cp_id']} - {cp['location']} - {cp['max_power_kw']}kW - €{cp['tariff_per_kwh']}/kWh")
-    
-    print(f"\n✅ Base de datos lista en: {DB_PATH}")
 
 
 def get_all_users():
     """Obtiene todos los usuarios de la base de datos"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users")
+    cursor.execute("SELECT * FROM usuarios")
     rows = cursor.fetchall()
     conn.close()
     
-    users = []
+    usuarios = []
     for row in rows:
-        users.append({
+        usuarios.append({
             'id': row['id'],
-            'username': row['username'],
+            'nombre': row['nombre'],
             'email': row['email'],
             'role': row['role'],
             'balance': row['balance'],
             'is_active': bool(row['active']),
             'created_at': row['created_at']
         })
-    return users
+    return usuarios
 
 
-def get_active_sessions():
+def get_sesiones_actividad():
     """Obtiene todas las sesiones activas (sin end_time)"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT s.*, u.username 
-        FROM charging_sessions s
-        JOIN users u ON s.user_id = u.id
+        SELECT s.*, u.nombre 
+        FROM charging_sesiones s
+        JOIN usuarios u ON s.user_id = u.id
         WHERE s.end_time IS NULL
         ORDER BY s.start_time DESC
     """)
     rows = cursor.fetchall()
     conn.close()
     
-    sessions = []
+    sesiones = []
     for row in rows:
-        sessions.append({
+        sesiones.append({
             'id': row['id'],
             'user_id': row['user_id'],
-            'username': row['username'],
+            'nombre': row['nombre'],
             'cp_id': row['cp_id'],
             'start_time': row['start_time'],
-            'correlation_id': row['correlation_id']
+            'correlacion_id': row['correlacion_id']
         })
-    return sessions
+    return sesiones
 
 
-def get_sessions_by_date(date):
+def get_sesiones_by_date(date):
     """Obtiene todas las sesiones completadas en una fecha específica"""
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Convertir date a timestamps (inicio y fin del día)
     start_of_day = datetime.combine(date, datetime.min.time()).timestamp()
     end_of_day = datetime.combine(date, datetime.max.time()).timestamp()
     
     cursor.execute("""
-        SELECT * FROM charging_sessions
+        SELECT * FROM charging_sesiones
         WHERE start_time >= ? AND start_time <= ?
         AND end_time IS NOT NULL
     """, (start_of_day, end_of_day,))
@@ -645,18 +599,18 @@ def get_sessions_by_date(date):
     rows = cursor.fetchall()
     conn.close()
     
-    sessions = []
+    sesiones = []
     for row in rows:
-        sessions.append({
+        sesiones.append({
             'id': row['id'],
             'user_id': row['user_id'],
             'cp_id': row['cp_id'],
             'start_time': row['start_time'],
             'end_time': row['end_time'],
-            'energy_kwh': row['energy_kwh'],
-            'total_cost': row['cost']  # Mapear 'cost' a 'total_cost'
+            'energia_kwh': row['energia_kwh'],
+            'total_coste': row['coste'] 
         })
-    return sessions
+    return sesiones
 
 
 def get_charging_point_by_id(cp_id: str):
@@ -671,9 +625,311 @@ def get_charging_point_by_id(cp_id: str):
         return {
             'id': row['id'],
             'cp_id': row['cp_id'],
-            'location': row['location'],
-            'status': row['status'],
-            'power_output': row['max_power_kw'],
-            'tariff': row['tariff_per_kwh']
+            'localizacion': row['localizacion'],
+            'estado': row['estado'],
+            'power_output': row['max_kw'],
+            'tariff': row['tarifa_kwh']
         }
     return None
+
+#!/usr/bin/env python3
+"""
+Script para consultar y visualizar datos de la base de datos EV Charging System
+"""
+
+def print_separator(char="=", length=80):
+    print(char * length)
+
+def print_header(title):
+    print_separator()
+    print(f"  {title}")
+    print_separator()
+
+def show_all_users():
+    """Muestra todos los usuarios registrados"""
+    print_header("USUARIOS REGISTRADOS")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, nombre, email, role, balance, active FROM usuarios ORDER BY role, nombre")
+    users = cursor.fetchall()
+    conn.close()
+    
+    print(f"{'ID':<5} {'Nombre':<20} {'Email':<30} {'Role':<10} {'Balance':>10} {'Active':<7}")
+    print("-" * 80)
+    for user in users:
+        active_str = "✓" if user['active'] else "✗"
+        print(f"{user['id']:<5} {user['nombre']:<20} {user['email']:<30} {user['role']:<10} €{user['balance']:>8.2f} {active_str:<7}")
+    print(f"\nTotal usuarios: {len(users)}")
+
+def show_all_charging_points():
+    """Muestra todos los puntos de carga"""
+    print_header("PUNTOS DE CARGA")
+    cps = get_all_charging_points()
+    
+    print(f"{'CP ID':<10} {'Localizacion':<35} {'Estado':<12} {'Potencia':>8} {'Tarifa':>10}")
+    print("-" * 80)
+    for cp in cps:
+        estado_emoji = "🟢" if cp['estado'] == 'available' else "🔴" if cp['estado'] == 'charging' else "🟡"
+        print(f"{cp['cp_id']:<10} {cp['localizacion']:<35} {estado_emoji} {cp['estado']:<10} {cp['max_kw']:>6.1f}kW €{cp['tarifa_kwh']:>5.2f}/kWh")
+    print(f"\nTotal puntos de carga: {len(cps)}")
+
+def show_all_sessions():
+    """Muestra todas las sesiones de carga"""
+    print_header("SESIONES DE CARGA (Últimas 20)")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT s.id, u.nombre, s.cp_id, s.start_time, s.end_time, 
+               s.energia_kwh, s.coste, s.estado
+        FROM charging_sesiones s
+        JOIN usuarios u ON s.user_id = u.id
+        ORDER BY s.start_time DESC
+        LIMIT 20
+    """)
+    sessions = cursor.fetchall()
+    conn.close()
+    
+    print(f"{'ID':<5} {'User':<18} {'CP':<10} {'Start':<20} {'Energy':>10} {'Cost':>10} {'estado':<10}")
+    print("-" * 95)
+    for session in sessions:
+        start_dt = datetime.fromtimestamp(session['start_time']).strftime('%Y-%m-%d %H:%M')
+        energy = session['energia_kwh'] if session['energia_kwh'] else 0
+        cost = session['coste'] if session['coste'] else 0
+        estado_emoji = "✓" if session['estado'] == 'completed' else "⏳"
+        print(f"{session['id']:<5} {session['nombre']:<18} {session['cp_id']:<10} {start_dt:<20} {energy:>8.2f}kWh €{cost:>7.2f} {estado_emoji} {session['estado']:<8}")
+    print(f"\nTotal sesiones mostradas: {len(sessions)}")
+
+def show_user_history(nombre):
+    """Muestra el historial de un usuario específico"""
+    user = get_user_by_nombre(nombre)
+    if not user:
+        print(f"❌ Usuario '{nombre}' no encontrado")
+        return
+    
+    print_header(f"HISTORIAL DE {nombre.upper()}")
+    print(f"Balance actual: €{user['balance']:.2f}")
+    print()
+    
+    sessions = get_user_sesiones(user['id'], limit=10)
+    if not sessions:
+        print("No hay sesiones registradas para este usuario")
+        return
+    
+    print(f"{'ID':<5} {'CP':<10} {'Inicio':<20} {'Fin':<20} {'Energía':>10} {'Costo':>10}")
+    print("-" * 80)
+    total_energy = 0
+    total_cost = 0
+    for session in sessions:
+        start_dt = datetime.fromtimestamp(session['start_time']).strftime('%Y-%m-%d %H:%M')
+        end_str = "En curso" if not session['end_time'] else datetime.fromtimestamp(session['end_time']).strftime('%Y-%m-%d %H:%M')
+        energy = session['energia_kwh'] if session.get('energia_kwh') else 0
+        cost = session['coste'] if session.get('coste') else 0
+        print(f"{session['id']:<5} {session['cp_id']:<10} {start_dt:<20} {end_str:<20} {energy:>8.2f}kWh €{cost:>7.2f}")
+        total_energy += energy
+        total_cost += cost
+    
+    print("-" * 80)
+    print(f"{'TOTAL':<57} {total_energy:>8.2f}kWh €{total_cost:>7.2f}")
+
+def show_statistics():
+    """Muestra estadísticas generales del sistema"""
+    print_header("ESTADÍSTICAS DEL SISTEMA")
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Usuarios
+    cursor.execute("SELECT COUNT(*) as total FROM usuarios WHERE role='driver'")
+    total_drivers = cursor.fetchone()['total']
+    
+    cursor.execute("SELECT COUNT(*) as total FROM usuarios WHERE role='driver' AND active=1")
+    active_drivers = cursor.fetchone()['total']
+    
+    # Puntos de carga
+    cursor.execute("SELECT COUNT(*) as total FROM charging_points")
+    total_cps = cursor.fetchone()['total']
+    
+    cursor.execute("SELECT COUNT(*) as total FROM charging_points WHERE estado='available'")
+    available_cps = cursor.fetchone()['total']
+    
+    cursor.execute("SELECT COUNT(*) as total FROM charging_points WHERE estado='charging'")
+    charging_cps = cursor.fetchone()['total']
+    
+    # Sesiones
+    cursor.execute("SELECT COUNT(*) as total FROM charging_sesiones")
+    total_sessions = cursor.fetchone()['total']
+    
+    cursor.execute("SELECT COUNT(*) as total FROM charging_sesiones WHERE estado='active'")
+    active_sessions = cursor.fetchone()['total']
+    
+    cursor.execute("SELECT COUNT(*) as total FROM charging_sesiones WHERE estado='completed'")
+    completed_sessions = cursor.fetchone()['total']
+    
+    # Energía y costos
+    cursor.execute("SELECT SUM(energia_kwh) as total FROM charging_sesiones WHERE estado='completed'")
+    total_energy = cursor.fetchone()['total'] or 0
+    
+    cursor.execute("SELECT SUM(coste) as total FROM charging_sesiones WHERE estado='completed'")
+    total_revenue = cursor.fetchone()['total'] or 0
+    
+    cursor.execute("SELECT AVG(energia_kwh) as avg FROM charging_sesiones WHERE estado='completed'")
+    avg_energy = cursor.fetchone()['avg'] or 0
+    
+    # Top usuarios
+    cursor.execute("""
+        SELECT u.nombre, COUNT(s.id) as sessions, SUM(s.energia_kwh) as total_energy, SUM(s.coste) as total_cost
+        FROM usuarios u
+        LEFT JOIN charging_sesiones s ON u.id = s.user_id AND s.estado='completed'
+        WHERE u.role='driver'
+        GROUP BY u.id
+        ORDER BY total_cost DESC
+        LIMIT 5
+    """)
+    top_users = cursor.fetchall()
+    
+    conn.close()
+    
+    # Mostrar estadísticas
+    print("\n📊 USUARIOS")
+    print(f"  Total drivers: {total_drivers}")
+    print(f"  Drivers activos: {active_drivers}")
+    
+    print("\n🔌 PUNTOS DE CARGA")
+    print(f"  Total: {total_cps}")
+    print(f"  Disponibles: {available_cps} (🟢)")
+    print(f"  En uso: {charging_cps} (🔴)")
+    
+    print("\n⚡ SESIONES DE CARGA")
+    print(f"  Total: {total_sessions}")
+    print(f"  Activas: {active_sessions}")
+    print(f"  Completadas: {completed_sessions}")
+    
+    print("\n💰 ENERGÍA Y COSTOS")
+    print(f"  Energía total despachada: {total_energy:.2f} kWh")
+    print(f"  Energía promedio por sesión: {avg_energy:.2f} kWh")
+    print(f"  Ingresos totales: €{total_revenue:.2f}")
+    
+    print("\n🏆 TOP 5 USUARIOS (por gasto)")
+    print(f"  {'nombre':<20} {'Sesiones':>10} {'Energía':>12} {'Total Gastado':>15}")
+    print("  " + "-" * 60)
+    for user in top_users:
+        sessions = user['sessions'] or 0
+        energy = user['total_energy'] or 0
+        cost = user['total_cost'] or 0
+        print(f"  {user['nombre']:<20} {sessions:>10} {energy:>10.2f}kWh €{cost:>12.2f}")
+
+def main_menu():
+    """Menú interactivo"""
+    while True:
+        print("\n" + "=" * 80)
+        print("  EV CHARGING SYSTEM - CONSULTA DE BASE DE DATOS")
+        print("=" * 80)
+        print("\n  1. Ver todos los usuarios")
+        print("  2. Ver todos los puntos de carga")
+        print("  3. Ver sesiones de carga")
+        print("  4. Ver historial de usuario")
+        print("  5. Ver estadísticas del sistema")
+        print("  6. Salir")
+        
+        choice = input("\n  Selecciona una opción (1-6): ").strip()
+        
+        if choice == '1':
+            print()
+            show_all_users()
+        elif choice == '2':
+            print()
+            show_all_charging_points()
+        elif choice == '3':
+            print()
+            show_all_sessions()
+        elif choice == '4':
+            nombre = input("\n  Introduce el nombre: ").strip()
+            print()
+            show_user_history(nombre)
+        elif choice == '5':
+            print()
+            show_statistics()
+        elif choice == '6':
+            print("\n  👋 ¡Hasta luego!")
+            break
+        else:
+            print("\n  ❌ Opción no válida")
+        
+        input("\n  Presiona ENTER para continuar...")
+
+    def run_init_db():
+        """Inicializa la base de datos y muestra un resumen (migración del init_db.py)."""
+        print("=" * 60)
+        print("  Inicializando Base de Datos - EV Charging System")
+        print("=" * 60)
+
+        # Inicializar esquema y datos de prueba
+        init_database()
+        seed_test_data()
+
+        # Mostrar resúmenes
+        print("\n" + "=" * 60)
+        print("  USUARIOS DE PRUEBA CREADOS")
+        print("=" * 60)
+        print("  Username: driver1         | Password: pass123   | Balance: €150.00")
+        print("  Username: driver2         | Password: pass456   | Balance: €200.00")
+        print("  Username: driver3         | Password: pass789   | Balance: €75.50")
+        print("  Username: driver4         | Password: pass321   | Balance: €300.00")
+        print("  Username: driver5         | Password: pass654   | Balance: €25.75")
+
+        print("\n" + "=" * 60)
+        print("  PUNTOS DE CARGA REGISTRADOS")
+        print("=" * 60)
+        cps = get_all_charging_points()
+        for cp in cps:
+            local = cp.get('localizacion') or ''
+            print(f"  {cp['cp_id']:8s} - {local[:30]:30s} - {cp.get('max_kw', 0):6.1f}kW - €{cp.get('tarifa_kwh', 0):.2f}/kWh")
+
+        # Estadísticas
+        print("\n" + "=" * 60)
+        print("  ESTADÍSTICAS DEL SISTEMA")
+        print("=" * 60)
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT COUNT(*) as total FROM usuarios WHERE role='driver'")
+        total_drivers = cursor.fetchone()['total']
+        print(f"  Total drivers: {total_drivers}")
+
+        cursor.execute("SELECT COUNT(*) as total FROM charging_points")
+        total_cps = cursor.fetchone()['total']
+        print(f"  Total puntos de carga: {total_cps}")
+
+        cursor.execute("SELECT COUNT(*) as total FROM charging_sesiones WHERE estado='completed'")
+        total_sessions = cursor.fetchone()['total']
+        print(f"  Sesiones completadas: {total_sessions}")
+
+        cursor.execute("SELECT SUM(energia_kwh) as total FROM charging_sesiones WHERE estado='completed'")
+        total_energy = cursor.fetchone()['total'] or 0
+        print(f"  Energía total despachada: {total_energy:.2f} kWh")
+
+        cursor.execute("SELECT SUM(coste) as total FROM charging_sesiones WHERE estado='completed'")
+        total_revenue = cursor.fetchone()['total'] or 0
+        print(f"  Ingresos totales: €{total_revenue:.2f}")
+
+        conn.close()
+
+        print("\n" + "=" * 60)
+        print("  ✅ Base de datos inicializada correctamente")
+        print(f"  📁 Ubicación: {DB_PATH}")
+        print("=" * 60)
+        print("\n  Puedes ahora ejecutar EV_Central.py")
+
+
+    if __name__ == "__main__":
+        # Si se pasa argumento 'init', inicializar la BD; en caso contrario mostrar menú interactivo
+        if len(sys.argv) > 1 and sys.argv[1] in ("init", "--init", "setup"):
+            run_init_db()
+        else:
+            print("\n🔋 EV Charging System - Consulta de Base de Datos")
+            print(f"📁 Base de datos: {DB_PATH}")
+        
+            # Verificar si existe la BD
+            if not DB_PATH.exists():
+                print("\n❌ La base de datos no existe. Ejecuta 'python database.py init' primero.")
+            else:
+                main_menu()
