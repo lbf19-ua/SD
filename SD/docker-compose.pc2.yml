@@ -1,0 +1,138 @@
+# ============================================================================
+# Docker Compose para PC2 - Central Server + Kafka Broker
+# ============================================================================
+# EJECUTAR SOLO EN PC2 (Central + Kafka)
+#
+# Este PC ejecuta:
+#   - Kafka Broker (puerto 9092)
+#   - Kafka UI (puerto 8080)
+#   - EV_Central Server TCP (puerto 5000)
+#   - EV_Central Dashboard WebSocket (puerto 8002)
+#
+# ANTES DE EJECUTAR:
+#   1. Editar network_config.py con las IPs reales
+#   2. Reemplazar PLACEHOLDER_PC2_IP con la IP real de este PC
+#   3. Inicializar la base de datos: python init_db.py
+#   4. Abrir puertos del firewall (ejecutar como admin):
+#      .\open_firewall_ports.ps1
+#
+# INICIAR:
+#   docker-compose -f docker-compose.pc2.yml up -d
+#
+# VER LOGS:
+#   docker-compose -f docker-compose.pc2.yml logs -f
+#
+# DETENER:
+#   docker-compose -f docker-compose.pc2.yml down
+# ============================================================================
+
+services:
+  # ==========================================================================
+  # Kafka Broker (KRaft mode)
+  # ==========================================================================
+  kafka-broker:
+    image: apache/kafka:latest
+    container_name: ev-kafka-broker
+    hostname: broker
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      # ⚠️ CAMBIAR PLACEHOLDER_PC2_IP POR LA IP REAL DE PC2
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://broker:29092,PLAINTEXT_HOST://PLACEHOLDER_PC2_IP:9092'
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@broker:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+    volumes:
+      - kafka-data:/tmp/kraft-combined-logs
+    networks:
+      - ev-network
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:29092 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Kafka UI - Interfaz de monitorización
+  # ==========================================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ev-kafka-ui
+    depends_on:
+      kafka-broker:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ev-charging-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker:29092
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    networks:
+      - ev-network
+    restart: unless-stopped
+
+  # ==========================================================================
+  # EV Central Server (WebSocket + Kafka)
+  # ==========================================================================
+  ev-central:
+    build:
+      context: .
+      dockerfile: EV_Central/Dockerfile
+    container_name: ev-central
+    depends_on:
+      kafka-broker:
+        condition: service_healthy
+    ports:
+      - "5000:5000"  # TCP Server
+      - "8002:8002"  # WebSocket Dashboard
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=broker:29092
+      - CENTRAL_PORT=5000
+      - WS_PORT=8002
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/data/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+    networks:
+      - ev-network
+    restart: unless-stopped
+
+# ==============================================================================
+# Volúmenes
+# ==============================================================================
+volumes:
+  kafka-data:
+    driver: local
+    name: ev-kafka-data
+
+# ==============================================================================
+# Redes
+# ==============================================================================
+networks:
+  ev-network:
+    driver: bridge
+    name: ev-network
+
+# ==============================================================================
+# ACCESO A SERVICIOS
+# ==============================================================================
+# Kafka Broker:        PLACEHOLDER_PC2_IP:9092
+# Kafka UI:            http://PLACEHOLDER_PC2_IP:8080
+# EV Central TCP:      PLACEHOLDER_PC2_IP:5000
+# Admin Dashboard:     http://PLACEHOLDER_PC2_IP:8002
+# ==============================================================================

@@ -1,45 +1,167 @@
-# 🎉 ¡INTERFACES WEB LISTAS!
+# 🚀 SISTEMA EV CHARGING - LEE ESTO PRIMERO
 
-## ✅ LO QUE SE HA CREADO
+## 📖 GUÍA ÚNICA Y DEFINITIVA
 
-### 📱 3 Interfaces Web Profesionales
+**Todo lo que necesitas saber está en UN SOLO archivo:**
 
-1. **Driver Dashboard** (Puerto 8001)
-   - 🚗 Interfaz para conductores
-   - 🔐 Login con usuario/contraseña
-   - ⚡ Solicitar y detener cargas
-   - 📊 Ver energía y costo en tiempo real
-   - 💰 Monitor de balance
+👉 **[GUIA_COMPLETA_DESPLIEGUE.md](GUIA_COMPLETA_DESPLIEGUE.md)** 👈
 
-2. **Admin Dashboard** (Puerto 8002)
-   - 🏢 Panel administrativo
-   - 👥 Ver todos los usuarios
-   - 🔌 Estado de puntos de carga
-   - ⚡ Sesiones activas
-   - 💵 Estadísticas e ingresos
+Esta guía contiene:
 
-3. **Monitor Dashboard** (Puerto 8003)
-   - 📊 Monitor de CPs
-   - 🚨 Alertas del sistema
-   - 📈 Gráficos de uso
-   - 🌡️ Métricas (temperatura, eficiencia)
-   - ⚡ Potencia actual
-
-### 🔌 3 Servidores WebSocket
-
-- `EV_Driver_WebSocket.py` - Servidor para conductores
-- `EV_Central_WebSocket.py` - Servidor administrativo
-- `EV_CP_M_WebSocket.py` - Servidor de monitoreo
-
-Todos con:
-- ✅ Comunicación bidireccional en tiempo real
-- ✅ Integración con base de datos SQLite
-- ✅ Publicación de eventos en Kafka
-- ✅ Actualización automática sin recargar
+✅ **Requisitos previos**: Hardware, software y red
+✅ **Arquitectura completa**: Qué hace cada PC
+✅ **Preparación inicial**: Obtener IPs y configurar
+✅ **Despliegue paso a paso**: PC por PC con comandos exactos
+✅ **Verificación**: Cómo confirmar que todo funciona
+✅ **Uso del sistema**: Acceder a dashboards y probar
+✅ **Comandos útiles**: Docker, Kafka, logs, etc.
+✅ **Troubleshooting**: Solución a problemas comunes
+✅ **Mantenimiento**: Actualizar, backup, monitorear
 
 ---
 
-## 🚀 CÓMO USAR
+## 🎯 INICIO ULTRA-RÁPIDO (2 Pasos)
+
+Si quieres empezar YA, ejecuta esto **EN CADA PC**:
+
+```powershell
+# 1. Editar network_config.py con tus IPs (solo primera vez)
+
+# 2. Iniciar Docker
+.\docker_manager.ps1 up -Build
+```
+
+---
+
+## 📦 ¿QUÉ NECESITAS TENER ANTES?
+
+### Software Obligatorio (en TODOS los PCs):
+- ✅ **Docker Desktop** - https://www.docker.com/products/docker-desktop
+- ✅ **PowerShell** - Ya incluido en Windows
+
+### Software Adicional (solo PC2):
+- ✅ **Python 3.10+** - https://www.python.org/downloads/
+
+### Red:
+- ✅ Los 3 PCs en la **misma red local**
+- ✅ Saber la **IP de cada PC** (usa `ipconfig`)
+
+---
+
+## 🏗️ ARQUITECTURA SIMPLE
+
+```
+┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+│ PC1: DRIVER │◄────►│ PC2: CENTRAL│◄────►│ PC3: MONITOR│
+│   :8001     │      │ Kafka :9092 │      │   :8003     │
+└─────────────┘      │ Admin :8002 │      └─────────────┘
+                     │ UI    :8080 │
+                     └─────────────┘
+```
+
+**PC2 es el corazón** - Debe iniciarse PRIMERO.
+
+---
+
+## 🌐 URLs DEL SISTEMA
+
+Después de desplegar, accede a:
+
+| Dashboard | URL | Descripción |
+|-----------|-----|-------------|
+| **Driver** | http://\<PC1_IP\>:8001 | Conductores solicitan carga |
+| **Admin** | http://\<PC2_IP\>:8002 | Administración del sistema |
+| **Monitor** | http://\<PC3_IP\>:8003 | Monitorización de CPs |
+| **Kafka UI** | http://\<PC2_IP\>:8080 | Ver mensajes de Kafka |
+
+---
+
+## 📚 ¿NECESITAS MÁS DETALLES?
+
+� Abre **[GUIA_COMPLETA_DESPLIEGUE.md](GUIA_COMPLETA_DESPLIEGUE.md)**
+
+Es la **ÚNICA guía** que necesitas. Contiene todo explicado paso a paso con:
+- 📋 Requisitos detallados
+- 🛠️ Instrucciones precisas
+- 🖼️ Diagramas de arquitectura
+- 🔧 Comandos completos
+- 🐛 Solución a problemas
+- ✅ Checklists de verificación
+
+---
+
+## 🔥 SOLUCIÓN RÁPIDA A PROBLEMAS COMUNES
+
+### ❌ Docker no arranca
+```powershell
+# Verifica que Docker Desktop está corriendo
+docker --version
+docker ps
+```
+
+### ❌ No conecta a Kafka
+```powershell
+# En PC2, verifica que Kafka está up
+docker-compose -f docker-compose.pc2.yml ps
+
+# En PC1/PC3, prueba conectividad
+Test-NetConnection <PC2_IP> -Port 9092
+```
+
+### ❌ Puerto ocupado
+```powershell
+# Ver qué usa el puerto
+netstat -ano | findstr :8001
+
+# Matar el proceso
+taskkill /PID <PID> /F
+```
+
+**Más soluciones** → [GUIA_COMPLETA_DESPLIEGUE.md#troubleshooting](GUIA_COMPLETA_DESPLIEGUE.md#troubleshooting)
+
+---
+
+## 🛠️ SCRIPTS DISPONIBLES
+
+| Script | Función | Admin? |
+|--------|---------|--------|
+| `docker_manager.ps1` | Gestionar contenedores Docker | ❌ |
+
+---
+
+## ✅ CHECKLIST ANTES DE EMPEZAR
+
+- [ ] Docker Desktop instalado en los 3 PCs
+- [ ] Docker Desktop está **corriendo** (ver icono en bandeja)
+- [ ] Tienes las IPs de los 3 PCs (usa `ipconfig`)
+- [ ] Los 3 PCs están en la misma red
+- [ ] Python instalado en PC2 (para inicializar BD)
+
+**¿Listo?** → Abre **[GUIA_COMPLETA_DESPLIEGUE.md](GUIA_COMPLETA_DESPLIEGUE.md)** y sigue los pasos.
+
+---
+
+## 🎓 PARA DESARROLLO/TESTING EN 1 SOLO PC
+
+Si solo quieres probar sin 3 PCs:
+
+```powershell
+# Usa el docker-compose completo
+docker-compose up -d --build
+
+# Accede a:
+# http://localhost:8001 (Driver)
+# http://localhost:8002 (Admin)
+# http://localhost:8003 (Monitor)
+# http://localhost:8080 (Kafka UI)
+```
+
+---
+
+**� RECUERDA: Todo está en [GUIA_COMPLETA_DESPLIEGUE.md](GUIA_COMPLETA_DESPLIEGUE.md)**
+
+**¡Buena suerte con el despliegue! 🚀**
+
 
 ### 📝 PASO 1: Verificar que tienes todo
 

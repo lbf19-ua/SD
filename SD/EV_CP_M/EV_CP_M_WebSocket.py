@@ -22,16 +22,14 @@ from kafka import KafkaProducer, KafkaConsumer
 
 # Añadir el directorio padre al path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from network_config import MONITOR_CONFIG
+from network_config import MONITOR_CONFIG, KAFKA_BROKER, KAFKA_TOPICS
 from event_utils import generate_message_id, current_timestamp
 import database as db
 
-# Configuración
-KAFKA_BROKER = 'localhost:9092'
-KAFKA_TOPICS_CONSUME = ['cp-events', 'central-events']
-KAFKA_TOPIC_PRODUCE = 'monitor-events'
-SERVER_PORT = 8003
-SERVER_PORT = 8003
+# Configuración desde network_config
+KAFKA_TOPICS_CONSUME = [KAFKA_TOPICS['cp_events'], KAFKA_TOPICS['central_events']]
+KAFKA_TOPIC_PRODUCE = KAFKA_TOPICS['monitor_events']
+SERVER_PORT = MONITOR_CONFIG['ws_port']
 
 # Estado global compartido
 class SharedState:
@@ -177,6 +175,18 @@ class EV_MonitorWS:
 
 # Instancia global del monitor
 monitor_instance = EV_MonitorWS(kafka_broker=KAFKA_BROKER)
+
+def get_local_ip():
+    """Obtiene la IP local del sistema"""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except Exception:
+        return "localhost"
 
 async def websocket_handler(websocket, path):
     """Maneja conexiones WebSocket de la interfaz web"""
@@ -398,10 +408,10 @@ async def broadcast_alert(alert):
     for client in shared_state.connected_clients:
         try:
             # Compatibilidad con aiohttp WebSockets
-                    if hasattr(client, 'send_str'):
-                        await client.send_str(message)
-                    else:
-                        await client.send(message)
+            if hasattr(client, 'send_str'):
+                await client.send_str(message)
+            else:
+                await client.send(message)
         except:
             disconnected_clients.add(client)
     
@@ -459,14 +469,24 @@ async def check_cp_health():
 
 async def main():
     """Función principal que inicia todos los servicios"""
-    print("\n" + "=" * 70)
-    print(" " * 16 + "📊 EV CHARGING POINT - Monitor WebSocket Server")
-    print("=" * 70)
-    print(f"  📱 Dashboard URL:  http://localhost:{SERVER_PORT}")
-    print(f"  🔌 WebSocket URL:  ws://localhost:{SERVER_PORT}/ws")
-    print(f"  💾 Database:       ev_charging.db")
-    print(f"  📡 Kafka Broker:   {KAFKA_BROKER}")
-    print("=" * 70 + "\n")
+    local_ip = get_local_ip()
+    
+    print("\n" + "=" * 80)
+    print(" " * 18 + "📊 EV CHARGING POINT - Monitor WebSocket Server")
+    print("=" * 80)
+    print(f"  🌐 Local Access:     http://localhost:{SERVER_PORT}")
+    print(f"  🌍 Network Access:   http://{local_ip}:{SERVER_PORT}")
+    print(f"  🔌 WebSocket:        ws://{local_ip}:{SERVER_PORT}/ws")
+    print(f"  💾 Database:         ev_charging.db")
+    print(f"  📡 Kafka Broker:     {KAFKA_BROKER}")
+    print(f"  📨 Consuming:        {', '.join(KAFKA_TOPICS_CONSUME)}")
+    print(f"  📤 Publishing:       {KAFKA_TOPIC_PRODUCE}")
+    print(f"  🏢 Central Server:   {MONITOR_CONFIG['central_ip']}:{MONITOR_CONFIG['central_port']}")
+    print("=" * 80)
+    print(f"\n  ℹ️  Access from other PCs: http://{local_ip}:{SERVER_PORT}")
+    print(f"  ⚠️  Make sure firewall allows port {SERVER_PORT}")
+    print(f"  ⚠️  Kafka broker must be running at: {KAFKA_BROKER}")
+    print("=" * 80 + "\n")
     
     if not WS_AVAILABLE:
         print("❌ ERROR: WebSocket dependencies not installed")

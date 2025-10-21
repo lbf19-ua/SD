@@ -1,0 +1,162 @@
+services:
+  # ============================================================================
+  # KAFKA BROKER
+  # ============================================================================
+  kafka-broker:
+    image: apache/kafka:latest
+    container_name: ev-kafka-broker
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka-broker:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka-broker:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://kafka-broker:29092,CONTROLLER://kafka-broker:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'ev-charging-cluster-local'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka-data:/tmp/kraft-combined-logs
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:29092 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ============================================================================
+  # KAFKA UI
+  # ============================================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ev-kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ev-charging-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-broker:29092
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    depends_on:
+      kafka-broker:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================================
+  # EV CENTRAL (WebSocket version)
+  # ============================================================================
+  ev-central:
+    build:
+      context: .
+      dockerfile: EV_Central/Dockerfile
+    container_name: ev-central
+    ports:
+      - "5000:5000"
+      - "8002:8002"
+    environment:
+      - KAFKA_BROKER=kafka-broker:29092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/data/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+      - ./EV_Central/EV_Central_WebSocket.py:/app/EV_Central/EV_Central_WebSocket.py
+      - ./EV_Central/admin_dashboard.html:/app/EV_Central/admin_dashboard.html
+    command: ["python", "/app/EV_Central/EV_Central_WebSocket.py"]
+    depends_on:
+      kafka-broker:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================================
+  # EV DRIVER (WebSocket version)
+  # ============================================================================
+  ev-driver:
+    build:
+      context: .
+      dockerfile: EV_Driver/Dockerfile
+    container_name: ev-driver
+    ports:
+      - "8001:8001"
+    environment:
+      - WS_PORT=8001
+      - KAFKA_BROKER=kafka-broker:29092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/data/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+      - ./EV_Driver/EV_Driver_WebSocket.py:/app/EV_Driver/EV_Driver_WebSocket.py
+      - ./EV_Driver/dashboard.html:/app/EV_Driver/dashboard.html
+    command: ["python", "/app/EV_Driver/EV_Driver_WebSocket.py"]
+    depends_on:
+      kafka-broker:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================================================
+  # EV MONITOR (WebSocket version)
+  # ============================================================================
+  ev-monitor:
+    build:
+      context: .
+      dockerfile: EV_CP_M/Dockerfile
+    container_name: ev-monitor
+    ports:
+      - "8003:8003"
+    environment:
+      - WS_PORT=8003
+      - KAFKA_BROKER=kafka-broker:29092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/data/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+      - ./EV_CP_M/EV_CP_M_WebSocket.py:/app/EV_CP_M/EV_CP_M_WebSocket.py
+      - ./EV_CP_M/monitor_dashboard.html:/app/EV_CP_M/monitor_dashboard.html
+    command: ["python", "/app/EV_CP_M/EV_CP_M_WebSocket.py"]
+    depends_on:
+      kafka-broker:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  kafka-data:
+
+# ==============================================================================
+# PRUEBA EN LOCAL - UN SOLO PC
+# ==============================================================================
+# 
+# Antes de usar:
+#   1. Editar network_config.py: PC1_IP = PC2_IP = PC3_IP = "localhost"
+#   2. Inicializar BD: python init_db.py
+# 
+# Comandos:
+#   Iniciar:     docker-compose -f docker-compose.local.yml up -d --build
+#   Ver logs:    docker-compose -f docker-compose.local.yml logs -f
+#   Estado:      docker-compose -f docker-compose.local.yml ps
+#   Detener:     docker-compose -f docker-compose.local.yml down
+# 
+# Acceso:
+#   Kafka UI:    http://localhost:8080
+#   Admin:       http://localhost:8002
+#   Driver:      http://localhost:8001
+#   Monitor:     http://localhost:8003
+# 
+# Usuarios de prueba:
+#   user1/pass1 (€150.00)
+#   user2/pass2 (€200.00)
+#   user3/pass3 (€75.50)
+# 
+# ==============================================================================
