@@ -408,6 +408,39 @@ def get_all_charging_points():
     return [dict(row) for row in rows]
 
 
+def update_charging_point_status(cp_id: str, new_status: str) -> bool:
+    """
+    Actualiza el estado de un punto de carga.
+    Estados válidos: available, charging, fault, out_of_service, offline
+    Retorna True si se actualizó correctamente.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            UPDATE charging_points
+            SET status = ?
+            WHERE cp_id = ?
+        """, (new_status, cp_id))
+        
+        conn.commit()
+        success = cursor.rowcount > 0
+        
+        if success:
+            print(f"[DB] ✅ CP {cp_id} status updated to '{new_status}'")
+        else:
+            print(f"[DB] ⚠️  CP {cp_id} not found")
+        
+        return success
+    except Exception as e:
+        print(f"[DB] ❌ Error updating CP status: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
 # === Funciones de sesiones de carga ===
 
 def create_charging_session(user_id: int, cp_id: str, correlation_id: str = None) -> int:

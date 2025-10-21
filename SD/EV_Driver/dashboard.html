@@ -303,31 +303,6 @@
                 <h3>📋 Registro de Eventos</h3>
                 <div id="eventLog"></div>
             </div>
-            
-            <!-- Admin Panel -->
-            <div id="adminPanel" class="hidden" style="margin-top: 30px; padding: 20px; background: #fff3cd; border-radius: 10px; border: 2px solid #ffc107;">
-                <h3 style="color: #856404;">⚙️ Panel de Administrador</h3>
-                <p style="color: #856404; margin-bottom: 15px;">Simular errores en puntos de carga</p>
-                
-                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                    <select id="cpSelect" style="flex: 1; padding: 10px; border: 1px solid #ffc107; border-radius: 5px;">
-                        <option value="">Seleccionar punto de carga...</option>
-                    </select>
-                    <select id="errorTypeSelect" style="flex: 1; padding: 10px; border: 1px solid #ffc107; border-radius: 5px;">
-                        <option value="fault">Averiado</option>
-                        <option value="out_of_service">Parado (Out of Order)</option>
-                        <option value="offline">Desconectado</option>
-                    </select>
-                </div>
-                
-                <div style="display: flex; gap: 10px;">
-                    <button class="btn btn-danger" onclick="simulateError()" style="flex: 1;">⚠️ Simular Error</button>
-                    <button class="btn btn-success" onclick="fixError()" style="flex: 1;">✅ Corregir Error</button>
-                    <button class="btn btn-primary" onclick="refreshCPs()">🔄 Actualizar</button>
-                </div>
-                
-                <div id="cpStatusList" style="margin-top: 20px; max-height: 300px; overflow-y: auto;"></div>
-            </div>
         </div>
     </div>
 
@@ -438,12 +413,6 @@
                         document.getElementById('balance').textContent = `€${data.user.balance.toFixed(2)}`;
                         addEvent(`Bienvenido ${data.user.username}`);
                         
-                        // Mostrar panel de admin si es administrador
-                        if (currentUserRole === 'admin') {
-                            document.getElementById('adminPanel').classList.remove('hidden');
-                            refreshCPs();
-                        }
-                        
                         // Si tiene sesión activa, restaurar el estado
                         if (data.active_session) {
                             sessionData.charging = true;
@@ -520,118 +489,12 @@
                     break;
             }
         }
-        
-        // Admin functions
-        function simulateError() {
-            const cpId = document.getElementById('cpSelect').value;
-            const errorType = document.getElementById('errorTypeSelect').value;
-            
-            if (!cpId) {
-                alert('Por favor selecciona un punto de carga');
-                return;
-            }
-            
-            ws.send(JSON.stringify({
-                type: 'simulate_error',
-                cp_id: cpId,
-                error_type: errorType
-            }));
-        }
-        
-        function fixError() {
-            const cpId = document.getElementById('cpSelect').value;
-            
-            if (!cpId) {
-                alert('Por favor selecciona un punto de carga');
-                return;
-            }
-            
-            ws.send(JSON.stringify({
-                type: 'fix_error',
-                cp_id: cpId
-            }));
-        }
-        
-        function refreshCPs() {
-            ws.send(JSON.stringify({
-                type: 'get_all_cps'
-            }));
-        }
-        
-        function normalizeStatus(status) {
-            switch ((status || '').toLowerCase()) {
-                case 'unavailable':
-                    return 'offline';
-                case 'error':
-                    return 'fault';
-                case 'maintenance':
-                case 'out_of_order':
-                    return 'out_of_service';
-                default:
-                    return status;
-            }
-        }
 
-        function updateCPList(chargingPoints) {
-            const select = document.getElementById('cpSelect');
-            const statusList = document.getElementById('cpStatusList');
-            
-            // Actualizar select
-            const currentValue = select.value;
-            select.innerHTML = '<option value="">Seleccionar punto de carga...</option>';
-            chargingPoints.forEach(cp => {
-                const option = document.createElement('option');
-                option.value = cp.cp_id;
-                option.textContent = `${cp.cp_id} - ${cp.location}`;
-                select.appendChild(option);
-            });
-            select.value = currentValue;
-            
-            // Actualizar lista de estado
-            // Estados según especificación página 4:
-            // Verde: disponible/suministrando
-            // Gris: desconectado
-            // Rojo: averiado
-            // Naranja: fuera de servicio
-            statusList.innerHTML = '';
-            chargingPoints.forEach(cp => {
-                const normStatus = normalizeStatus(cp.status);
-                const statusColor = {
-                    'available': '#28a745',
-                    'charging': '#28a745',
-                    'fault': '#dc3545',
-                    'out_of_service': '#fd7e14',
-                    'offline': '#6c757d'
-                }[normStatus] || '#6c757d';
-                
-                const statusText = {
-                    'available': 'Disponible',
-                    'charging': 'Suministrando',
-                    'fault': 'Averiado',
-                    'out_of_service': 'Fuera de Servicio',
-                    'offline': 'Desconectado'
-                }[normStatus] || normStatus;
-                
-                const cpItem = document.createElement('div');
-                cpItem.style.cssText = `
-                    padding: 10px;
-                    margin-bottom: 8px;
-                    background: white;
-                    border-radius: 5px;
-                    border-left: 4px solid ${statusColor};
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                `;
-                cpItem.innerHTML = `
-                    <div>
-                        <strong>${cp.cp_id}</strong> - ${cp.location}<br>
-                        <small style="color: #666;">${cp.max_power_kw} kW | €${cp.tariff_per_kwh}/kWh</small>
-                    </div>
-                    <div style="font-weight: bold; color: ${statusColor};">${statusText}</div>
-                `;
-                statusList.appendChild(cpItem);
-            });
+        function updateBalance(newBalance) {
+            if (currentUser) {
+                const balanceElement = document.getElementById('balance');
+                balanceElement.textContent = `${newBalance.toFixed(2)}€`;
+            }
         }
 
         function addEvent(message) {

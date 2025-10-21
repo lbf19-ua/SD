@@ -22,11 +22,12 @@ from kafka import KafkaProducer, KafkaConsumer
 
 # Añadir el directorio padre al path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from network_config import MONITOR_CONFIG, KAFKA_BROKER, KAFKA_TOPICS
+from network_config import MONITOR_CONFIG, KAFKA_BROKER as KAFKA_BROKER_DEFAULT, KAFKA_TOPICS
 from event_utils import generate_message_id, current_timestamp
 import database as db
 
-# Configuración desde network_config
+# Configuración desde network_config o variables de entorno (Docker)
+KAFKA_BROKER = os.environ.get('KAFKA_BROKER', KAFKA_BROKER_DEFAULT)
 KAFKA_TOPICS_CONSUME = [KAFKA_TOPICS['cp_events'], KAFKA_TOPICS['central_events']]
 KAFKA_TOPIC_PRODUCE = KAFKA_TOPICS['monitor_events']
 SERVER_PORT = MONITOR_CONFIG['ws_port']

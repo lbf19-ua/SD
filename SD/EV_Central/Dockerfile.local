@@ -1,0 +1,14 @@
+# Dockerfile simplificado para pruebas locales
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+# Solo instalar dependencias Python
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Los archivos se montan via volumes
+EXPOSE 8002 5000
+
+CMD ["python", "/app/EV_Central/EV_Central_WebSocket.py"]

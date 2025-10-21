@@ -21,11 +21,12 @@ from kafka import KafkaProducer, KafkaConsumer
 
 # Añadir el directorio padre al path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from network_config import CENTRAL_CONFIG, KAFKA_BROKER, KAFKA_TOPICS
+from network_config import CENTRAL_CONFIG, KAFKA_BROKER as KAFKA_BROKER_DEFAULT, KAFKA_TOPICS
 from event_utils import generate_message_id, current_timestamp
 import database as db
 
-# Configuración desde network_config
+# Configuración desde network_config o variables de entorno (Docker)
+KAFKA_BROKER = os.environ.get('KAFKA_BROKER', KAFKA_BROKER_DEFAULT)
 KAFKA_TOPICS_CONSUME = [KAFKA_TOPICS['driver_events'], KAFKA_TOPICS['cp_events']]
 KAFKA_TOPIC_PRODUCE = KAFKA_TOPICS['central_events']
 SERVER_PORT = CENTRAL_CONFIG['ws_port']
@@ -214,6 +215,74 @@ async def websocket_handler_http(request):
                             'type': 'dashboard_data',
                             'data': dashboard_data
                         }))
+                    
+                    elif msg_type == 'get_all_cps':
+                        # Obtener todos los puntos de carga
+                        cps = db.get_all_charging_points()
+                        await ws.send_str(json.dumps({
+                            'type': 'all_cps',
+                            'charging_points': cps
+                        }))
+                    
+                    elif msg_type == 'simulate_error':
+                        # Simular error en un punto de carga
+                        cp_id = data.get('cp_id')
+                        error_type = data.get('error_type')
+                        
+                        # Mapear tipo de error a estado
+                        status_map = {
+                            'fault': 'fault',
+                            'out_of_service': 'out_of_service',
+                            'offline': 'offline'
+                        }
+                        new_status = status_map.get(error_type, 'fault')
+                        
+                        # Actualizar estado en BD
+                        db.update_charging_point_status(cp_id, new_status)
+                        
+                        # Enviar confirmación
+                        await ws.send_str(json.dumps({
+                            'type': 'error_simulated',
+                            'message': f'Error "{error_type}" simulado en {cp_id}'
+                        }))
+                        
+                        # Broadcast a todos los clientes
+                        cps = db.get_all_charging_points()
+                        for client in shared_state.connected_clients:
+                            if client != ws:
+                                try:
+                                    await client.send_str(json.dumps({
+                                        'type': 'all_cps',
+                                        'charging_points': cps
+                                    }))
+                                except:
+                                    pass
+                    
+                    elif msg_type == 'fix_error':
+                        # Corregir error en un punto de carga
+                        cp_id = data.get('cp_id')
+                        
+                        # Cambiar estado a available
+                        db.update_charging_point_status(cp_id, 'available')
+                        
+                        # Enviar confirmación
+                        await ws.send_str(json.dumps({
+                            'type': 'error_fixed',
+                            'message': f'Error corregido en {cp_id}'
+                        }))
+                        
+                        # Broadcast a todos los clientes
+                        cps = db.get_all_charging_points()
+                        for client in shared_state.connected_clients:
+                            if client != ws:
+                                try:
+                                    await client.send_str(json.dumps({
+                                        'type': 'all_cps',
+                                        'charging_points': cps
+                                    }))
+                                except:
+                                    pass
+                    
                 except json.JSONDecodeError:
                     print(f"[WS] ⚠️  Invalid JSON from {client_id}")
             elif msg.type == web.WSMsgType.ERROR:
@@ -294,6 +363,7 @@ async def kafka_listener():
             
             for message in consumer:
                 event = message.value
+                print(f"[KAFKA] 📨 Received event: {event.get('event_type', 'UNKNOWN')} from topic: {message.topic}")
                 # Programar el broadcast en el event loop
                 asyncio.run_coroutine_threadsafe(
                     broadcast_kafka_event(event),
@@ -309,12 +379,17 @@ async def kafka_listener():
 
 async def broadcast_kafka_event(event):
     """Broadcast un evento de Kafka a todos los clientes WebSocket"""
+    print(f"[KAFKA] 🔄 Processing event for broadcast: {event.get('event_type', 'UNKNOWN')}, clients: {len(shared_state.connected_clients)}")
+    
     if not shared_state.connected_clients:
+        print(f"[KAFKA] ⚠️  No clients connected, skipping broadcast")
         return
     
     # Determinar el tipo de evento y formatearlo para el dashboard
     action = event.get('action', '')
+    event_type = event.get('event_type', '')
     
+    # Crear mensaje según el tipo de acción
     if action == 'charging_started':
         message = json.dumps({
             'type': 'session_started',
@@ -350,10 +425,23 @@ async def broadcast_kafka_event(event):
             'message': f"✅ {event.get('cp_id')} reparado y disponible"
         })
     else:
+        # Para cualquier otro evento, enviar como evento genérico del sistema
+        # Esto captura TODOS los eventos de Kafka para mostrar en el stream
+        event_desc = f"{event_type or 'EVENT'}"
+        if 'username' in event:
+            event_desc += f" - Usuario: {event['username']}"
+        if 'cp_id' in event:
+            event_desc += f" - CP: {event['cp_id']}"
+        if 'data' in event and isinstance(event['data'], dict):
+            event_desc += f" - {event['data']}"
+            
         message = json.dumps({
-            'type': 'system_event',
-            'message': f"Event: {action}"
+            'type': 'kafka_event',
+            'event_type': event_type,
+            'message': event_desc,
+            'raw_event': event
         })
+        print(f"[KAFKA] 📤 Broadcasting generic event: {event_desc}")
     
     # Broadcast a todos los clientes
     disconnected_clients = set()
