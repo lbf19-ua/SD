@@ -390,7 +390,6 @@ def get_all_charging_points():
     return [dict(row) for row in rows]
 
 
-<<<<<<< HEAD
 def update_charging_point_status(cp_id: str, new_status: str) -> bool:
     """
     Actualiza el estado de un punto de carga.
@@ -427,9 +426,6 @@ def update_charging_point_status(cp_id: str, new_status: str) -> bool:
 # === Funciones de sesiones de carga ===
 
 def create_charging_session(user_id: int, cp_id: str, correlation_id: str = None) -> int:
-=======
-def create_charging_sesion(user_id: int, cp_id: str, correlacion_id: str = None) -> int:
->>>>>>> ff401a262e4e9614c627ffe7a8c01be79f4682fc
     """
     Crea una nueva sesión de carga.
     Retorna el ID de la sesión creada.

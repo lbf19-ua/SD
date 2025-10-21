@@ -34,6 +34,7 @@ services:
     image: apache/kafka:latest
     container_name: ev-kafka-broker
     hostname: broker
+    user: root
     ports:
       - "9092:9092"
       - "29092:29092"
@@ -57,12 +58,6 @@ services:
       - kafka-data:/tmp/kraft-combined-logs
     networks:
       - ev-network
-    healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:29092 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
     restart: unless-stopped
 
   # ==========================================================================
@@ -72,8 +67,7 @@ services:
     image: provectuslabs/kafka-ui:latest
     container_name: ev-kafka-ui
     depends_on:
-      kafka-broker:
-        condition: service_healthy
+      - kafka-broker
     ports:
       - "8080:8080"
     environment:
@@ -93,18 +87,15 @@ services:
       dockerfile: EV_Central/Dockerfile
     container_name: ev-central
     depends_on:
-      kafka-broker:
-        condition: service_healthy
+      - kafka-broker
     ports:
       - "5000:5000"  # TCP Server
       - "8002:8002"  # WebSocket Dashboard
     environment:
-      - KAFKA_BOOTSTRAP_SERVERS=broker:29092
-      - CENTRAL_PORT=5000
-      - WS_PORT=8002
+      - KAFKA_BROKER=broker:29092
       - PYTHONUNBUFFERED=1
     volumes:
-      - ./ev_charging.db:/app/data/ev_charging.db
+      - ./ev_charging.db:/app/ev_charging.db
       - ./network_config.py:/app/network_config.py
       - ./database.py:/app/database.py
       - ./event_utils.py:/app/event_utils.py

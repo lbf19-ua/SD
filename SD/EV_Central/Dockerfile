@@ -22,16 +22,16 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copiar requirements primero (para aprovechar cache de Docker)
-COPY ../requirements.txt /app/requirements.txt
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar archivos de configuración
-COPY ../network_config.py /app/network_config.py
-COPY ../database.py /app/database.py
-COPY ../event_utils.py /app/event_utils.py
+# Copiar archivos de configuración desde el directorio raíz
+COPY network_config.py /app/network_config.py
+COPY database.py /app/database.py
+COPY event_utils.py /app/event_utils.py
 
-# Copiar archivos del componente
-COPY . /app/EV_Central/
+# Copiar archivos del componente EV_Central
+COPY EV_Central/ /app/
 
 # Crear directorio para la base de datos
 RUN mkdir -p /app/data
@@ -39,9 +39,5 @@ RUN mkdir -p /app/data
 # Exponer puertos
 EXPOSE 5000 8002
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import socket; s=socket.socket(); s.connect(('localhost', 5000)); s.close()" || exit 1
-
 # Comando por defecto (WebSocket version)
-CMD ["python", "/app/EV_Central/EV_Central_WebSocket.py"]
+CMD ["python", "EV_Central_WebSocket.py"]
