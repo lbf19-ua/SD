@@ -298,6 +298,20 @@
                 <button class="btn btn-primary" onclick="logout()">Cerrar Sesión</button>
             </div>
 
+            <!-- Batch from file -->
+            <div class="info-box" style="margin-top: 20px;">
+                <label>📄 Procesar archivo de servicios (uno por línea: CP_001, CP_002, ...)</label>
+                <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                    <input type="file" id="servicesFile" accept=".txt" />
+                    <div>
+                        <label style="font-size: 12px; color:#666;">Duración por CP (s)</label>
+                        <input type="number" id="batchDuration" value="2" min="0" style="width:80px; padding:6px;">
+                    </div>
+                    <button class="btn btn-primary" onclick="processServicesFile()">Procesar archivo</button>
+                </div>
+                <small style="color:#666; display:block; margin-top:8px;">El Driver iniciará y detendrá cada carga secuencialmente para automatizar las pruebas.</small>
+            </div>
+
             <!-- Event Log -->
             <div class="event-log">
                 <h3>📋 Registro de Eventos</h3>
@@ -399,6 +413,76 @@
             }));
         }
 
+        function cpIdFromLine(line) {
+            const t = (line || '').trim();
+            if (!t) return null;
+            // Si contiene espacios, coger el último token tipo CP_XXX
+            const parts = t.split(/\s+/);
+            for (let i = parts.length - 1; i >= 0; i--) {
+                if (/^CP_\w+$/i.test(parts[i])) return parts[i];
+            }
+            // Si la línea ya es CP_XXX
+            if (/^CP_\w+$/i.test(t)) return t;
+            return null;
+        }
+
+        function processServicesFile() {
+            console.log('[BATCH] processServicesFile called');
+            if (!currentUser) { 
+                console.log('[BATCH] ERROR: No currentUser');
+                alert('Inicia sesión primero'); 
+                return; 
+            }
+            console.log('[BATCH] Current user:', currentUser);
+            
+            const input = document.getElementById('servicesFile');
+            if (!input.files || !input.files[0]) { 
+                console.log('[BATCH] ERROR: No file selected');
+                alert('Selecciona un archivo .txt'); 
+                return; 
+            }
+            console.log('[BATCH] File selected:', input.files[0].name);
+            
+            const duration = parseInt(document.getElementById('batchDuration').value || '2', 10);
+            console.log('[BATCH] Duration:', duration);
+            
+            const file = input.files[0];
+            const reader = new FileReader();
+            reader.onload = () => {
+                console.log('[BATCH] File read complete');
+                const lines = String(reader.result).split(/\r?\n/);
+                console.log('[BATCH] Lines:', lines);
+                
+                const cpIds = lines.map(cpIdFromLine).filter(Boolean);
+                console.log('[BATCH] Parsed CP IDs:', cpIds);
+                
+                if (cpIds.length === 0) { 
+                    console.log('[BATCH] ERROR: No valid CP IDs found');
+                    alert('El archivo no contiene CP IDs válidos'); 
+                    return; 
+                }
+                
+                addEvent(`📄 Procesando archivo: ${cpIds.length} servicios`);
+                
+                const message = {
+                    type: 'batch_charging',
+                    username: currentUser,
+                    cp_ids: cpIds,
+                    duration_sec: duration
+                };
+                console.log('[BATCH] Sending message:', message);
+                console.log('[BATCH] WebSocket state:', ws.readyState, '(1=OPEN)');
+                
+                ws.send(JSON.stringify(message));
+                console.log('[BATCH] Message sent');
+            };
+            reader.onerror = (e) => {
+                console.error('[BATCH] ERROR reading file:', e);
+                alert('Error al leer el archivo');
+            };
+            reader.readAsText(file, 'utf-8');
+        }
+
         function handleServerMessage(data) {
             console.log('Received:', data);
 
@@ -481,6 +565,24 @@
                 
                 case 'all_cps_status':
                     updateCPList(data.charging_points);
+                    break;
+
+                case 'batch_started':
+                    addEvent(`🧪 Lote iniciado: ${data.total} elementos`);
+                    break;
+
+                case 'batch_progress':
+                    if (data.status === 'started') {
+                        addEvent(`▶️ [${data.index}] Inicio en ${data.cp_id} (sesión ${data.session_id})`);
+                    } else if (data.status === 'stopped') {
+                        addEvent(`⏹️ [${data.index}] Fin en ${data.cp_id} | ${Number(data.energy||0).toFixed(2)} kWh | €${Number(data.total_cost||0).toFixed(2)}`);
+                    } else if (data.status === 'skipped') {
+                        addEvent(`⏭️ [${data.index}] Omitido ${data.cp_id}: ${data.reason}`);
+                    }
+                    break;
+
+                case 'batch_complete':
+                    addEvent('✅ Lote completado');
                     break;
 
                 case 'error':

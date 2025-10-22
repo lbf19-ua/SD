@@ -66,12 +66,13 @@ class EV_DriverWS:
     def authenticate_user(self, username, password):
         """Autentica un usuario usando la base de datos"""
         try:
-            user = db.authenticate_user(username, password)
+            # La base de datos usa nombres de funciones en español
+            user = db.autentificación_usuario(username, password)
             if user:
                 print(f"[DRIVER] ✅ User {username} authenticated successfully")
                 
                 # Verificar si tiene una sesión activa
-                active_session = db.get_active_session_for_user(user['id'])
+                active_session = db.get_active_sesion_for_user(user['id'])
                 session_data = None
                 if active_session:
                     # Obtener datos del CP
@@ -88,7 +89,7 @@ class EV_DriverWS:
                     'success': True,
                     'user': {
                         'id': user['id'],
-                        'username': user['username'],
+                        'username': user['nombre'],
                         'email': user['email'],
                         'balance': user['balance'],
                         'role': user['role']
@@ -103,35 +104,62 @@ class EV_DriverWS:
             return {'success': False, 'message': str(e)}
 
     def request_charging(self, username):
-        """Solicita inicio de carga"""
+        """
+        Solicita inicio de carga.
+        
+        ============================================================================
+        REQUISITO b) AUTORIZACIÓN DE SUMINISTRO
+        ============================================================================
+        Esta función implementa el proceso completo de autorización antes de
+        permitir el suministro eléctrico. Valida múltiples condiciones:
+        
+        1. Usuario existe y está activo
+        2. Usuario no tiene otra sesión activa
+        3. Balance suficiente (mínimo €5.00)
+        4. Existe al menos un punto de carga disponible
+        
+        Solo si TODAS las validaciones pasan, se autoriza el suministro y se
+        crea la sesión de carga.
+        ============================================================================
+        """
         try:
-            # Obtener usuario de la BD
-            user = db.get_user_by_username(username)
+            # ====================================================================
+            # VALIDACIÓN 1: Verificar que el usuario existe
+            # ====================================================================
+            user = db.get_user_by_nombre(username)
             if not user:
                 return {'success': False, 'message': 'User not found'}
             
-            # Verificar si ya tiene una sesión activa
-            active_session = db.get_active_session_for_user(user['id'])
+            # ====================================================================
+            # VALIDACIÓN 2: Verificar que no tiene sesión activa
+            # ====================================================================
+            active_session = db.get_active_sesion_for_user(user['id'])
             if active_session:
                 return {'success': False, 'message': 'You already have an active charging session'}
             
-            # Verificar balance mínimo
+            # ====================================================================
+            # VALIDACIÓN 3: Verificar balance mínimo (autorización económica)
+            # ====================================================================
             if user['balance'] < 5.0:
                 return {'success': False, 'message': 'Insufficient balance (min €5.00 required)'}
             
-            # Obtener punto de carga disponible
+            # ====================================================================
+            # VALIDACIÓN 4: Verificar disponibilidad de puntos de carga
+            # ====================================================================
             available_cps = db.get_available_charging_points()
             if not available_cps:
                 return {'success': False, 'message': 'No charging points available'}
             
             cp = available_cps[0]
             
-            # Crear sesión de carga
+            # ====================================================================
+            # ✅ AUTORIZACIÓN CONCEDIDA - Crear sesión de carga
+            # ====================================================================
             correlation_id = generate_message_id()
             session_id = db.create_charging_session(user['id'], cp['cp_id'], correlation_id)
             
             if session_id:
-                # Publicar evento en Kafka
+                # Publicar evento en Kafka para notificar a la Central
                 if self.producer:
                     event = {
                         'message_id': generate_message_id(),
@@ -162,15 +190,72 @@ class EV_DriverWS:
             print(f"[DRIVER] ❌ Charging request error: {e}")
             return {'success': False, 'message': str(e)}
 
+    def request_charging_at_cp(self, username, cp_id):
+        """
+        Solicita inicio de carga en un CP específico (por ID).
+        Realiza las mismas validaciones que request_charging, pero selecciona el CP indicado.
+        """
+        try:
+            user = db.get_user_by_nombre(username)
+            if not user:
+                return {'success': False, 'message': 'User not found'}
+
+            active_session = db.get_active_sesion_for_user(user['id'])
+            if active_session:
+                return {'success': False, 'message': 'You already have an active charging session'}
+
+            if user['balance'] < 5.0:
+                return {'success': False, 'message': 'Insufficient balance (min €5.00 required)'}
+
+            cp = db.get_charging_point_by_id(cp_id)
+            if not cp:
+                return {'success': False, 'message': f'Charging point {cp_id} not found'}
+            # Aceptar CPs en estado 'available' u 'offline' (offline = disponible para uso)
+            # Rechazar: 'charging' (ocupado), 'fault' (con fallo), 'out_of_service' (fuera de servicio)
+            if cp.get('status') not in (None, 'available', 'offline'):
+                return {'success': False, 'message': f'Charging point {cp_id} not available (status: {cp.get("status")})'}
+
+            correlation_id = generate_message_id()
+            session_id = db.create_charging_session(user['id'], cp['cp_id'], correlation_id)
+            if session_id:
+                if self.producer:
+                    event = {
+                        'message_id': generate_message_id(),
+                        'driver_id': self.driver_id,
+                        'action': 'charging_started',
+                        'username': username,
+                        'cp_id': cp['cp_id'],
+                        'session_id': session_id,
+                        'timestamp': current_timestamp(),
+                        'correlation_id': correlation_id
+                    }
+                    self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=self.driver_id.encode())
+                    self.producer.flush()
+
+                print(f"[DRIVER] ⚡ Charging session {session_id} started for {username} at {cp['cp_id']}")
+                return {
+                    'success': True,
+                    'session_id': session_id,
+                    'cp_id': cp['cp_id'],
+                    'location': cp.get('location') or cp.get('localizacion', 'Unknown'),
+                    'power_output': cp.get('max_power_kw', 22.0),
+                    'tariff': cp.get('tariff_per_kwh', 0.30)
+                }
+            else:
+                return {'success': False, 'message': 'Failed to create charging session'}
+        except Exception as e:
+            print(f"[DRIVER] ❌ Charging request (specific CP) error: {e}")
+            return {'success': False, 'message': str(e)}
+
     def stop_charging(self, username):
         """Detiene la carga actual"""
         try:
             # Obtener sesión activa del usuario
-            user = db.get_user_by_username(username)
+            user = db.get_user_by_nombre(username)
             if not user:
                 return {'success': False, 'message': 'User not found'}
             
-            active_session = db.get_active_session_for_user(user['id'])
+            active_session = db.get_active_sesion_for_user(user['id'])
             if not active_session:
                 return {'success': False, 'message': 'No active charging session'}
             
@@ -180,9 +265,9 @@ class EV_DriverWS:
             energy_kwh = random.uniform(5.0, 25.0)  # Simular entre 5 y 25 kWh
             
             # Finalizar sesión
-            result = db.end_charging_session(active_session['id'], energy_kwh)
+            result = db.end_charging_sesion(active_session['id'], energy_kwh)
             
-            if result['success']:
+            if result:
                 # Publicar evento en Kafka
                 if self.producer:
                     event = {
@@ -192,19 +277,19 @@ class EV_DriverWS:
                         'username': username,
                         'session_id': active_session['id'],
                         'energy_kwh': energy_kwh,
-                        'cost': result['cost'],
+                        'cost': result.get('coste', 0),  # Fixed: DB returns 'coste' in Spanish
                         'timestamp': current_timestamp(),
-                        'correlation_id': active_session.get('correlation_id', '')
+                        'correlation_id': active_session.get('correlacion_id', '')
                     }
                     self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=self.driver_id.encode())
                     self.producer.flush()
                 
-                print(f"[DRIVER] ⛔ Charging stopped: {energy_kwh:.2f} kWh, €{result['cost']:.2f}")
+                print(f"[DRIVER] ⛔ Charging stopped: {energy_kwh:.2f} kWh, €{result.get('coste', 0):.2f}")
                 return {
                     'success': True,
-                    'energy': energy_kwh,
-                    'total_cost': result['cost'],
-                    'new_balance': result['new_balance']
+                    'energy': result.get('energia_kwh', energy_kwh),
+                    'total_cost': result.get('coste'),
+                    'new_balance': result.get('updated_balance')
                 }
             else:
                 return {'success': False, 'message': result.get('message', 'Failed to stop charging')}
@@ -238,7 +323,7 @@ class EV_DriverWS:
             
             cursor.execute("""
                 UPDATE charging_points
-                SET status = ?
+                SET estado = ?
                 WHERE cp_id = ?
             """, (new_status, cp_id))
             
@@ -285,7 +370,7 @@ class EV_DriverWS:
             
             cursor.execute("""
                 UPDATE charging_points
-                SET status = 'available'
+                SET estado = 'available'
                 WHERE cp_id = ?
             """, (cp_id,))
             
@@ -331,11 +416,11 @@ class EV_DriverWS:
     def get_session_status(self, username):
         """Obtiene el estado de la sesión actual del usuario"""
         try:
-            user = db.get_user_by_username(username)
+            user = db.get_user_by_nombre(username)
             if not user:
                 return None
             
-            active_session = db.get_active_session_for_user(user['id'])
+            active_session = db.get_active_sesion_for_user(user['id'])
             return active_session
         except Exception as e:
             print(f"[DRIVER] ❌ Get session status error: {e}")
@@ -466,6 +551,93 @@ async def websocket_handler(websocket, path):
                         'type': 'error',
                         'message': result.get('message', 'Failed to stop charging')
                     }))
+
+            elif msg_type == 'request_charging_at_cp':
+                username = data.get('username')
+                cp_id = data.get('cp_id')
+                result = driver_instance.request_charging_at_cp(username, cp_id)
+
+                if result['success']:
+                    with shared_state.lock:
+                        shared_state.charging_sessions[username] = {
+                            'username': username,
+                            'session_id': result['session_id'],
+                            'cp_id': result['cp_id'],
+                            'start_time': time.time(),
+                            'energy': 0.0,
+                            'cost': 0.0,
+                            'tariff': result['tariff']
+                        }
+
+                    await websocket.send(json.dumps({
+                        'type': 'charging_started',
+                        'cp_id': result['cp_id'],
+                        'location': result['location'],
+                        'power_output': result['power_output'],
+                        'tariff': result['tariff']
+                    }))
+                else:
+                    await websocket.send(json.dumps({
+                        'type': 'error',
+                        'message': result.get('message', 'Failed to start charging at CP')
+                    }))
+
+            elif msg_type == 'batch_charging':
+                # Procesa una lista de CPs secuencialmente
+                username = data.get('username')
+                cp_ids = data.get('cp_ids') or []
+                duration_sec = int(data.get('duration_sec') or 2)
+                print(f"[DRIVER] 📄 Batch charging request: user={username}, CPs={cp_ids}, duration={duration_sec}s")
+                await websocket.send(json.dumps({'type': 'batch_started', 'total': len(cp_ids)}))
+
+                idx = 0
+                for cp_id in cp_ids:
+                    idx += 1
+                    # Intentar iniciar
+                    start_res = driver_instance.request_charging_at_cp(username, cp_id)
+                    if not start_res.get('success'):
+                        await websocket.send(json.dumps({
+                            'type': 'batch_progress',
+                            'index': idx,
+                            'cp_id': cp_id,
+                            'status': 'skipped',
+                            'reason': start_res.get('message', 'unknown')
+                        }))
+                        continue
+
+                    await websocket.send(json.dumps({
+                        'type': 'batch_progress',
+                        'index': idx,
+                        'cp_id': cp_id,
+                        'status': 'started',
+                        'session_id': start_res['session_id']
+                    }))
+                    # Esperar duración
+                    try:
+                        await asyncio.sleep(max(0, duration_sec))
+                    except Exception:
+                        pass
+
+                    stop_res = driver_instance.stop_charging(username)
+                    if stop_res.get('success'):
+                        await websocket.send(json.dumps({
+                            'type': 'batch_progress',
+                            'index': idx,
+                            'cp_id': cp_id,
+                            'status': 'stopped',
+                            'energy': stop_res.get('energy'),
+                            'total_cost': stop_res.get('total_cost')
+                        }))
+                    else:
+                        await websocket.send(json.dumps({
+                            'type': 'batch_progress',
+                            'index': idx,
+                            'cp_id': cp_id,
+                            'status': 'stopped',
+                            'error': stop_res.get('message')
+                        }))
+
+                await websocket.send(json.dumps({'type': 'batch_complete'}))
             
             elif msg_type == 'simulate_error':
                 # Simular error en CP (solo admin)
@@ -638,6 +810,90 @@ async def websocket_handler_http(request):
                                 'type': 'error',
                                 'message': result.get('message', 'Failed to stop charging')
                             }))
+
+                    elif msg_type == 'request_charging_at_cp':
+                        username = data.get('username')
+                        cp_id = data.get('cp_id')
+                        result = driver_instance.request_charging_at_cp(username, cp_id)
+
+                        if result['success']:
+                            with shared_state.lock:
+                                shared_state.charging_sessions[username] = {
+                                    'username': username,
+                                    'session_id': result['session_id'],
+                                    'cp_id': result['cp_id'],
+                                    'start_time': time.time(),
+                                    'energy': 0.0,
+                                    'cost': 0.0,
+                                    'tariff': result['tariff']
+                                }
+
+                            await ws.send_str(json.dumps({
+                                'type': 'charging_started',
+                                'session_id': result['session_id'],
+                                'cp_id': result['cp_id'],
+                                'location': result['location'],
+                                'power_output': result['power_output'],
+                                'tariff': result['tariff']
+                            }))
+                        else:
+                            await ws.send_str(json.dumps({
+                                'type': 'error',
+                                'message': result.get('message', 'Failed to start charging at CP')
+                            }))
+
+                    elif msg_type == 'batch_charging':
+                        username = data.get('username')
+                        cp_ids = data.get('cp_ids') or []
+                        duration_sec = int(data.get('duration_sec') or 2)
+                        await ws.send_str(json.dumps({'type': 'batch_started', 'total': len(cp_ids)}))
+
+                        idx = 0
+                        for cp_id in cp_ids:
+                            idx += 1
+                            start_res = driver_instance.request_charging_at_cp(username, cp_id)
+                            if not start_res.get('success'):
+                                await ws.send_str(json.dumps({
+                                    'type': 'batch_progress',
+                                    'index': idx,
+                                    'cp_id': cp_id,
+                                    'status': 'skipped',
+                                    'reason': start_res.get('message', 'unknown')
+                                }))
+                                continue
+
+                            await ws.send_str(json.dumps({
+                                'type': 'batch_progress',
+                                'index': idx,
+                                'cp_id': cp_id,
+                                'status': 'started',
+                                'session_id': start_res['session_id']
+                            }))
+                            try:
+                                await asyncio.sleep(max(0, duration_sec))
+                            except Exception:
+                                pass
+
+                            stop_res = driver_instance.stop_charging(username)
+                            if stop_res.get('success'):
+                                await ws.send_str(json.dumps({
+                                    'type': 'batch_progress',
+                                    'index': idx,
+                                    'cp_id': cp_id,
+                                    'status': 'stopped',
+                                    'energy': stop_res.get('energy'),
+                                    'total_cost': stop_res.get('total_cost')
+                                }))
+                            else:
+                                await ws.send_str(json.dumps({
+                                    'type': 'batch_progress',
+                                    'index': idx,
+                                    'cp_id': cp_id,
+                                    'status': 'stopped',
+                                    'error': stop_res.get('message')
+                                }))
+
+                        await ws.send_str(json.dumps({'type': 'batch_complete'}))
                     
                     elif msg_type == 'simulate_error':
                         # Simular error en CP (solo admin)

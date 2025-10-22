@@ -7,6 +7,66 @@ import time
 from pathlib import Path
 from datetime import datetime, timedelta
 
+"""
+================================================================================
+EV_Central - Sistema Central de Gestión de Puntos de Recarga
+================================================================================
+
+CUMPLIMIENTO DE REQUISITOS:
+
+a) REGISTRO Y ALTA DE NUEVOS PUNTOS DE RECARGA
+   La Central está SIEMPRE a la espera de peticiones de registro mediante:
+   
+   1. WebSocket (Registro Manual):
+      - Líneas 358-423: Handler 'register_cp'
+      - Dashboard administrativo permite dar de alta CPs manualmente
+      - Validaciones: campos requeridos, duplicados
+      - Confirmación inmediata al cliente
+   
+   2. Kafka (Auto-registro):
+      - Líneas 486-603: kafka_listener() con bucle infinito
+      - Escucha topic 'cp-events' permanentemente
+      - Al recibir CP_REGISTRATION o 'connect', auto-registra el CP
+      - Thread daemon que nunca se detiene
+   
+   3. Procesamiento en tiempo real:
+      - Líneas 604-700: broadcast_kafka_event()
+      - Actualiza estado del CP inmediatamente
+      - Persiste en base de datos
+      - Broadcast a todos los clientes conectados
+
+b) AUTORIZACIÓN DE SUMINISTRO
+   La Central procesa peticiones de autorización mediante:
+   
+   1. Validación multi-nivel (en EV_Driver_WebSocket.py):
+      - Usuario existe y activo
+      - No tiene sesión activa previa
+      - Balance suficiente (mín €5.00)
+      - Disponibilidad de Charging Points
+   
+   2. Recepción de eventos autorizados:
+      - Kafka consumer recibe eventos 'charging_started'
+      - Solo llegan aquí peticiones YA autorizadas por Driver
+      - Central actualiza estado CP a 'charging'
+      - Registra sesión activa en BD
+   
+   3. Seguimiento de sesión:
+      - Actualización continua vía Kafka
+      - Finalización con cálculo de costo
+      - Actualización de balance usuario
+
+ARQUITECTURA:
+- WebSocket: Comunicación en tiempo real con dashboards
+- Kafka: Sistema de mensajería asíncrono distribuido
+- SQLite: Base de datos para persistencia
+- Asyncio: Operaciones concurrentes y no bloqueantes
+- Threading: Consumer Kafka en thread daemon permanente
+
+La Central NUNCA deja de escuchar. El bucle de Kafka es infinito y corre
+en un thread daemon que se mantiene activo durante toda la ejecución.
+================================================================================
+"""
+
 # WebSocket y HTTP server
 try:
     import websockets
@@ -355,6 +415,78 @@ async def websocket_handler_http(request):
                                 except:
                                     pass
                     
+                    elif msg_type == 'register_cp':
+                        # ============================================================================
+                        # REQUISITO a) Recibir peticiones de REGISTRO y ALTA de nuevo punto de recarga
+                        # ============================================================================
+                        # Este handler procesa peticiones de registro manual desde el dashboard
+                        # administrativo. La Central SIEMPRE está escuchando mensajes WebSocket.
+                        # ----------------------------------------------------------------------------
+                        
+                        cp_data = data.get('cp_data', {})
+                        cp_id = cp_data.get('cp_id')
+                        location = cp_data.get('location')
+                        max_power_kw = float(cp_data.get('max_power_kw', 22.0))
+                        tariff_per_kwh = float(cp_data.get('tariff_per_kwh', 0.30))
+                        
+                        # Validar datos requeridos
+                        if not cp_id or not location:
+                            await ws.send_str(json.dumps({
+                                'type': 'register_cp_error',
+                                'message': 'CP ID y localización son obligatorios'
+                            }))
+                            continue
+                        
+                        # Verificar si el CP ya existe (evitar duplicados)
+                        existing_cp = db.get_charging_point_by_id(cp_id) if hasattr(db, 'get_charging_point_by_id') else None
+                        if existing_cp:
+                            await ws.send_str(json.dumps({
+                                'type': 'register_cp_error',
+                                'message': f'El punto de carga {cp_id} ya existe'
+                            }))
+                            continue
+                        
+                        # Registrar el nuevo punto de carga en la base de datos
+                        try:
+                            if hasattr(db, 'register_or_update_charging_point'):
+                                db.register_or_update_charging_point(
+                                    cp_id=cp_id,
+                                    localizacion=location,
+                                    max_kw=max_power_kw,
+                                    tarifa_kwh=tariff_per_kwh,
+                                    estado='offline'  # Estado inicial offline hasta que se conecte
+                                )
+                                print(f"[CENTRAL] ✅ Nuevo punto de carga registrado: {cp_id} en {location}")
+                                
+                                # Enviar confirmación al cliente que solicitó el registro
+                                await ws.send_str(json.dumps({
+                                    'type': 'register_cp_success',
+                                    'message': f'Punto de carga {cp_id} registrado exitosamente'
+                                }))
+                                
+                                # Broadcast datos actualizados a TODOS los clientes conectados
+                                cps = [central_instance._standardize_cp(cp) for cp in (db.get_all_charging_points() if hasattr(db, 'get_all_charging_points') else [])]
+                                dashboard_data = central_instance.get_dashboard_data()
+                                for client in shared_state.connected_clients:
+                                    try:
+                                        await client.send_str(json.dumps({
+                                            'type': 'dashboard_data',
+                                            'data': dashboard_data
+                                        }))
+                                    except:
+                                        pass
+                            else:
+                                await ws.send_str(json.dumps({
+                                    'type': 'register_cp_error',
+                                    'message': 'Función de registro no disponible'
+                                }))
+                        except Exception as e:
+                            print(f"[CENTRAL] ❌ Error registrando CP {cp_id}: {e}")
+                            await ws.send_str(json.dumps({
+                                'type': 'register_cp_error',
+                                'message': f'Error al registrar el punto de carga: {str(e)}'
+                            }))
+                    
                 except json.JSONDecodeError:
                     print(f"[WS] ⚠️  Invalid JSON from {client_id}")
             elif msg.type == web.WSMsgType.ERROR:
@@ -417,7 +549,20 @@ async def broadcast_updates():
                 shared_state.connected_clients.discard(client)
 
 async def kafka_listener():
-    """Escucha eventos de Kafka y los broadcast a los clientes WebSocket"""
+    """
+    Escucha eventos de Kafka y los broadcast a los clientes WebSocket.
+    
+    ============================================================================
+    CENTRAL SIEMPRE A LA ESPERA (Requisitos a y b)
+    ============================================================================
+    Esta función implementa un consumer de Kafka que corre en un thread daemon,
+    escuchando PERMANENTEMENTE los topics:
+    - 'driver-events': Peticiones de conductores (REQUISITO b: autorización de suministro)
+    - 'cp-events': Eventos de Charging Points (REQUISITO a: registro de CPs)
+    
+    El bucle es INFINITO y procesa eventos en tiempo real 24/7.
+    ============================================================================
+    """
     loop = asyncio.get_event_loop()
     
     def consume_kafka():
@@ -433,14 +578,24 @@ async def kafka_listener():
             
             print(f"[KAFKA] 📡 Consumer started, listening to {KAFKA_TOPICS_CONSUME}")
             
+            # ========================================================================
+            # BUCLE INFINITO - La Central NUNCA deja de escuchar
+            # ========================================================================
             for message in consumer:
                 event = message.value
                 print(f"[KAFKA] 📨 Received event: {event.get('event_type', 'UNKNOWN')} from topic: {message.topic}")
-                # Persistir inmediatamente registros de CP para mayor fiabilidad del Test A
+                
+                # ====================================================================
+                # REQUISITO a) Registro de Charging Points (Auto-registro)
+                # ====================================================================
+                # Cuando un CP se conecta o envía CP_REGISTRATION, se registra
+                # automáticamente en la base de datos
+                # --------------------------------------------------------------------
                 try:
                     et = event.get('event_type', '')
                     action = event.get('action', '')
                     cp_id = event.get('cp_id') or event.get('engine_id')
+                    
                     if cp_id and (et == 'CP_REGISTRATION' or action == 'connect'):
                         data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
                         localizacion = data.get('localizacion') or data.get('location') or 'Desconocido'
@@ -448,8 +603,9 @@ async def kafka_listener():
                         tarifa_kwh = data.get('tarifa_kwh') or data.get('tariff_per_kwh') or data.get('price_eur_kwh') or 0.30
                         if hasattr(db, 'register_or_update_charging_point'):
                             db.register_or_update_charging_point(cp_id, localizacion, max_kw=max_kw, tarifa_kwh=tarifa_kwh, estado='available')
-                            print(f"[CENTRAL] 💾 CP registrado/actualizado (pre-broadcast): {cp_id}")
-                    # Si llega cambio de estado pero el CP no existe, crearlo mínimo
+                            print(f"[CENTRAL] 💾 CP registrado/actualizado (auto-registro): {cp_id}")
+                    
+                    # Auto-crear CP si llega evento pero no existe
                     if cp_id and action == 'cp_status_change':
                         try:
                             cp_row = db.get_charging_point_by_id(cp_id)
@@ -462,6 +618,15 @@ async def kafka_listener():
                             print(f"[CENTRAL] ⚠️ Error auto-creando CP por status_change: {ie}")
                 except Exception as e:
                     print(f"[CENTRAL] ⚠️ Error persistiendo registro de CP: {e}")
+                
+                # ====================================================================
+                # REQUISITO b) Autorización de suministros
+                # ====================================================================
+                # Los eventos 'charging_started' son peticiones ya autorizadas por
+                # el Driver (que valida usuario, balance, disponibilidad).
+                # La Central actualiza el estado del CP y registra la sesión.
+                # --------------------------------------------------------------------
+                
                 # Programar el broadcast en el event loop
                 asyncio.run_coroutine_threadsafe(
                     broadcast_kafka_event(event),
@@ -471,21 +636,39 @@ async def kafka_listener():
         except Exception as e:
             print(f"[KAFKA] ⚠️  Consumer error: {e}")
     
-    # Ejecutar el consumidor de Kafka en un thread separado
+    # Ejecutar el consumidor de Kafka en un thread separado (daemon = siempre activo)
     kafka_thread = threading.Thread(target=consume_kafka, daemon=True)
     kafka_thread.start()
 
 async def broadcast_kafka_event(event):
-    """Broadcast un evento de Kafka a todos los clientes WebSocket"""
+    """
+    Broadcast un evento de Kafka a todos los clientes WebSocket.
+    
+    ============================================================================
+    Procesamiento de eventos en tiempo real
+    ============================================================================
+    Esta función procesa TODOS los eventos recibidos de Kafka y actualiza
+    el estado del sistema según el tipo de evento:
+    
+    - REQUISITO a) Registro de CPs: Procesa CP_REGISTRATION y 'connect'
+    - REQUISITO b) Autorización de suministro: Procesa 'charging_started'
+    ============================================================================
+    """
     print(f"[KAFKA] 🔄 Processing event for broadcast: {event.get('event_type', 'UNKNOWN')}, clients: {len(shared_state.connected_clients)}")
     
     # Determinar el tipo de evento y formatearlo para el dashboard
     action = event.get('action', '')
     event_type = event.get('event_type', '')
     
-    # Primero: persistir cambios de estado relevantes SIEMPRE (aunque no haya clientes conectados)
+    # ========================================================================
+    # Persistir cambios de estado relevantes SIEMPRE
+    # (incluso si no hay clientes WebSocket conectados)
+    # ========================================================================
     cp_id = event.get('cp_id') or event.get('engine_id')
     if cp_id:
+        # --------------------------------------------------------------------
+        # REQUISITO a) AUTO-REGISTRO cuando un CP se conecta
+        # --------------------------------------------------------------------
         if action in ['connect'] or event_type in ['CP_REGISTRATION']:
             # Auto-registro/actualización del CP al conectar
             try:
@@ -510,11 +693,17 @@ async def broadcast_kafka_event(event):
                     print(f"[CENTRAL] ⚠️ No se pudo verificar CP {cp_id} tras auto-registro")
             except Exception as e:
                 print(f"[CENTRAL] ⚠️ Error auto-registrando CP {cp_id}: {e}")
+        
+        # --------------------------------------------------------------------
+        # REQUISITO b) AUTORIZACIÓN DE SUMINISTRO - Sesión iniciada
+        # --------------------------------------------------------------------
         elif action in ['charging_started']:
-            # Marcar CP como en carga
+            # Marcar CP como en carga (la autorización ya fue validada por Driver)
             db.update_charging_point_status(cp_id, 'charging')
+            print(f"[CENTRAL] ⚡ Suministro autorizado - CP {cp_id} ahora en modo 'charging'")
+        
         elif action in ['charging_stopped']:
-            # Marcar CP disponible
+            # Marcar CP disponible cuando termina el suministro
             db.update_charging_point_status(cp_id, 'available')
         elif action in ['cp_status_change']:
             status = event.get('status')

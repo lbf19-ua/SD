@@ -1,4 +1,4 @@
-Carga premium CP_004
-Mantenimiento CP_005
-Carga ultra rápida CP_006
-Diagnóstico CP_007
+CP_004
+CP_005
+CP_006
+CP_007

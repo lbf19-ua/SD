@@ -14,9 +14,15 @@ DB_PATH = Path(__file__).parent / "ev_charging.db"
 
 
 def get_connection():
-    """Obtiene una conexión a la base de datos"""
-    conn = sqlite3.connect(DB_PATH)
+    """Obtiene una conexión a la base de datos con optimizaciones para concurrencia"""
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)  # Timeout más largo para concurrencia
     conn.row_factory = sqlite3.Row  # Permite acceder a columnas por nombre
+    # Habilitar WAL mode para mejor concurrencia (permite lecturas mientras hay escrituras)
+    conn.execute('PRAGMA journal_mode=WAL')
+    # Optimizaciones adicionales
+    conn.execute('PRAGMA synchronous=NORMAL')  # Balance entre seguridad y velocidad
+    conn.execute('PRAGMA cache_size=10000')    # Cache más grande
+    conn.execute('PRAGMA temp_store=MEMORY')   # Tablas temporales en memoria
     return conn
 
 
@@ -358,14 +364,18 @@ def register_or_update_charging_point(cp_id: str, localizacion: str, max_kw: flo
 
 
 def get_available_charging_points():
-    """Obtiene lista de puntos de carga disponibles"""
+    """
+    Obtiene lista de puntos de carga disponibles.
+    Considera disponibles: 'available' y 'offline' (offline = listo para uso, solo desconectado)
+    NO considera: 'charging' (en uso), 'fault' (con fallo), 'out_of_service' (fuera de servicio)
+    """
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
         SELECT cp_id, localizacion as location, max_kw as max_power_kw, tarifa_kwh as tariff_per_kwh
         FROM charging_points
-        WHERE estado = 'available' AND active = 1
+        WHERE estado IN ('available', 'offline') AND active = 1
     """)
     
     rows = cursor.fetchall()

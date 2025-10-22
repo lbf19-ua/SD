@@ -383,6 +383,51 @@
             
             <div id="cpStatusList" style="max-height: 400px; overflow-y: auto;"></div>
         </div>
+
+        <!-- Panel de Registro de Punto de Carga -->
+        <div class="data-table" style="background: #d1ecf1; border: 2px solid #17a2b8;">
+            <h2 style="color: #0c5460;">➕ Registrar Nuevo Punto de Carga</h2>
+            <p style="color: #0c5460; margin-bottom: 15px;">Dar de alta un nuevo punto de carga en el sistema</p>
+            
+            <form id="registerCpForm" onsubmit="registerNewCP(event)" style="display: grid; gap: 15px;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                    <div>
+                        <label for="newCpId" style="display: block; margin-bottom: 5px; color: #0c5460; font-weight: bold;">ID del Punto de Carga *</label>
+                        <input type="text" id="newCpId" required placeholder="Ej: CP_011" 
+                            style="width: 100%; padding: 10px; border: 1px solid #17a2b8; border-radius: 5px; font-size: 14px;">
+                    </div>
+                    <div>
+                        <label for="newCpLocation" style="display: block; margin-bottom: 5px; color: #0c5460; font-weight: bold;">Localización *</label>
+                        <input type="text" id="newCpLocation" required placeholder="Ej: Parking Principal Edificio A" 
+                            style="width: 100%; padding: 10px; border: 1px solid #17a2b8; border-radius: 5px; font-size: 14px;">
+                    </div>
+                </div>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                    <div>
+                        <label for="newCpPower" style="display: block; margin-bottom: 5px; color: #0c5460; font-weight: bold;">Potencia Máxima (kW)</label>
+                        <input type="number" id="newCpPower" step="0.1" min="0" value="22.0" 
+                            style="width: 100%; padding: 10px; border: 1px solid #17a2b8; border-radius: 5px; font-size: 14px;">
+                    </div>
+                    <div>
+                        <label for="newCpTariff" style="display: block; margin-bottom: 5px; color: #0c5460; font-weight: bold;">Tarifa (€/kWh)</label>
+                        <input type="number" id="newCpTariff" step="0.01" min="0" value="0.30" 
+                            style="width: 100%; padding: 10px; border: 1px solid #17a2b8; border-radius: 5px; font-size: 14px;">
+                    </div>
+                </div>
+                
+                <div style="display: flex; gap: 10px;">
+                    <button type="submit" style="flex: 1; padding: 12px; background: #17a2b8; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
+                        ➕ Registrar Punto de Carga
+                    </button>
+                    <button type="button" onclick="clearRegisterForm()" style="padding: 12px 20px; background: #6c757d; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
+                        🔄 Limpiar
+                    </button>
+                </div>
+                
+                <div id="registerMessage" style="padding: 10px; border-radius: 5px; display: none; font-weight: bold;"></div>
+            </form>
+        </div>
     </div>
 
     <script>
@@ -500,6 +545,18 @@
                 case 'cp_fixed':
                     addEventLog(`✅ ${data.message}`);
                     showRefreshIndicator();
+                    break;
+
+                case 'register_cp_success':
+                    addEventLog(`✅ ${data.message}`);
+                    showRegisterMessage(data.message, 'success');
+                    clearRegisterForm();
+                    showRefreshIndicator();
+                    break;
+
+                case 'register_cp_error':
+                    addEventLog(`❌ Error al registrar CP: ${data.message}`);
+                    showRegisterMessage(data.message, 'error');
                     break;
 
                 case 'user_login':
@@ -811,6 +868,76 @@
                 `;
                 statusList.appendChild(cpItem);
             });
+        }
+
+        function registerNewCP(event) {
+            event.preventDefault();
+            
+            const cpId = document.getElementById('newCpId').value.trim();
+            const location = document.getElementById('newCpLocation').value.trim();
+            const maxPowerKw = parseFloat(document.getElementById('newCpPower').value);
+            const tariffPerKwh = parseFloat(document.getElementById('newCpTariff').value);
+            
+            // Validación básica
+            if (!cpId || !location) {
+                showRegisterMessage('Por favor completa todos los campos requeridos', 'error');
+                return;
+            }
+            
+            if (maxPowerKw <= 0 || tariffPerKwh <= 0) {
+                showRegisterMessage('La potencia y la tarifa deben ser valores positivos', 'error');
+                return;
+            }
+            
+            // Enviar solicitud al servidor
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'register_cp',
+                    cp_data: {
+                        cp_id: cpId,
+                        location: location,
+                        max_power_kw: maxPowerKw,
+                        tariff_per_kwh: tariffPerKwh
+                    }
+                }));
+                
+                showRegisterMessage('Registrando punto de carga...', 'info');
+                addEventLog(`➕ Solicitando registro de ${cpId} en ${location}`);
+            } else {
+                showRegisterMessage('No hay conexión con el servidor', 'error');
+            }
+        }
+        
+        function clearRegisterForm() {
+            document.getElementById('registerCpForm').reset();
+            document.getElementById('newCpPower').value = '22.0';
+            document.getElementById('newCpTariff').value = '0.30';
+            hideRegisterMessage();
+        }
+        
+        function showRegisterMessage(message, type) {
+            const msgDiv = document.getElementById('registerMessage');
+            msgDiv.textContent = message;
+            msgDiv.style.display = 'block';
+            
+            // Colores según el tipo de mensaje
+            if (type === 'success') {
+                msgDiv.style.background = '#d4edda';
+                msgDiv.style.color = '#155724';
+                msgDiv.style.border = '1px solid #c3e6cb';
+            } else if (type === 'error') {
+                msgDiv.style.background = '#f8d7da';
+                msgDiv.style.color = '#721c24';
+                msgDiv.style.border = '1px solid #f5c6cb';
+            } else if (type === 'info') {
+                msgDiv.style.background = '#d1ecf1';
+                msgDiv.style.color = '#0c5460';
+                msgDiv.style.border = '1px solid #bee5eb';
+            }
+        }
+        
+        function hideRegisterMessage() {
+            document.getElementById('registerMessage').style.display = 'none';
         }
 
         // Initialize
