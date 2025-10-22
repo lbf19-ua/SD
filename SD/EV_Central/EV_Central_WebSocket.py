@@ -59,19 +59,84 @@ class EV_CentralWS:
         except Exception as e:
             print(f"[CENTRAL] ⚠️  Warning: Kafka not available: {e}")
 
+    def _normalize_status(self, status: str) -> str:
+        s = (status or '').lower()
+        if s == 'unavailable':
+            return 'offline'
+        if s == 'error':
+            return 'fault'
+        if s in ('maintenance', 'out_of_order'):
+            return 'out_of_service'
+        return status
+
+    def _standardize_cp(self, cp_row: dict) -> dict:
+        """Transforma filas de BD español a claves que espera UI."""
+        return {
+            'cp_id': cp_row.get('cp_id'),
+            'location': cp_row.get('location') or cp_row.get('localizacion') or cp_row.get('Location') or cp_row.get('LOCALIZACION') or '',
+            'status': self._normalize_status(cp_row.get('status')),
+            'max_power_kw': cp_row.get('max_power_kw'),
+            'tariff_per_kwh': cp_row.get('tariff_per_kwh'),
+            'active': cp_row.get('active', 1),
+            'power_output': cp_row.get('max_power_kw')
+        }
+
+    def _standardize_user(self, u: dict) -> dict:
+        """Transforma filas de usuarios español a claves UI."""
+        return {
+            'id': u.get('id'),
+            'username': u.get('nombre'),
+            'email': u.get('email'),
+            'role': u.get('role'),
+            'balance': u.get('balance', 0.0),
+            'is_active': bool(u.get('active', 1))
+        }
+
+    def _standardize_session(self, s: dict) -> dict:
+        """Transforma filas de sesiones español a claves UI."""
+        return {
+            'id': s.get('id'),
+            'session_id': s.get('id'),
+            'username': s.get('username'),
+            'cp_id': s.get('cp_id'),
+            'energy': s.get('energy', 0),
+            'cost': s.get('cost', 0),
+            'start_time': s.get('start_time')
+        }
+
     def get_dashboard_data(self):
         """Obtiene todos los datos para el dashboard administrativo"""
         try:
             # Obtener usuarios
-            users = db.get_all_users()
+            users = []
+            try:
+                users_raw = db.get_all_users() if hasattr(db, 'get_all_users') else []
+                users = [self._standardize_user(u) for u in users_raw]
+            except Exception:
+                users = []
             
-            # Obtener puntos de carga
-            charging_points = db.get_all_charging_points()
+            # Obtener puntos de carga y estandarizar campos
+            cps_raw = db.get_all_charging_points() if hasattr(db, 'get_all_charging_points') else []
+            charging_points = [self._standardize_cp(cp) for cp in cps_raw]
             
-            # Obtener sesiones activas
-            active_sessions_raw = db.get_active_sessions()
+            # Sesiones activas
+            active_sessions_raw = []
+            try:
+                conn = db.get_connection()
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT s.id, s.cp_id, s.start_time, u.nombre as username
+                    FROM charging_sesiones s
+                    JOIN usuarios u ON s.user_id = u.id
+                    WHERE s.estado = 'active'
+                    ORDER BY s.start_time DESC
+                """)
+                active_sessions_raw = [dict(r) for r in cur.fetchall()]
+                conn.close()
+            except Exception:
+                active_sessions_raw = []
+
             active_sessions = []
-            
             for session in active_sessions_raw:
                 # Calcular energía y costo simulado basado en tiempo
                 start_time = datetime.fromtimestamp(session['start_time'])
@@ -79,26 +144,33 @@ class EV_CentralWS:
                 energy = elapsed_hours * 7.4  # Simular 7.4 kW
                 
                 # Obtener tarifa del CP
-                cp = db.get_charging_point_by_id(session['cp_id'])
-                tariff = cp.get('tariff_per_kwh', 0.30) if cp else 0.30
+                cp_row = db.get_charging_point_by_id(session['cp_id']) if hasattr(db, 'get_charging_point_by_id') else None
+                tariff = cp_row.get('tariff_per_kwh', 0.30) if cp_row else 0.30
                 cost = energy * tariff
                 
-                active_sessions.append({
-                    'session_id': session['id'],
-                    'username': session['username'],
-                    'cp_id': session['cp_id'],
-                    'energy': round(energy, 2),
-                    'cost': round(cost, 2),
-                    'start_time': session['start_time']
-                })
+                std_session = self._standardize_session(session)
+                std_session['energy'] = round(energy, 2)
+                std_session['cost'] = round(cost, 2)
+                active_sessions.append(std_session)
             
             # Calcular estadísticas
             today = datetime.now().date()
-            today_sessions = db.get_sessions_by_date(today)
-            today_revenue = sum(s['total_cost'] for s in today_sessions if s['total_cost'])
+            try:
+                if hasattr(db, 'get_sessions_by_date'):
+                    today_sessions = db.get_sessions_by_date(today)
+                elif hasattr(db, 'get_sesiones_by_date'):
+                    today_sessions = db.get_sesiones_by_date(today)
+                else:
+                    today_sessions = []
+            except Exception:
+                today_sessions = []
+            # Sumatorio robusto del ingreso de hoy (acepta claves en EN/ES)
+            def _get_cost_val(s):
+                return s.get('total_cost') or s.get('total_coste') or s.get('coste') or s.get('cost') or 0
+            today_revenue = sum(_get_cost_val(s) for s in today_sessions if _get_cost_val(s))
             
             # Contar usuarios activos (drivers)
-            driver_users = [u for u in users if u['role'] == 'driver']
+            driver_users = [u for u in users if u.get('role') == 'driver']
             
             stats = {
                 'total_users': len(driver_users),
@@ -218,7 +290,7 @@ async def websocket_handler_http(request):
                     
                     elif msg_type == 'get_all_cps':
                         # Obtener todos los puntos de carga
-                        cps = db.get_all_charging_points()
+                        cps = [central_instance._standardize_cp(cp) for cp in (db.get_all_charging_points() if hasattr(db, 'get_all_charging_points') else [])]
                         await ws.send_str(json.dumps({
                             'type': 'all_cps',
                             'charging_points': cps
@@ -247,7 +319,7 @@ async def websocket_handler_http(request):
                         }))
                         
                         # Broadcast a todos los clientes
-                        cps = db.get_all_charging_points()
+                        cps = [central_instance._standardize_cp(cp) for cp in (db.get_all_charging_points() if hasattr(db, 'get_all_charging_points') else [])]
                         for client in shared_state.connected_clients:
                             if client != ws:
                                 try:
@@ -272,7 +344,7 @@ async def websocket_handler_http(request):
                         }))
                         
                         # Broadcast a todos los clientes
-                        cps = db.get_all_charging_points()
+                        cps = [central_instance._standardize_cp(cp) for cp in (db.get_all_charging_points() if hasattr(db, 'get_all_charging_points') else [])]
                         for client in shared_state.connected_clients:
                             if client != ws:
                                 try:
@@ -364,6 +436,32 @@ async def kafka_listener():
             for message in consumer:
                 event = message.value
                 print(f"[KAFKA] 📨 Received event: {event.get('event_type', 'UNKNOWN')} from topic: {message.topic}")
+                # Persistir inmediatamente registros de CP para mayor fiabilidad del Test A
+                try:
+                    et = event.get('event_type', '')
+                    action = event.get('action', '')
+                    cp_id = event.get('cp_id') or event.get('engine_id')
+                    if cp_id and (et == 'CP_REGISTRATION' or action == 'connect'):
+                        data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
+                        localizacion = data.get('localizacion') or data.get('location') or 'Desconocido'
+                        max_kw = data.get('max_kw') or data.get('max_power_kw') or 22.0
+                        tarifa_kwh = data.get('tarifa_kwh') or data.get('tariff_per_kwh') or data.get('price_eur_kwh') or 0.30
+                        if hasattr(db, 'register_or_update_charging_point'):
+                            db.register_or_update_charging_point(cp_id, localizacion, max_kw=max_kw, tarifa_kwh=tarifa_kwh, estado='available')
+                            print(f"[CENTRAL] 💾 CP registrado/actualizado (pre-broadcast): {cp_id}")
+                    # Si llega cambio de estado pero el CP no existe, crearlo mínimo
+                    if cp_id and action == 'cp_status_change':
+                        try:
+                            cp_row = db.get_charging_point_by_id(cp_id)
+                            if not cp_row:
+                                status = event.get('status', 'available')
+                                if hasattr(db, 'register_or_update_charging_point'):
+                                    db.register_or_update_charging_point(cp_id, 'Desconocido', max_kw=22.0, tarifa_kwh=0.30, estado=status)
+                                    print(f"[CENTRAL] 💾 CP auto-creado por status_change: {cp_id}")
+                        except Exception as ie:
+                            print(f"[CENTRAL] ⚠️ Error auto-creando CP por status_change: {ie}")
+                except Exception as e:
+                    print(f"[CENTRAL] ⚠️ Error persistiendo registro de CP: {e}")
                 # Programar el broadcast en el event loop
                 asyncio.run_coroutine_threadsafe(
                     broadcast_kafka_event(event),
@@ -381,14 +479,64 @@ async def broadcast_kafka_event(event):
     """Broadcast un evento de Kafka a todos los clientes WebSocket"""
     print(f"[KAFKA] 🔄 Processing event for broadcast: {event.get('event_type', 'UNKNOWN')}, clients: {len(shared_state.connected_clients)}")
     
-    if not shared_state.connected_clients:
-        print(f"[KAFKA] ⚠️  No clients connected, skipping broadcast")
-        return
-    
     # Determinar el tipo de evento y formatearlo para el dashboard
     action = event.get('action', '')
     event_type = event.get('event_type', '')
     
+    # Primero: persistir cambios de estado relevantes SIEMPRE (aunque no haya clientes conectados)
+    cp_id = event.get('cp_id') or event.get('engine_id')
+    if cp_id:
+        if action in ['connect'] or event_type in ['CP_REGISTRATION']:
+            # Auto-registro/actualización del CP al conectar
+            try:
+                cp = db.get_charging_point_by_id(cp_id)
+                data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
+                localizacion = data.get('localizacion') or data.get('location') or 'Desconocido'
+                max_kw = data.get('max_kw') or data.get('max_power_kw') or 22.0
+                tarifa_kwh = data.get('tarifa_kwh') or data.get('tariff_per_kwh') or data.get('price_eur_kwh') or 0.30
+                estado = 'available'
+                print(f"[CENTRAL] 🆕 Auto-reg CP on connect: cp_id={cp_id}, loc={localizacion}, max_kw={max_kw}, tarifa={tarifa_kwh}")
+                # Registrar o actualizar
+                if hasattr(db, 'register_or_update_charging_point'):
+                    db.register_or_update_charging_point(cp_id, localizacion, max_kw=max_kw, tarifa_kwh=tarifa_kwh, estado=estado)
+                else:
+                    # Fallback: intentar solo actualizar estado
+                    db.update_charging_point_status(cp_id, estado)
+                # Confirmar existencia
+                cp_after = db.get_charging_point_by_id(cp_id)
+                if cp_after:
+                    print(f"[CENTRAL] ✅ CP registrado/actualizado: {cp_after['cp_id']} en {cp_after.get('location','')} estado={cp_after.get('status','')}" )
+                else:
+                    print(f"[CENTRAL] ⚠️ No se pudo verificar CP {cp_id} tras auto-registro")
+            except Exception as e:
+                print(f"[CENTRAL] ⚠️ Error auto-registrando CP {cp_id}: {e}")
+        elif action in ['charging_started']:
+            # Marcar CP como en carga
+            db.update_charging_point_status(cp_id, 'charging')
+        elif action in ['charging_stopped']:
+            # Marcar CP disponible
+            db.update_charging_point_status(cp_id, 'available')
+        elif action in ['cp_status_change']:
+            status = event.get('status')
+            if status:
+                # Asegurar CP existe antes de actualizar
+                try:
+                    if not db.get_charging_point_by_id(cp_id) and hasattr(db, 'register_or_update_charging_point'):
+                        db.register_or_update_charging_point(cp_id, 'Desconocido', max_kw=22.0, tarifa_kwh=0.30, estado=status)
+                        print(f"[CENTRAL] 🆕 CP auto-creado en cp_status_change: {cp_id}")
+                except Exception as e:
+                    print(f"[CENTRAL] ⚠️ Error asegurando CP en cp_status_change: {e}")
+                db.update_charging_point_status(cp_id, status)
+        elif action in ['cp_error_simulated', 'cp_error_fixed']:
+            new_status = event.get('new_status') or event.get('status')
+            if new_status:
+                db.update_charging_point_status(cp_id, new_status)
+
+    # Si no hay clientes conectados, no hace falta construir ni enviar mensajes
+    if not shared_state.connected_clients:
+        print(f"[KAFKA] ⚠️  No clients connected, skipping broadcast")
+        return
+
     # Crear mensaje según el tipo de acción
     if action == 'charging_started':
         message = json.dumps({
@@ -443,11 +591,14 @@ async def broadcast_kafka_event(event):
         })
         print(f"[KAFKA] 📤 Broadcasting generic event: {event_desc}")
     
-    # Broadcast a todos los clientes
+    # Broadcast a todos los clientes (compat websockets y aiohttp)
     disconnected_clients = set()
     for client in shared_state.connected_clients:
         try:
-            await client.send(message)
+            if hasattr(client, 'send_str'):
+                await client.send_str(message)
+            else:
+                await client.send(message)
         except:
             disconnected_clients.add(client)
     
@@ -514,6 +665,18 @@ async def main():
     if not db_path.exists():
         print("⚠️  Database not found. Please run: python init_db.py")
         return
+    else:
+        # Requisito: al iniciar Central TODO debe estar apagado
+        try:
+            # 1) Terminar cualquier sesión activa que haya quedado de ejecuciones anteriores
+            if hasattr(db, 'terminate_all_active_sessions'):
+                sess, cps = db.terminate_all_active_sessions(mark_cp_offline=True)
+                print(f"[CENTRAL] � Inicio: sesiones activas terminadas: {sess}, CPs marcados offline: {cps}")
+            # 2) Marcar TODOS los CPs como offline por defecto
+            updated = db.set_all_cps_status_offline() if hasattr(db, 'set_all_cps_status_offline') else 0
+            print(f"[CENTRAL] � CPs marcados como 'offline' al inicio: {updated}")
+        except Exception as e:
+            print(f"[CENTRAL] ⚠️ No se pudo limpiar estado al inicio: {e}")
     
     try:
         # Crear aplicación web que maneje tanto HTTP como WebSocket
@@ -549,6 +712,13 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n\n[CENTRAL] 🛑 Server stopped by user")
+        # Al apagar CENTRAL, terminar todas las sesiones activas y marcar CPs offline
+        try:
+            if hasattr(db, 'terminate_all_active_sessions'):
+                sess, cps = db.terminate_all_active_sessions(mark_cp_offline=True)
+                print(f"\n[CENTRAL] 🔌 Shutdown cleanup -> sessions terminated: {sess}, CPs set offline: {cps}")
+        except Exception as e:
+            print(f"\n[CENTRAL] ⚠️ Shutdown cleanup error: {e}")
+        print("\n[CENTRAL] 🛑 Server stopped by user")
     except Exception as e:
         print(f"\n❌ Fatal error: {e}")

@@ -357,13 +357,13 @@ def register_or_update_charging_point(cp_id: str, localizacion: str, max_kw: flo
     conn.close()
 
 
-def disponibilidad_charging_points():
+def get_available_charging_points():
     """Obtiene lista de puntos de carga disponibles"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT cp_id, localizacion, max_kw, tarifa_kwh
+        SELECT cp_id, localizacion as location, max_kw as max_power_kw, tarifa_kwh as tariff_per_kwh
         FROM charging_points
         WHERE estado = 'available' AND active = 1
     """)
@@ -380,7 +380,7 @@ def get_all_charging_points():
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT cp_id, localizacion, estado, max_kw, tarifa_kwh, active
+        SELECT cp_id, localizacion as location, estado as status, max_kw as max_power_kw, tarifa_kwh as tariff_per_kwh, active
         FROM charging_points
     """)
     
@@ -402,7 +402,7 @@ def update_charging_point_status(cp_id: str, new_status: str) -> bool:
     try:
         cursor.execute("""
             UPDATE charging_points
-            SET status = ?
+            SET estado = ?
             WHERE cp_id = ?
         """, (new_status, cp_id))
         
@@ -423,6 +423,98 @@ def update_charging_point_status(cp_id: str, new_status: str) -> bool:
         conn.close()
 
 
+def set_all_cps_status_offline() -> int:
+    """Marca TODOS los puntos de carga como 'offline'. Retorna filas afectadas."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE charging_points
+            SET estado = 'offline'
+            WHERE active = 1
+        """)
+        conn.commit()
+        return cursor.rowcount
+    except Exception as e:
+        print(f"[DB] ❌ Error setting all CPs offline: {e}")
+        conn.rollback()
+        return 0
+    finally:
+        conn.close()
+
+
+def set_cps_with_active_sessions_to_charging() -> int:
+    """Marca como 'charging' los CPs que tienen sesiones activas."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE charging_points
+            SET estado = 'charging'
+            WHERE cp_id IN (
+                SELECT DISTINCT cp_id FROM charging_sesiones WHERE estado = 'active'
+            )
+        """)
+        conn.commit()
+        return cursor.rowcount
+    except Exception as e:
+        print(f"[DB] ❌ Error setting CPs with active sessions to 'charging': {e}")
+        conn.rollback()
+        return 0
+    finally:
+        conn.close()
+
+
+def terminate_all_active_sessions(mark_cp_offline: bool = True) -> tuple[int, int]:
+    """Termina todas las sesiones activas y opcionalmente pone sus CPs en 'offline'.
+
+    Retorna (sesiones_terminadas, cps_actualizados)
+    """
+    from datetime import datetime as _dt
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        now_ts = _dt.now().timestamp()
+
+        # Obtener CPs afectados antes de cerrar sesiones
+        cursor.execute("""
+            SELECT DISTINCT cp_id FROM charging_sesiones WHERE estado = 'active'
+        """)
+        cp_rows = [r[0] for r in cursor.fetchall()]
+
+        # Terminar sesiones activas sin cobrar ni modificar balances
+        cursor.execute("""
+            UPDATE charging_sesiones
+            SET end_time = ?, estado = 'terminated'
+            WHERE estado = 'active'
+        """, (now_ts,))
+        sessions_closed = cursor.rowcount
+
+        cps_updated = 0
+        if mark_cp_offline and cp_rows:
+            cursor.execute(
+                f"""
+                UPDATE charging_points
+                SET estado = 'offline'
+                WHERE cp_id IN ({','.join(['?'] * len(cp_rows))})
+                """,
+                cp_rows,
+            )
+            cps_updated = cursor.rowcount
+
+        conn.commit()
+        if sessions_closed or cps_updated:
+            print(f"[DB] 🔌 Terminated active sessions: {sessions_closed}, CPs set offline: {cps_updated}")
+        return sessions_closed, cps_updated
+    except Exception as e:
+        print(f"[DB] ❌ Error terminating active sessions on shutdown: {e}")
+        conn.rollback()
+        return 0, 0
+    finally:
+        conn.close()
+
+
 # === Funciones de sesiones de carga ===
 
 def create_charging_session(user_id: int, cp_id: str, correlation_id: str = None) -> int:
@@ -438,7 +530,7 @@ def create_charging_session(user_id: int, cp_id: str, correlation_id: str = None
     cursor.execute("""
         INSERT INTO charging_sesiones (user_id, cp_id, correlacion_id, start_time, estado)
         VALUES (?, ?, ?, ?, 'active')
-    """, (user_id, cp_id, correlacion_id, start_time))
+    """, (user_id, cp_id, correlation_id, start_time))
     
     sesion_id = cursor.lastrowid
     
@@ -652,19 +744,20 @@ def get_charging_point_by_id(cp_id: str):
     """Obtiene un punto de carga por su ID"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM charging_points WHERE cp_id = ?", (cp_id,))
+    cursor.execute("""
+        SELECT id, cp_id, localizacion as location, estado as status, 
+               max_kw as max_power_kw, tarifa_kwh as tariff_per_kwh
+        FROM charging_points 
+        WHERE cp_id = ?
+    """, (cp_id,))
     row = cursor.fetchone()
     conn.close()
     
     if row:
-        return {
-            'id': row['id'],
-            'cp_id': row['cp_id'],
-            'localizacion': row['localizacion'],
-            'estado': row['estado'],
-            'power_output': row['max_kw'],
-            'tariff': row['tarifa_kwh']
-        }
+        d = dict(row)
+        d['power_output'] = d.get('max_power_kw')
+        d['tariff'] = d.get('tariff_per_kwh')
+        return d
     return None
 
 #!/usr/bin/env python3
