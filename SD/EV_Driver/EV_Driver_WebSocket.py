@@ -17,7 +17,7 @@ except ImportError:
     WS_AVAILABLE = False
 
 # Kafka imports
-from kafka import KafkaProducer
+from kafka import KafkaProducer, KafkaConsumer
 
 # Añadir el directorio padre al path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,6 +27,7 @@ import database as db
 
 # Configuración desde network_config o variables de entorno (Docker)
 KAFKA_BROKER = os.environ.get('KAFKA_BROKER', KAFKA_BROKER_DEFAULT)
+KAFKA_TOPICS_CONSUME = [KAFKA_TOPICS['central_events']]
 KAFKA_TOPIC_PRODUCE = KAFKA_TOPICS['driver_events']
 SERVER_PORT = DRIVER_CONFIG['ws_port']
 
@@ -36,6 +37,7 @@ class SharedState:
         self.connected_clients = set()
         self.client_users = {}  # Mapeo: {client_id: username}
         self.charging_sessions = {}  # Diccionario: {username: session_data}
+        self.pending_authorizations = {}  # Diccionario: {client_id: {cp_id, username, websocket}}
         self.lock = threading.Lock()
 
 shared_state = SharedState()
@@ -50,7 +52,12 @@ class EV_DriverWS:
         self.driver_id = driver_id
         self.kafka_broker = kafka_broker
         self.producer = None
+        self.consumer = None
         self.initialize_kafka()
+        
+        # Iniciar consumer en thread separado
+        kafka_thread = threading.Thread(target=self.kafka_listener, daemon=True)
+        kafka_thread.start()
 
     def initialize_kafka(self):
         """Inicializa el productor de Kafka"""
@@ -59,9 +66,113 @@ class EV_DriverWS:
                 bootstrap_servers=self.kafka_broker,
                 value_serializer=lambda v: json.dumps(v).encode('utf-8')
             )
-            print(f"[DRIVER] ✅ Kafka producer initialized")
+            self.consumer = KafkaConsumer(
+                *KAFKA_TOPICS_CONSUME,
+                bootstrap_servers=self.kafka_broker,
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                auto_offset_reset='latest',
+                group_id=f'ev_driver_group_{self.driver_id}'
+            )
+            print(f"[DRIVER] ✅ Kafka producer and consumer initialized")
         except Exception as e:
             print(f"[DRIVER] ⚠️  Warning: Kafka not available: {e}")
+            
+    def kafka_listener(self):
+        """Escucha mensajes de Kafka, especialmente las respuestas de autorización"""
+        print(f"[KAFKA] 📡 Consumer started, listening to {KAFKA_TOPICS_CONSUME}")
+        while True:
+            try:
+                for message in self.consumer:
+                    event = message.value
+                    event_type = event.get('event_type')
+                    print(f"[KAFKA] 📨 Received {event_type} from Central")
+                    
+                    if event_type == 'AUTHORIZATION_RESPONSE':
+                        client_id = event.get('client_id')
+                        cp_id = event.get('cp_id')
+                        authorized = event.get('authorized', False)
+                        reason = event.get('reason', '')
+                        
+                        # Procesar respuesta de autorización
+                        with shared_state.lock:
+                            if client_id in shared_state.pending_authorizations:
+                                auth_data = shared_state.pending_authorizations.pop(client_id)
+                                username = auth_data.get('username')
+                                ws = auth_data.get('websocket')
+                                
+                                if authorized:
+                                    print(f"[DRIVER] ✅ Central autorizó carga en {cp_id}")
+                                    # Crear sesión ahora que tenemos autorización
+                                    correlation_id = generate_message_id()
+                                    session_id = db.create_charging_session(auth_data['user_id'], cp_id, correlation_id)
+                                    
+                                    if session_id:
+                                        cp = db.get_charging_point_by_id(cp_id)
+                                        shared_state.charging_sessions[username] = {
+                                            'username': username,
+                                            'session_id': session_id,
+                                            'cp_id': cp_id,
+                                            'start_time': time.time(),
+                                            'energy': 0.0,
+                                            'cost': 0.0,
+                                            'tariff': cp.get('tariff_per_kwh', 0.30) if cp else 0.30
+                                        }
+                                        # Notificar al cliente
+                                        try:
+                                            if hasattr(ws, 'send_str'):
+                                                asyncio.run_coroutine_threadsafe(
+                                                    ws.send_str(json.dumps({
+                                                        'type': 'charging_started',
+                                                        'cp_id': cp_id,
+                                                        'location': cp.get('location', 'Unknown'),
+                                                        'power_output': cp.get('max_power_kw', 22.0),
+                                                        'tariff': cp.get('tariff_per_kwh', 0.30)
+                                                    })),
+                                                    asyncio.get_event_loop()
+                                                )
+                                            else:
+                                                asyncio.run_coroutine_threadsafe(
+                                                    ws.send(json.dumps({
+                                                        'type': 'charging_started',
+                                                        'cp_id': cp_id,
+                                                        'location': cp.get('location', 'Unknown'),
+                                                        'power_output': cp.get('max_power_kw', 22.0),
+                                                        'tariff': cp.get('tariff_per_kwh', 0.30)
+                                                    })),
+                                                    asyncio.get_event_loop()
+                                                )
+                                        except Exception as e:
+                                            print(f"[DRIVER] ⚠️ Error notificando al cliente: {e}")
+                                else:
+                                    print(f"[DRIVER] ❌ Central rechazó autorización: {reason}")
+                                    try:
+                                        msg = {'type': 'error', 'message': f'No se pudo iniciar la carga: {reason}'}
+                                        if hasattr(ws, 'send_str'):
+                                            asyncio.run_coroutine_threadsafe(
+                                                ws.send_str(json.dumps(msg)),
+                                                asyncio.get_event_loop()
+                                            )
+                                        else:
+                                            asyncio.run_coroutine_threadsafe(
+                                                ws.send(json.dumps(msg)),
+                                                asyncio.get_event_loop()
+                                            )
+                                    except Exception as e:
+                                        print(f"[DRIVER] ⚠️ Error notificando error al cliente: {e}")
+                
+            except Exception as e:
+                print(f"[KAFKA] ⚠️ Consumer error: {e}")
+                # Intentar reconectar
+                try:
+                    self.consumer = KafkaConsumer(
+                        *KAFKA_TOPICS_CONSUME,
+                        bootstrap_servers=self.kafka_broker,
+                        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                        auto_offset_reset='latest',
+                        group_id=f'ev_driver_group_{self.driver_id}'
+                    )
+                except:
+                    pass
 
     def authenticate_user(self, username, password):
         """Autentica un usuario usando la base de datos"""
@@ -210,39 +321,46 @@ class EV_DriverWS:
             cp = db.get_charging_point_by_id(cp_id)
             if not cp:
                 return {'success': False, 'message': f'Charging point {cp_id} not found'}
-            # Aceptar CPs en estado 'available' u 'offline' (offline = disponible para uso)
-            # Rechazar: 'charging' (ocupado), 'fault' (con fallo), 'out_of_service' (fuera de servicio)
-            if cp.get('status') not in (None, 'available', 'offline'):
+                
+            # Solo hacer validación básica, Central hará la validación final
+            if cp.get('status') in ('fault', 'out_of_service'):
                 return {'success': False, 'message': f'Charging point {cp_id} not available (status: {cp.get("status")})'}
 
-            correlation_id = generate_message_id()
-            session_id = db.create_charging_session(user['id'], cp['cp_id'], correlation_id)
-            if session_id:
-                if self.producer:
-                    event = {
-                        'message_id': generate_message_id(),
-                        'driver_id': self.driver_id,
-                        'action': 'charging_started',
+            # Generar ID único para esta solicitud
+            client_id = generate_message_id()
+            
+            # Publicar solicitud de autorización
+            if self.producer:
+                event = {
+                    'message_id': generate_message_id(),
+                    'event_type': 'AUTHORIZATION_REQUEST',
+                    'driver_id': self.driver_id,
+                    'username': username,
+                    'cp_id': cp_id,
+                    'client_id': client_id,
+                    'timestamp': current_timestamp()
+                }
+                self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                self.producer.flush()
+                print(f"[DRIVER] 🔐 Solicitando autorización a Central para {cp_id}")
+                
+                # Guardar solicitud pendiente
+                with shared_state.lock:
+                    shared_state.pending_authorizations[client_id] = {
                         'username': username,
-                        'cp_id': cp['cp_id'],
-                        'session_id': session_id,
-                        'timestamp': current_timestamp(),
-                        'correlation_id': correlation_id
+                        'cp_id': cp_id,
+                        'user_id': user['id'],
+                        'websocket': None  # Se asignará en el handler de websocket
                     }
-                    self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=self.driver_id.encode())
-                    self.producer.flush()
-
-                print(f"[DRIVER] ⚡ Charging session {session_id} started for {username} at {cp['cp_id']}")
+                
                 return {
                     'success': True,
-                    'session_id': session_id,
-                    'cp_id': cp['cp_id'],
-                    'location': cp.get('location') or cp.get('localizacion', 'Unknown'),
-                    'power_output': cp.get('max_power_kw', 22.0),
-                    'tariff': cp.get('tariff_per_kwh', 0.30)
+                    'pending': True,
+                    'client_id': client_id,
+                    'message': 'Solicitud enviada a Central'
                 }
             else:
-                return {'success': False, 'message': 'Failed to create charging session'}
+                return {'success': False, 'message': 'Sistema de mensajería no disponible'}
         except Exception as e:
             print(f"[DRIVER] ❌ Charging request (specific CP) error: {e}")
             return {'success': False, 'message': str(e)}
@@ -816,26 +934,24 @@ async def websocket_handler_http(request):
                         cp_id = data.get('cp_id')
                         result = driver_instance.request_charging_at_cp(username, cp_id)
 
-                        if result['success']:
-                            with shared_state.lock:
-                                shared_state.charging_sessions[username] = {
-                                    'username': username,
-                                    'session_id': result['session_id'],
-                                    'cp_id': result['cp_id'],
-                                    'start_time': time.time(),
-                                    'energy': 0.0,
-                                    'cost': 0.0,
-                                    'tariff': result['tariff']
-                                }
-
-                            await ws.send_str(json.dumps({
-                                'type': 'charging_started',
-                                'session_id': result['session_id'],
-                                'cp_id': result['cp_id'],
-                                'location': result['location'],
-                                'power_output': result['power_output'],
-                                'tariff': result['tariff']
-                            }))
+                        if result.get('success'):
+                            if result.get('pending'):
+                                # Guardar el websocket para la respuesta
+                                client_id = result['client_id']
+                                with shared_state.lock:
+                                    if client_id in shared_state.pending_authorizations:
+                                        shared_state.pending_authorizations[client_id]['websocket'] = ws
+                                
+                                await ws.send_str(json.dumps({
+                                    'type': 'charging_pending',
+                                    'message': 'Esperando autorización de Central...'
+                                }))
+                            else:
+                                # Respuesta directa (error de validación local)
+                                await ws.send_str(json.dumps({
+                                    'type': 'error',
+                                    'message': result.get('message', 'Error en validación local')
+                                }))
                         else:
                             await ws.send_str(json.dumps({
                                 'type': 'error',

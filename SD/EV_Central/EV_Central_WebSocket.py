@@ -622,6 +622,63 @@ async def kafka_listener():
                 # ====================================================================
                 # REQUISITO b) Autorización de suministros
                 # ====================================================================
+                # La Central procesa dos tipos de eventos para suministros:
+                # 1) Petición de autorización: validación del punto de carga
+                # 2) Inicio de carga: registro de la sesión una vez autorizada
+                # --------------------------------------------------------------------
+                if et == 'AUTHORIZATION_REQUEST':
+                    try:
+                        cp_id = event.get('cp_id')
+                        client_id = event.get('client_id')
+                        if not cp_id or not client_id:
+                            raise ValueError("CP ID y Client ID son requeridos")
+                        
+                        # Verificar estado del punto de carga
+                        cp = db.get_charging_point_by_id(cp_id)
+                        if not cp:
+                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                'client_id': client_id,
+                                'cp_id': cp_id,
+                                'authorized': False,
+                                'reason': 'CP no encontrado'
+                            })
+                            continue
+                            
+                        current_status = cp.get('status')
+                        if current_status not in ('available', 'offline'):
+                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                'client_id': client_id,
+                                'cp_id': cp_id,
+                                'authorized': False,
+                                'reason': f'CP no disponible (estado: {current_status})'
+                            })
+                            continue
+                        
+                        # Intentar reservar el punto de carga
+                        if db.reserve_charging_point(cp_id):
+                            print(f"[CENTRAL] ✅ CP {cp_id} reservado para cliente {client_id}")
+                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                'client_id': client_id,
+                                'cp_id': cp_id, 
+                                'authorized': True
+                            })
+                        else:
+                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                'client_id': client_id,
+                                'cp_id': cp_id,
+                                'authorized': False,
+                                'reason': 'No se pudo reservar el CP'
+                            })
+                    except Exception as e:
+                        print(f"[CENTRAL] ⚠️ Error procesando autorización: {e}")
+                        if client_id and cp_id:
+                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                'client_id': client_id,
+                                'cp_id': cp_id,
+                                'authorized': False,
+                                'reason': f'Error interno: {str(e)}'
+                            })
+                
                 # Los eventos 'charging_started' son peticiones ya autorizadas por
                 # el Driver (que valida usuario, balance, disponibilidad).
                 # La Central actualiza el estado del CP y registra la sesión.
@@ -698,13 +755,18 @@ async def broadcast_kafka_event(event):
         # REQUISITO b) AUTORIZACIÓN DE SUMINISTRO - Sesión iniciada
         # --------------------------------------------------------------------
         elif action in ['charging_started']:
-            # Marcar CP como en carga (la autorización ya fue validada por Driver)
-            db.update_charging_point_status(cp_id, 'charging')
-            print(f"[CENTRAL] ⚡ Suministro autorizado - CP {cp_id} ahora en modo 'charging'")
+            # Marcar CP como en carga y liberar la reserva (autorización ya validada)
+            if db.release_charging_point(cp_id, 'charging'):
+                print(f"[CENTRAL] ⚡ Suministro autorizado - CP {cp_id} ahora en modo 'charging'")
+            else:
+                print(f"[CENTRAL] ⚠️ Error liberando reserva de CP {cp_id} para inicio de carga")
         
         elif action in ['charging_stopped']:
-            # Marcar CP disponible cuando termina el suministro
-            db.update_charging_point_status(cp_id, 'available')
+            # Marcar CP disponible cuando termina el suministro (liberando reserva si existe)
+            if db.release_charging_point(cp_id, 'available'):
+                print(f"[CENTRAL] ✅ Suministro finalizado - CP {cp_id} ahora disponible")
+            else:
+                print(f"[CENTRAL] ⚠️ Error liberando CP {cp_id} tras fin de carga")
         elif action in ['cp_status_change']:
             status = event.get('status')
             if status:

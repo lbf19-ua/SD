@@ -12,7 +12,7 @@ import sys
 # Ruta de la base de datos (en la carpeta SD)
 DB_PATH = Path(__file__).parent / "ev_charging.db"
 
-
+# Abre y devuelve una conexión SQLite
 def get_connection():
     """Obtiene una conexión a la base de datos con optimizaciones para concurrencia"""
     conn = sqlite3.connect(DB_PATH, timeout=30.0)  # Timeout más largo para concurrencia
@@ -25,7 +25,7 @@ def get_connection():
     conn.execute('PRAGMA temp_store=MEMORY')   # Tablas temporales en memoria
     return conn
 
-
+# Crea las tablas y los índices si no existen
 def init_database():
     """
     Inicializa la base de datos con el esquema completo.
@@ -93,7 +93,7 @@ def init_database():
         )
     """)
     
-    # Índices para mejorar rendimiento
+    # Crea índices para mejorar consultas
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_user ON charging_sesiones(user_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_cp ON charging_sesiones(cp_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_estado ON charging_sesiones(estado)")
@@ -103,12 +103,12 @@ def init_database():
     conn.close()
     print(f"[DB] Database initialized at {DB_PATH}")
 
-
+# Devuelve el hash de la contraseña
 def constraseña(password: str) -> str:
     """Genera hash SHA256 de una contraseña"""
     return hashlib.sha256(password.encode()).hexdigest()
 
-
+# Inserta datos en la base de datos para probar
 def seed_test_data():
     """
     Carga datos de prueba en la base de datos.
@@ -117,7 +117,7 @@ def seed_test_data():
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Usuarios de prueba - Ampliado
+    # Usuarios de prueba
     test_users = [
         ('driver1', 'pass123', 'driver1@ev.com', 'driver', 150.0),
         ('driver2', 'pass456', 'driver2@ev.com', 'driver', 200.0),
@@ -143,7 +143,7 @@ def seed_test_data():
         except sqlite3.IntegrityError:
             pass  # Usuario ya existe
     
-    # Puntos de carga de prueba - Ampliado
+    # Puntos de carga de prueba
     test_cps = [
         ('CP_001', 'Campus Norte', 'available', 22.0, 0.30),
         ('CP_002', 'Campus Sur', 'available', 50.0, 0.35),
@@ -235,6 +235,7 @@ def seed_test_data():
     conn.close()
     print(f"[DB] Test data seeded successfully with extended data")
 
+# Comprueba si existe un usuario con nombre, contraseña y active = 1
 def autentificación_usuario(nombre: str, password: str) -> dict | None:
     """
     Autentica un usuario.
@@ -264,7 +265,7 @@ def autentificación_usuario(nombre: str, password: str) -> dict | None:
         }
     return None
 
-
+# Recupera y devuelve el usuario por ID
 def get_user_by_id(user_id: int) -> dict | None:
     """Obtiene datos de un usuario por ID"""
     conn = get_connection()
@@ -283,7 +284,7 @@ def get_user_by_id(user_id: int) -> dict | None:
         return dict(row)
     return None
 
-
+# Igual que la función anterior pero por nombre
 def get_user_by_nombre(nombre: str) -> dict | None:
     """Obtiene datos de un usuario por nombre"""
     conn = get_connection()
@@ -302,6 +303,7 @@ def get_user_by_nombre(nombre: str) -> dict | None:
         return dict(row)
     return None
 
+# Recupera y devuelve el punto de carga por su cp_id
 def get_charging_point(cp_id: str) -> dict | None:
     """Obtiene información de un punto de carga"""
     conn = get_connection()
@@ -320,7 +322,7 @@ def get_charging_point(cp_id: str) -> dict | None:
         return dict(row)
     return None
 
-
+# Actualiza el campo "estado" de charging_points buscando el punto de carga por su cp_id
 def update_cp_estado(cp_id: str, estado: str):
     """Actualiza el estado de un punto de carga"""
     conn = get_connection()
@@ -335,7 +337,7 @@ def update_cp_estado(cp_id: str, estado: str):
     conn.commit()
     conn.close()
 
-
+# Mirando el cp_id del punto de carga, i existe lo actualiza, si no existe lo crea
 def register_or_update_charging_point(cp_id: str, localizacion: str, max_kw: float = 22.0, 
                                      tarifa_kwh: float = 0.30, estado: str = 'available'):
     """
@@ -362,7 +364,7 @@ def register_or_update_charging_point(cp_id: str, localizacion: str, max_kw: flo
     conn.commit()
     conn.close()
 
-
+# Devuelve lista de puntos de carga cuyo estado es 'available' o 'offline' y active = 1
 def get_available_charging_points():
     """
     Obtiene lista de puntos de carga disponibles.
@@ -373,7 +375,7 @@ def get_available_charging_points():
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT cp_id, localizacion as location, max_kw as max_power_kw, tarifa_kwh as tariff_per_kwh
+        SELECT cp_id, localizacion, max_kw, tarifa_kwh
         FROM charging_points
         WHERE estado IN ('available', 'offline') AND active = 1
     """)
@@ -383,14 +385,14 @@ def get_available_charging_points():
     
     return [dict(row) for row in rows]
 
-
+# Devuelve todos los puntos de carga sin filtros
 def get_all_charging_points():
     """Obtiene lista de todos los puntos de carga registrados"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT cp_id, localizacion as location, estado as status, max_kw as max_power_kw, tarifa_kwh as tariff_per_kwh, active
+        SELECT cp_id, localizacion, estado, max_kw, tarifa_kwh, active
         FROM charging_points
     """)
     
@@ -399,11 +401,11 @@ def get_all_charging_points():
     
     return [dict(row) for row in rows]
 
-
+# Actualiza el estado de un punto de carga e imprime un mensaje en caso de éxito o de fallo
 def update_charging_point_status(cp_id: str, new_status: str) -> bool:
     """
     Actualiza el estado de un punto de carga.
-    Estados válidos: available, charging, fault, out_of_service, offline
+    Estados válidos: available, reserved, charging, fault, out_of_service, offline
     Retorna True si se actualizó correctamente.
     """
     conn = get_connection()
@@ -432,7 +434,7 @@ def update_charging_point_status(cp_id: str, new_status: str) -> bool:
     finally:
         conn.close()
 
-
+# Actualiza todos los puntos de carga a 'offline'
 def set_all_cps_status_offline() -> int:
     """Marca TODOS los puntos de carga como 'offline'. Retorna filas afectadas."""
     conn = get_connection()
@@ -452,7 +454,7 @@ def set_all_cps_status_offline() -> int:
     finally:
         conn.close()
 
-
+# Marca estado = 'charging' para CPs que tengan sesiones con estado = 'active'
 def set_cps_with_active_sessions_to_charging() -> int:
     """Marca como 'charging' los CPs que tienen sesiones activas."""
     conn = get_connection()
@@ -474,7 +476,8 @@ def set_cps_with_active_sessions_to_charging() -> int:
     finally:
         conn.close()
 
-
+# Selecciones los CPs que tienen sesiones activas, las actualiza con set end_time = 'now' y estado = 'terminated
+# Si mark_cp_offline es True, pone el estado de esos CPs a 'offline'
 def terminate_all_active_sessions(mark_cp_offline: bool = True) -> tuple[int, int]:
     """Termina todas las sesiones activas y opcionalmente pone sus CPs en 'offline'.
 
@@ -525,8 +528,76 @@ def terminate_all_active_sessions(mark_cp_offline: bool = True) -> tuple[int, in
         conn.close()
 
 
+# === Funciones de reserva de puntos de carga ===
+
+def reserve_charging_point(cp_id: str, timeout_seconds: int = 5) -> bool:
+    """
+    Intenta reservar un punto de carga de forma atómica.
+    Solo reserva si estado actual es 'available' u 'offline'.
+    Retorna True si se pudo reservar.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        # Actualizar estado atomicamente solo si está disponible
+        cursor.execute("""
+            UPDATE charging_points
+            SET estado = 'reserved'
+            WHERE cp_id = ? 
+            AND estado IN ('available', 'offline')
+            AND active = 1
+        """, (cp_id,))
+        
+        success = cursor.rowcount > 0
+        if success:
+            conn.commit()
+            print(f"[DB] ✅ CP {cp_id} reserved successfully")
+        else:
+            print(f"[DB] ⚠️ CP {cp_id} could not be reserved (unavailable)")
+        return success
+            
+    except Exception as e:
+        print(f"[DB] ❌ Error reserving CP: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def release_charging_point(cp_id: str, set_estado: str = 'available') -> bool:
+    """
+    Libera un punto de carga reservado.
+    Si set_estado='available': vuelve a disponible
+    Si set_estado='offline': vuelve a desconectado
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE charging_points
+            SET estado = ?
+            WHERE cp_id = ? AND estado = 'reserved'
+        """, (set_estado, cp_id))
+        
+        success = cursor.rowcount > 0
+        if success:
+            conn.commit()
+            print(f"[DB] ✅ CP {cp_id} released to {set_estado}")
+        else:
+            print(f"[DB] ⚠️ CP {cp_id} was not in reserved state")
+        return success
+            
+    except Exception as e:
+        print(f"[DB] ❌ Error releasing CP: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
 # === Funciones de sesiones de carga ===
 
+
+# Crea e inserta una nueva fila en charging_sessions con estado = 'active' y start_time actual
+# Y cambia el estado del CP a 'charging'
 def create_charging_session(user_id: int, cp_id: str, correlation_id: str = None) -> int:
     """
     Crea una nueva sesión de carga.
@@ -556,6 +627,9 @@ def create_charging_session(user_id: int, cp_id: str, correlation_id: str = None
     return sesion_id
 
 
+# Busca la sesión activa con ese id, calcula el coste según coste = energia_kwh * tarifa_kwh del CP
+# Actualiza la sesión con end_time actual, energia_kwh, coste y estado = 'completed'
+# Resta el coste del balance del usuario y pone el estado = 'available' y devuelve un resumen de la carga
 def end_charging_sesion(sesion_id: int, energia_kwh: float) -> dict:
     """
     Finaliza una sesión de carga, calcula el costo y actualiza el balance del usuario.
@@ -612,6 +686,7 @@ def end_charging_sesion(sesion_id: int, energia_kwh: float) -> dict:
     }
 
 
+# Devuelve la sesión activa más reciente para un usuario, si es que existe.
 def get_active_sesion_for_user(user_id: int) -> dict | None:
     """Obtiene la sesión activa de un usuario, si existe"""
     conn = get_connection()
@@ -632,7 +707,7 @@ def get_active_sesion_for_user(user_id: int) -> dict | None:
         return dict(row)
     return None
 
-
+# Devuelve el historial de sesiones de un usuario ordenadas por start_time descendente, limitado a 'limit' resultados.
 def get_user_sesiones(user_id: int, limit: int = 10):
     """Obtiene el historial de sesiones de un usuario"""
     conn = get_connection()
@@ -651,6 +726,7 @@ def get_user_sesiones(user_id: int, limit: int = 10):
     
     return [dict(row) for row in rows]
 
+# Crea e inserta una nueva fila en event_log con 'detalles_json', si es que tuviera.
 def log_event(correlacion_id: str, mensaje_id: str, tipo_evento: str, 
               component: str, detalles: dict = None):
     """Registra un evento en el log de auditoría"""
@@ -668,8 +744,7 @@ def log_event(correlacion_id: str, mensaje_id: str, tipo_evento: str,
     conn.close()
 
 
-
-
+# Recupera todos los usuarios y devuelte una lista con sus datos.
 def get_all_users():
     """Obtiene todos los usuarios de la base de datos"""
     conn = get_connection()
@@ -691,7 +766,7 @@ def get_all_users():
         })
     return usuarios
 
-
+# Recupera sesiones que no tienen end_time e incluye en cada sesión datos del usuario.
 def get_sesiones_actividad():
     """Obtiene todas las sesiones activas (sin end_time)"""
     conn = get_connection()
@@ -718,7 +793,7 @@ def get_sesiones_actividad():
         })
     return sesiones
 
-
+# Dada una fecha específica en date devuelve las sesiones completadas en ese rango de fechas.
 def get_sesiones_by_date(date):
     """Obtiene todas las sesiones completadas en una fecha específica"""
     conn = get_connection()
@@ -749,14 +824,14 @@ def get_sesiones_by_date(date):
         })
     return sesiones
 
-
+# Recupera un CP por su cp_id y añade atributos auxiliares como power_output y tariff.
 def get_charging_point_by_id(cp_id: str):
     """Obtiene un punto de carga por su ID"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT id, cp_id, localizacion as location, estado as status, 
-               max_kw as max_power_kw, tarifa_kwh as tariff_per_kwh
+        SELECT id, cp_id, localizacion, estado, 
+               max_kw, tarifa_kwh
         FROM charging_points 
         WHERE cp_id = ?
     """, (cp_id,))
@@ -765,8 +840,8 @@ def get_charging_point_by_id(cp_id: str):
     
     if row:
         d = dict(row)
-        d['power_output'] = d.get('max_power_kw')
-        d['tariff'] = d.get('tariff_per_kwh')
+        d['power_output'] = d.get('max_kw')
+        d['tariff'] = d.get('tarifa_kwh')
         return d
     return None
 
@@ -775,14 +850,17 @@ def get_charging_point_by_id(cp_id: str):
 Script para consultar y visualizar datos de la base de datos EV Charging System
 """
 
+# Imprime una línea repetida
 def print_separator(char="=", length=80):
     print(char * length)
 
+# Imrpime un separados, el título y otro separador.
 def print_header(title):
     print_separator()
     print(f"  {title}")
     print_separator()
 
+# Imprime una tabla con todos los usuarios registrados.
 def show_all_users():
     """Muestra todos los usuarios registrados"""
     print_header("USUARIOS REGISTRADOS")
@@ -799,6 +877,7 @@ def show_all_users():
         print(f"{user['id']:<5} {user['nombre']:<20} {user['email']:<30} {user['role']:<10} €{user['balance']:>8.2f} {active_str:<7}")
     print(f"\nTotal usuarios: {len(users)}")
 
+# Muestra todos los puntos de carga.
 def show_all_charging_points():
     """Muestra todos los puntos de carga"""
     print_header("PUNTOS DE CARGA")
@@ -811,6 +890,7 @@ def show_all_charging_points():
         print(f"{cp['cp_id']:<10} {cp['localizacion']:<35} {estado_emoji} {cp['estado']:<10} {cp['max_kw']:>6.1f}kW €{cp['tarifa_kwh']:>5.2f}/kWh")
     print(f"\nTotal puntos de carga: {len(cps)}")
 
+# Muestra las últimas 20 sesiones con nombre de usuario, hora, energía, cote y estado.
 def show_all_sessions():
     """Muestra todas las sesiones de carga"""
     print_header("SESIONES DE CARGA (Últimas 20)")
@@ -837,6 +917,7 @@ def show_all_sessions():
         print(f"{session['id']:<5} {session['nombre']:<18} {session['cp_id']:<10} {start_dt:<20} {energy:>8.2f}kWh €{cost:>7.2f} {estado_emoji} {session['estado']:<8}")
     print(f"\nTotal sesiones mostradas: {len(sessions)}")
 
+# Muestra el balance y las últimas sesiones de un usuario específico en función de su nombre..
 def show_user_history(nombre):
     """Muestra el historial de un usuario específico"""
     user = get_user_by_nombre(nombre)
@@ -869,6 +950,7 @@ def show_user_history(nombre):
     print("-" * 80)
     print(f"{'TOTAL':<57} {total_energy:>8.2f}kWh €{total_cost:>7.2f}")
 
+# Muestra estad´sticas generales que hay en el sistema como número de usuarios, puntos de carga, etc.
 def show_statistics():
     """Muestra estadísticas generales del sistema"""
     print_header("ESTADÍSTICAS DEL SISTEMA")
@@ -955,6 +1037,7 @@ def show_statistics():
         cost = user['total_cost'] or 0
         print(f"  {user['nombre']:<20} {sessions:>10} {energy:>10.2f}kWh €{cost:>12.2f}")
 
+# Es el mení interactivo de consola que permite ver usuarios, CPs, sesiones, historial, estadísticas o salir.
 def main_menu():
     """Menú interactivo"""
     while True:
@@ -993,7 +1076,7 @@ def main_menu():
             print("\n  ❌ Opción no válida")
         
         input("\n  Presiona ENTER para continuar...")
-
+    # Inicializa la BD, realiza unas pruebas e imprime un resumen.
     def run_init_db():
         """Inicializa la base de datos y muestra un resumen (migración del init_db.py)."""
         print("=" * 60)
@@ -1071,3 +1154,8 @@ def main_menu():
                 print("\n❌ La base de datos no existe. Ejecuta 'python database.py init' primero.")
             else:
                 main_menu()
+
+# get:charging_point_by_id y get_charging_point.
+# En esencia, ambas funciones obtienen la misma información base pero la presentan de forma diferente. 
+# Parece haber cierta duplicación de código que podría optimizarse - una función podría llamar a la otra y solo 
+# transformar el formato si es necesario.
