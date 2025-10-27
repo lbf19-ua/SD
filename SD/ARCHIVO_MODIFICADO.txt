@@ -1,0 +1,15 @@
+✅ ARCHIVO MODIFICADO: docker-compose.pc1.yml
+
+CAMBIO APLICADO:
+- Agregada línea 35: network_mode: "host"
+- Eliminadas líneas 35-36: ports y extra_hosts (no compatibles con network_mode: host)
+
+RAZÓN:
+- Los contenedores necesitan acceso directo a la red del host para conectar a Kafka en 192.168.1.235:9092
+- Sin network_mode: host, el contenedor está aislado y no puede alcanzar IPs externas
+
+PRÓXIMO PASO:
+- Copiar este archivo (docker-compose.pc1.yml) al otro PC
+- O aplicar el mismo cambio manualmente en el otro PC
+- Luego ejecutar: docker-compose -f docker-compose.pc1.yml up -d --build
+

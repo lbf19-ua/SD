@@ -53,6 +53,7 @@ class EV_DriverWS:
         self.kafka_broker = kafka_broker
         self.producer = None
         self.consumer = None
+        self.main_loop = None  # Guardar referencia al loop principal
         self.initialize_kafka()
         
         # Iniciar consumer en thread separado
@@ -102,63 +103,36 @@ class EV_DriverWS:
                                 
                                 if authorized:
                                     print(f"[DRIVER] ✅ Central autorizó carga en {cp_id}")
-                                    # Crear sesión ahora que tenemos autorización
-                                    correlation_id = generate_message_id()
-                                    session_id = db.create_charging_session(auth_data['user_id'], cp_id, correlation_id)
                                     
-                                    if session_id:
-                                        cp = db.get_charging_point_by_id(cp_id)
+                                    # Enviar evento para que CENTRAL cree la sesión (solo Central modifica BD)
+                                    correlation_id = generate_message_id()
+                                    if self.producer:
+                                        start_event = {
+                                            'message_id': generate_message_id(),
+                                            'event_type': 'charging_started',
+                                            'action': 'charging_started',
+                                            'driver_id': self.driver_id,
+                                            'username': username,
+                                            'user_id': auth_data['user_id'],
+                                            'cp_id': cp_id,
+                                            'correlation_id': correlation_id,
+                                            'timestamp': current_timestamp()
+                                        }
+                                        self.producer.send(KAFKA_TOPIC_PRODUCE, start_event)
+                                        self.producer.flush()
+                                        print(f"[DRIVER] 📤 Enviado evento charging_started a Central para sesión en {cp_id}")
+                                        
+                                        # Almacenar en estado local (sin BD)
                                         shared_state.charging_sessions[username] = {
                                             'username': username,
-                                            'session_id': session_id,
                                             'cp_id': cp_id,
                                             'start_time': time.time(),
                                             'energy': 0.0,
-                                            'cost': 0.0,
-                                            'tariff': cp.get('tariff_per_kwh', 0.30) if cp else 0.30
+                                            'cost': 0.0
                                         }
-                                        # Notificar al cliente
-                                        try:
-                                            if hasattr(ws, 'send_str'):
-                                                asyncio.run_coroutine_threadsafe(
-                                                    ws.send_str(json.dumps({
-                                                        'type': 'charging_started',
-                                                        'cp_id': cp_id,
-                                                        'location': cp.get('location', 'Unknown'),
-                                                        'power_output': cp.get('max_power_kw', 22.0),
-                                                        'tariff': cp.get('tariff_per_kwh', 0.30)
-                                                    })),
-                                                    asyncio.get_event_loop()
-                                                )
-                                            else:
-                                                asyncio.run_coroutine_threadsafe(
-                                                    ws.send(json.dumps({
-                                                        'type': 'charging_started',
-                                                        'cp_id': cp_id,
-                                                        'location': cp.get('location', 'Unknown'),
-                                                        'power_output': cp.get('max_power_kw', 22.0),
-                                                        'tariff': cp.get('tariff_per_kwh', 0.30)
-                                                    })),
-                                                    asyncio.get_event_loop()
-                                                )
-                                        except Exception as e:
-                                            print(f"[DRIVER] ⚠️ Error notificando al cliente: {e}")
                                 else:
                                     print(f"[DRIVER] ❌ Central rechazó autorización: {reason}")
-                                    try:
-                                        msg = {'type': 'error', 'message': f'No se pudo iniciar la carga: {reason}'}
-                                        if hasattr(ws, 'send_str'):
-                                            asyncio.run_coroutine_threadsafe(
-                                                ws.send_str(json.dumps(msg)),
-                                                asyncio.get_event_loop()
-                                            )
-                                        else:
-                                            asyncio.run_coroutine_threadsafe(
-                                                ws.send(json.dumps(msg)),
-                                                asyncio.get_event_loop()
-                                            )
-                                    except Exception as e:
-                                        print(f"[DRIVER] ⚠️ Error notificando error al cliente: {e}")
+                                    # NO podemos enviar desde aquí porque estamos en un thread diferente
                 
             except Exception as e:
                 print(f"[KAFKA] ⚠️ Consumer error: {e}")

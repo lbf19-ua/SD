@@ -134,11 +134,11 @@ class EV_CentralWS:
         return {
             'cp_id': cp_row.get('cp_id'),
             'location': cp_row.get('location') or cp_row.get('localizacion') or cp_row.get('Location') or cp_row.get('LOCALIZACION') or '',
-            'status': self._normalize_status(cp_row.get('status')),
-            'max_power_kw': cp_row.get('max_power_kw'),
-            'tariff_per_kwh': cp_row.get('tariff_per_kwh'),
+            'status': self._normalize_status(cp_row.get('estado') or cp_row.get('status')),
+            'max_power_kw': cp_row.get('max_power_kw') or cp_row.get('max_kw'),
+            'tariff_per_kwh': cp_row.get('tariff_per_kwh') or cp_row.get('tarifa_kwh'),
             'active': cp_row.get('active', 1),
-            'power_output': cp_row.get('max_power_kw')
+            'power_output': cp_row.get('max_power_kw') or cp_row.get('max_kw')
         }
 
     def _standardize_user(self, u: dict) -> dict:
@@ -267,11 +267,12 @@ class EV_CentralWS:
                 event = {
                     'message_id': generate_message_id(),
                     'event_type': event_type,
-                    'data': data,
+                    **data,
                     'timestamp': current_timestamp()
                 }
-                self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                self.producer.send('central-events', event)
                 self.producer.flush()
+                print(f"[CENTRAL] Published event: {event_type} to central-events: {data}")
             except Exception as e:
                 print(f"[CENTRAL] ⚠️  Failed to publish event: {e}")
 
@@ -567,16 +568,46 @@ async def kafka_listener():
     
     def consume_kafka():
         """Función bloqueante que consume de Kafka"""
+        # Esperar a que Kafka esté listo
+        import time
+        max_retries = 15
+        retry_count = 0
+        consumer = None
+        
+        while retry_count < max_retries:
+            try:
+                print(f"[KAFKA] 🔄 Attempt {retry_count + 1}/{max_retries} to connect to Kafka at {KAFKA_BROKER}")
+                consumer = KafkaConsumer(
+                    *KAFKA_TOPICS_CONSUME,
+                    bootstrap_servers=KAFKA_BROKER,
+                    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                    auto_offset_reset='earliest',
+                    group_id='ev_central_ws_group',
+                    consumer_timeout_ms=10000,
+                    enable_auto_commit=False
+                )
+                # Test connection
+                consumer.topics()
+                print(f"[KAFKA] ✅ Connected to Kafka successfully!")
+                print(f"[KAFKA] 📡 Consumer started, listening to {KAFKA_TOPICS_CONSUME}")
+                break
+            except Exception as e:
+                retry_count += 1
+                if consumer:
+                    consumer.close()
+                print(f"[KAFKA] ⚠️ Attempt {retry_count}/{max_retries} failed: {e}")
+                if retry_count < max_retries:
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"[KAFKA] ❌ Failed to connect to Kafka after {max_retries} attempts")
+                    return
+        
+        if not consumer:
+            print("[KAFKA] ❌ Cannot continue without Kafka connection")
+            return
+        
         try:
-            consumer = KafkaConsumer(
-                *KAFKA_TOPICS_CONSUME,
-                bootstrap_servers=KAFKA_BROKER,
-                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                auto_offset_reset='latest',
-                group_id='ev_central_ws_group'
-            )
-            
-            print(f"[KAFKA] 📡 Consumer started, listening to {KAFKA_TOPICS_CONSUME}")
             
             # ========================================================================
             # BUCLE INFINITO - La Central NUNCA deja de escuchar
@@ -630,8 +661,11 @@ async def kafka_listener():
                     try:
                         cp_id = event.get('cp_id')
                         client_id = event.get('client_id')
+                        username = event.get('username')
                         if not cp_id or not client_id:
                             raise ValueError("CP ID y Client ID son requeridos")
+                        
+                        print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, cp={cp_id}, client={client_id}")
                         
                         # Verificar estado del punto de carga
                         cp = db.get_charging_point_by_id(cp_id)
@@ -644,13 +678,17 @@ async def kafka_listener():
                             })
                             continue
                             
-                        current_status = cp.get('status')
-                        if current_status not in ('available', 'offline'):
+                        current_status = cp.get('status') or cp.get('estado')
+                        print(f"[CENTRAL] 📊 CP {cp_id} tiene estado: {current_status}")
+                        
+                        # Solo rechazar si está en estado 'fault' o 'out_of_service'
+                        # Permitir 'available', 'offline', y None (que se asumirá como disponible)
+                        if current_status in ('fault', 'out_of_service'):
                             central_instance.publish_event('AUTHORIZATION_RESPONSE', {
                                 'client_id': client_id,
                                 'cp_id': cp_id,
                                 'authorized': False,
-                                'reason': f'CP no disponible (estado: {current_status})'
+                                'reason': f'CP averiado o fuera de servicio (estado: {current_status})'
                             })
                             continue
                         
@@ -691,7 +729,7 @@ async def kafka_listener():
                 )
                 
         except Exception as e:
-            print(f"[KAFKA] ⚠️  Consumer error: {e}")
+            print(f"[KAFKA] ⚠️  Consumer error during loop: {e}")
     
     # Ejecutar el consumidor de Kafka en un thread separado (daemon = siempre activo)
     kafka_thread = threading.Thread(target=consume_kafka, daemon=True)
@@ -755,11 +793,26 @@ async def broadcast_kafka_event(event):
         # REQUISITO b) AUTORIZACIÓN DE SUMINISTRO - Sesión iniciada
         # --------------------------------------------------------------------
         elif action in ['charging_started']:
-            # Marcar CP como en carga y liberar la reserva (autorización ya validada)
-            if db.release_charging_point(cp_id, 'charging'):
-                print(f"[CENTRAL] ⚡ Suministro autorizado - CP {cp_id} ahora en modo 'charging'")
+            # Crear sesión de carga y cambiar estado del CP
+            username = event.get('username')
+            user_id = event.get('user_id')
+            
+            if user_id and cp_id:
+                try:
+                    # Crear sesión de carga (esto cambia el CP a 'charging')
+                    session_id = db.create_charging_session(user_id, cp_id, event.get('correlation_id'))
+                    if session_id:
+                        print(f"[CENTRAL] ⚡ Suministro iniciado - Sesión {session_id} en CP {cp_id} para usuario {username}")
+                    else:
+                        print(f"[CENTRAL] ⚠️ Error creando sesión de carga para CP {cp_id}")
+                except Exception as e:
+                    print(f"[CENTRAL] ⚠️ Error al crear sesión: {e}")
             else:
-                print(f"[CENTRAL] ⚠️ Error liberando reserva de CP {cp_id} para inicio de carga")
+                # Fallback: solo cambiar estado
+                if db.release_charging_point(cp_id, 'charging'):
+                    print(f"[CENTRAL] ⚡ CP {cp_id} ahora en modo 'charging'")
+                else:
+                    print(f"[CENTRAL] ⚠️ Error liberando reserva de CP {cp_id} para inicio de carga")
         
         elif action in ['charging_stopped']:
             # Marcar CP disponible cuando termina el suministro (liberando reserva si existe)
