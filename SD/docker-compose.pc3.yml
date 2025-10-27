@@ -32,7 +32,9 @@ services:
       context: .
       dockerfile: EV_CP_M/Dockerfile
     container_name: ev-monitor
-    network_mode: "host"  # Usar red del host para conectar a PC2
+    # En Windows, host network no está soportado. Exponemos el puerto explícitamente.
+    ports:
+      - "8003:8003"
     environment:
       # Kafka broker está en PC2
       # Central server está en PC2

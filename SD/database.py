@@ -308,6 +308,54 @@ def get_user_by_nombre(nombre: str) -> dict | None:
         return dict(row)
     return None
 
+# Crea un usuario si no existe y devuelve su registro
+def get_or_create_user_by_nombre(nombre: str, role: str = 'driver', email: str | None = None,
+                                 balance: float = 0.0, active: int = 1) -> dict:
+    """Obtiene un usuario por nombre o lo crea si no existe.
+
+    Retorna el dict del usuario con al menos: id, nombre, email, role, balance, active.
+    """
+    user = get_user_by_nombre(nombre)
+    if user:
+        return user
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO usuarios (nombre, contraseña, email, role, balance, active)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                nombre,
+                contraseña_hash(nombre),  # contraseña placeholder no utilizada para login
+                email or f"{nombre}@local",
+                role,
+                balance,
+                active,
+            ),
+        )
+        conn.commit()
+        cursor.execute(
+            """
+            SELECT id, nombre, email, role, balance, active
+            FROM usuarios WHERE nombre = ?
+            """,
+            (nombre,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else {'id': None, 'nombre': nombre, 'email': email, 'role': role, 'balance': balance, 'active': active}
+    except Exception as e:
+        conn.rollback()
+        # Si hubo condición de carrera y ya existe, reintentar lectura
+        user = get_user_by_nombre(nombre)
+        if user:
+            return user
+        raise e
+    finally:
+        conn.close()
+
 # Recupera y devuelve el punto de carga por su cp_id
 def get_charging_point(cp_id: str) -> dict | None:
     """Obtiene información de un punto de carga"""
@@ -632,29 +680,31 @@ def reserve_charging_point(cp_id: str, timeout_seconds: int = 5) -> bool:
 
 def release_charging_point(cp_id: str, set_estado: str = 'available') -> bool:
     """
-    Libera un punto de carga reservado.
+    Libera un punto de carga (desde reserved, charging o cualquier estado).
     Si set_estado='available': vuelve a disponible
+    Si set_estado='charging': pasa a cargando
     Si set_estado='offline': vuelve a desconectado
     """
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        # Cambiar estado sin importar el estado actual (excepto fault/out_of_service)
         cursor.execute("""
             UPDATE charging_points
             SET estado = ?
-            WHERE cp_id = ? AND estado = 'reserved'
+            WHERE cp_id = ? AND estado NOT IN ('fault', 'out_of_service')
         """, (set_estado, cp_id))
         
         success = cursor.rowcount > 0
         if success:
             conn.commit()
-            print(f"[DB] ✅ CP {cp_id} released to {set_estado}")
+            print(f"[DB] ✅ CP {cp_id} status changed to '{set_estado}'")
         else:
-            print(f"[DB] ⚠️ CP {cp_id} was not in reserved state")
+            print(f"[DB] ⚠️ CP {cp_id} not found or in fault/out_of_service state")
         return success
             
     except Exception as e:
-        print(f"[DB] ❌ Error releasing CP: {e}")
+        print(f"[DB] ❌ Error changing CP status: {e}")
         conn.rollback()
         return False
     finally:
@@ -751,6 +801,75 @@ def end_charging_sesion(sesion_id: int, energia_kwh: float) -> dict:
         'energia_kwh': energia_kwh,
         'updated_balance': new_balance
     }
+
+
+def end_charging_session_by_cp(cp_id: str, energia_kwh: float) -> dict | None:
+    """
+    Finaliza la sesión activa de un CP específico.
+    Retorna dict con sesion_id, cp_id, user_id, coste, energia_kwh, updated_balance.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Buscar sesión activa para este CP
+        cursor.execute("""
+            SELECT s.id, s.user_id, s.cp_id, s.start_time, cp.tarifa_kwh
+            FROM charging_sesiones s
+            JOIN charging_points cp ON s.cp_id = cp.cp_id
+            WHERE s.cp_id = ? AND s.estado = 'active'
+            ORDER BY s.start_time DESC
+            LIMIT 1
+        """, (cp_id,))
+        
+        row = cursor.fetchone()
+        if not row:
+            print(f"[DB] ⚠️ No active session found for CP {cp_id}")
+            conn.close()
+            return None
+        
+        sesion = dict(row)
+        end_time = datetime.now().timestamp()
+        coste = energia_kwh * sesion['tarifa_kwh']
+        
+        # Actualizar sesión
+        cursor.execute("""
+            UPDATE charging_sesiones
+            SET end_time = ?, energia_kwh = ?, coste = ?, estado = 'completed'
+            WHERE id = ?
+        """, (end_time, energia_kwh, coste, sesion['id']))
+        
+        # Actualizar balance del usuario
+        cursor.execute("""
+            UPDATE usuarios
+            SET balance = balance - ?
+            WHERE id = ?
+        """, (coste, sesion['user_id']))
+        
+        # Obtener balance actualizado
+        cursor.execute("SELECT balance FROM usuarios WHERE id = ?", (sesion['user_id'],))
+        balance_row = cursor.fetchone()
+        new_balance = balance_row['balance'] if balance_row else 0.0
+        
+        conn.commit()
+        print(f"[DB] ✅ Session {sesion['id']} for CP {cp_id} completed: {energia_kwh:.2f} kWh, €{coste:.2f}")
+        
+        return {
+            'sesion_id': sesion['id'],
+            'cp_id': cp_id,
+            'user_id': sesion['user_id'],
+            'coste': coste,
+            'energia_kwh': energia_kwh,
+            'updated_balance': new_balance
+        }
+        
+    except Exception as e:
+        print(f"[DB] ❌ Error ending session for CP {cp_id}: {e}")
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
 
 
 # Devuelve la sesión activa más reciente para un usuario, si es que existe.

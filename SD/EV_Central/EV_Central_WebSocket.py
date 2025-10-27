@@ -663,6 +663,19 @@ async def kafka_listener():
                         username = event.get('username')
                         
                         print(f"[CENTRAL] 🔍 DEBUG - cp_id recibido: {cp_id!r} (tipo: {type(cp_id).__name__})")
+
+                        # Progreso: solicitud recibida
+                        asyncio.run_coroutine_threadsafe(
+                            broadcast_admin_progress({
+                                'step': 1,
+                                'message': 'Solicitud de autorización recibida',
+                                'username': username,
+                                'cp_id': cp_id,
+                                'client_id': client_id,
+                                'timestamp': current_timestamp()
+                            }),
+                            loop
+                        )
                         
                         if not client_id:
                             raise ValueError("Client ID es requerido")
@@ -675,6 +688,17 @@ async def kafka_listener():
                             cp_id = db.find_and_reserve_available_cp()
                             
                             if not cp_id:
+                                asyncio.run_coroutine_threadsafe(
+                                    broadcast_admin_progress({
+                                        'step': 2,
+                                        'message': 'No hay CPs disponibles',
+                                        'username': username,
+                                        'cp_id': None,
+                                        'client_id': client_id,
+                                        'timestamp': current_timestamp()
+                                    }),
+                                    loop
+                                )
                                 central_instance.publish_event('AUTHORIZATION_RESPONSE', {
                                     'client_id': client_id,
                                     'cp_id': None,
@@ -684,6 +708,17 @@ async def kafka_listener():
                                 continue
                             
                             print(f"[CENTRAL] 🎯 CP {cp_id} asignado y reservado automáticamente para {username}")
+                            asyncio.run_coroutine_threadsafe(
+                                broadcast_admin_progress({
+                                    'step': 2,
+                                    'message': f'CP {cp_id} asignado y reservado automáticamente',
+                                    'username': username,
+                                    'cp_id': cp_id,
+                                    'client_id': client_id,
+                                    'timestamp': current_timestamp()
+                                }),
+                                loop
+                            )
                             
                             # Ya está reservado, enviar respuesta positiva
                             central_instance.publish_event('AUTHORIZATION_RESPONSE', {
@@ -691,6 +726,17 @@ async def kafka_listener():
                                 'cp_id': cp_id, 
                                 'authorized': True
                             })
+                            asyncio.run_coroutine_threadsafe(
+                                broadcast_admin_progress({
+                                    'step': 3,
+                                    'message': 'Autorización concedida',
+                                    'username': username,
+                                    'cp_id': cp_id,
+                                    'client_id': client_id,
+                                    'timestamp': current_timestamp()
+                                }),
+                                loop
+                            )
                         else:
                             # Si se especifica un CP concreto, verificar y reservar
                             print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, cp={cp_id}, client={client_id}")
@@ -698,6 +744,17 @@ async def kafka_listener():
                             # Verificar estado del punto de carga
                             cp = db.get_charging_point_by_id(cp_id)
                             if not cp:
+                                asyncio.run_coroutine_threadsafe(
+                                    broadcast_admin_progress({
+                                        'step': 2,
+                                        'message': 'CP no encontrado',
+                                        'username': username,
+                                        'cp_id': cp_id,
+                                        'client_id': client_id,
+                                        'timestamp': current_timestamp()
+                                    }),
+                                    loop
+                                )
                                 central_instance.publish_event('AUTHORIZATION_RESPONSE', {
                                     'client_id': client_id,
                                     'cp_id': cp_id,
@@ -711,6 +768,17 @@ async def kafka_listener():
                             
                             # Solo rechazar si está en estado 'fault', 'out_of_service', 'charging' o 'reserved'
                             if current_status in ('fault', 'out_of_service', 'charging', 'reserved'):
+                                asyncio.run_coroutine_threadsafe(
+                                    broadcast_admin_progress({
+                                        'step': 2,
+                                        'message': f'CP no disponible (estado: {current_status})',
+                                        'username': username,
+                                        'cp_id': cp_id,
+                                        'client_id': client_id,
+                                        'timestamp': current_timestamp()
+                                    }),
+                                    loop
+                                )
                                 central_instance.publish_event('AUTHORIZATION_RESPONSE', {
                                     'client_id': client_id,
                                     'cp_id': cp_id,
@@ -722,11 +790,33 @@ async def kafka_listener():
                             # Intentar reservar el punto de carga específico
                             if db.reserve_charging_point(cp_id):
                                 print(f"[CENTRAL] ✅ CP {cp_id} reservado para cliente {client_id}")
+                                asyncio.run_coroutine_threadsafe(
+                                    broadcast_admin_progress({
+                                        'step': 2,
+                                        'message': f'CP {cp_id} reservado',
+                                        'username': username,
+                                        'cp_id': cp_id,
+                                        'client_id': client_id,
+                                        'timestamp': current_timestamp()
+                                    }),
+                                    loop
+                                )
                                 central_instance.publish_event('AUTHORIZATION_RESPONSE', {
                                     'client_id': client_id,
                                     'cp_id': cp_id, 
                                     'authorized': True
                                 })
+                                asyncio.run_coroutine_threadsafe(
+                                    broadcast_admin_progress({
+                                        'step': 3,
+                                        'message': 'Autorización concedida',
+                                        'username': username,
+                                        'cp_id': cp_id,
+                                        'client_id': client_id,
+                                        'timestamp': current_timestamp()
+                                    }),
+                                    loop
+                                )
                             else:
                                 central_instance.publish_event('AUTHORIZATION_RESPONSE', {
                                     'client_id': client_id,
@@ -734,6 +824,17 @@ async def kafka_listener():
                                     'authorized': False,
                                     'reason': 'No se pudo reservar el CP'
                                 })
+                                asyncio.run_coroutine_threadsafe(
+                                    broadcast_admin_progress({
+                                        'step': 2,
+                                        'message': 'No se pudo reservar el CP',
+                                        'username': username,
+                                        'cp_id': cp_id,
+                                        'client_id': client_id,
+                                        'timestamp': current_timestamp()
+                                    }),
+                                    loop
+                                )
                     except Exception as e:
                         print(f"[CENTRAL] ⚠️ Error procesando autorización: {e}")
                         if client_id and cp_id:
@@ -743,6 +844,17 @@ async def kafka_listener():
                                 'authorized': False,
                                 'reason': f'Error interno: {str(e)}'
                             })
+                        asyncio.run_coroutine_threadsafe(
+                            broadcast_admin_progress({
+                                'step': 2,
+                                'message': f'Error interno: {str(e)}',
+                                'username': username,
+                                'cp_id': cp_id,
+                                'client_id': client_id,
+                                'timestamp': current_timestamp()
+                            }),
+                            loop
+                        )
                 
                 # Los eventos 'charging_started' son peticiones ya autorizadas por
                 # el Driver (que valida usuario, balance, disponibilidad).
@@ -823,7 +935,16 @@ async def broadcast_kafka_event(event):
             # Crear sesión de carga y cambiar estado del CP
             username = event.get('username')
             user_id = event.get('user_id')
-            
+
+            # Si no llega user_id pero sí username (p.ej. origen CP local), crear/usar usuario sintético
+            if not user_id and username:
+                try:
+                    u = db.get_or_create_user_by_nombre(username, role='driver', email=f"{username}@local", balance=0.0, active=1)
+                    user_id = u.get('id')
+                    print(f"[CENTRAL] 👤 Usuario sintetizado para sesión local: {username} (id={user_id})")
+                except Exception as e:
+                    print(f"[CENTRAL] ⚠️ No se pudo crear/obtener usuario '{username}': {e}")
+
             if user_id and cp_id:
                 try:
                     # Crear sesión de carga (esto cambia el CP a 'charging')
@@ -842,9 +963,20 @@ async def broadcast_kafka_event(event):
                     print(f"[CENTRAL] ⚠️ Error liberando reserva de CP {cp_id} para inicio de carga")
         
         elif action in ['charging_stopped']:
-            # Marcar CP disponible cuando termina el suministro (liberando reserva si existe)
+            # Finalizar sesión activa y marcar CP disponible
+            energia_kwh = event.get('energy_kwh', 0.0)
+            
+            # Intentar finalizar la sesión activa del CP
+            result = db.end_charging_session_by_cp(cp_id, energia_kwh)
+            
+            if result:
+                print(f"[CENTRAL] ✅ Sesión {result['sesion_id']} finalizada - CP {cp_id}: {energia_kwh:.2f} kWh, €{result['coste']:.2f}")
+            else:
+                print(f"[CENTRAL] ⚠️ No se encontró sesión activa para CP {cp_id}, solo cambiando estado")
+            
+            # Asegurar que el CP vuelve a available
             if db.release_charging_point(cp_id, 'available'):
-                print(f"[CENTRAL] ✅ Suministro finalizado - CP {cp_id} ahora disponible")
+                print(f"[CENTRAL] ✅ CP {cp_id} ahora disponible")
             else:
                 print(f"[CENTRAL] ⚠️ Error liberando CP {cp_id} tras fin de carga")
         elif action in ['cp_status_change']:
@@ -964,6 +1096,26 @@ async def broadcast_dashboard_data():
             disconnected_clients.add(client)
     
     # Remover clientes desconectados
+    for client in disconnected_clients:
+        shared_state.connected_clients.discard(client)
+
+async def broadcast_admin_progress(payload: dict):
+    """Broadcast de un mensaje de progreso de autorización al dashboard admin."""
+    if not shared_state.connected_clients:
+        return
+    message = json.dumps({
+        'type': 'authorization_progress',
+        **payload
+    })
+    disconnected_clients = set()
+    for client in shared_state.connected_clients:
+        try:
+            if hasattr(client, 'send_str'):
+                await client.send_str(message)
+            else:
+                await client.send(message)
+        except:
+            disconnected_clients.add(client)
     for client in disconnected_clients:
         shared_state.connected_clients.discard(client)
 

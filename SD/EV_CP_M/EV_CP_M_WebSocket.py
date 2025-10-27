@@ -39,6 +39,9 @@ class SharedState:
         self.cp_metrics = {}  # Métricas simuladas por CP
         self.alerts = []
         self.lock = threading.Lock()
+        # Solicitudes locales desde el interfaz del CP (client_id -> info)
+        # Opción A: no guardamos el websocket para no enviar notificaciones locales
+        self.pending_local = {}
 
 shared_state = SharedState()
 
@@ -77,51 +80,54 @@ class EV_MonitorWS:
     def get_monitor_data(self):
         """Obtiene todos los datos para el dashboard de monitoreo"""
         try:
-            # Obtener puntos de carga
+            # Obtener puntos de carga desde la BD (Central es el único escritor)
             charging_points_raw = db.get_all_charging_points()
             charging_points = []
-            
+
             for cp in charging_points_raw:
+                # Mapeo robusto de claves (BD usa localizacion/estado/max_kw/tarifa_kwh)
+                status = cp.get('estado') or cp.get('status') or 'offline'
+                location = cp.get('localizacion') or cp.get('location') or ''
+                max_power = cp.get('max_kw') or cp.get('max_power_kw') or 22.0
+                tariff = cp.get('tarifa_kwh') or cp.get('tariff_per_kwh') or 0.30
+
                 # Obtener métricas simuladas
                 metrics = shared_state.cp_metrics.get(cp['cp_id'], {})
-                
+
                 # Calcular uptime
                 uptime_seconds = time.time() - metrics.get('uptime_start', time.time())
                 hours = int(uptime_seconds // 3600)
                 minutes = int((uptime_seconds % 3600) // 60)
                 uptime = f"{hours}h {minutes}m"
-                
+
                 # Determinar potencia actual basada en estado
                 current_power = 0.0
-                max_power = cp.get('max_power_kw', 22.0)
-                if cp['status'] == 'charging':
-                    current_power = max_power * random.uniform(0.85, 0.95)
-                
+                if str(status).lower() == 'charging':
+                    current_power = float(max_power) * random.uniform(0.85, 0.95)
+
                 charging_points.append({
                     'cp_id': cp['cp_id'],
-                    'location': cp['location'],
+                    'location': location,
                     'power_output': max_power,
-                    'tariff': cp.get('tariff_per_kwh', 0.30),
-                    'status': cp['status'],
+                    'tariff': tariff,
+                    'status': status,
                     'temperature': metrics.get('temperature', 25.0),
                     'efficiency': metrics.get('efficiency', 100.0),
                     'uptime': uptime,
                     'sessions_today': metrics.get('sessions_today', 0),
                     'current_power': round(current_power, 1)
                 })
-            
-            # Obtener alertas recientes
-            alerts = shared_state.alerts[-10:]  # Últimas 10 alertas
-            
-            # Generar estadísticas de uso (últimas 24h)
+
+            # Obtener alertas recientes y estadísticas
+            alerts = shared_state.alerts[-10:]
             usage_stats = self.get_usage_stats()
-            
+
             return {
                 'charging_points': charging_points,
                 'alerts': alerts,
                 'usage_stats': usage_stats
             }
-            
+
         except Exception as e:
             print(f"[MONITOR] ❌ Error getting monitor data: {e}")
             return {
@@ -238,6 +244,95 @@ async def websocket_handler_http(request):
                             'type': 'monitor_data',
                             'data': monitor_data
                         }))
+                    elif msg_type == 'request_local_charging':
+                        # Solicitud local de suministro desde el interfaz del CP
+                        cp_id = data.get('cp_id')
+                        if not cp_id:
+                            await ws.send_str(json.dumps({'type': 'error', 'message': 'cp_id requerido'}))
+                            continue
+
+                        client_id = generate_message_id()
+                        with shared_state.lock:
+                            shared_state.pending_local[client_id] = {
+                                'cp_id': cp_id,
+                                'created_at': time.time()
+                            }
+
+                        # Opción A: sin notificaciones locales paso a paso en la UI del CP
+
+                        # Enviar petición de autorización a Central por Kafka (cp_events)
+                        try:
+                            if monitor_instance.producer:
+                                event = {
+                                    'message_id': generate_message_id(),
+                                    'event_type': 'AUTHORIZATION_REQUEST',
+                                    'client_id': client_id,
+                                    'cp_id': cp_id,
+                                    'origin': 'cp_ui',
+                                    'timestamp': current_timestamp()
+                                }
+                                monitor_instance.producer.send(KAFKA_TOPICS['cp_events'], event)
+                                monitor_instance.producer.flush()
+                                print(f"[MONITOR] 🔐 AUTHORIZATION_REQUEST emitido para {cp_id} (client_id={client_id})")
+                            else:
+                                await ws.send_str(json.dumps({'type': 'error', 'message': 'Kafka no disponible'}))
+                        except Exception as e:
+                            print(f"[MONITOR] ⚠️ Error enviando AUTHORIZATION_REQUEST: {e}")
+                            await ws.send_str(json.dumps({'type': 'error', 'message': f'Error de Kafka: {e}'}))
+
+                    elif msg_type == 'cp_connect':
+                        # Solicita al Central marcar CP como conectado/available
+                        cp_id = data.get('cp_id')
+                        if not cp_id:
+                            await ws.send_str(json.dumps({'type': 'error', 'message': 'cp_id requerido'}))
+                            continue
+                        try:
+                            if monitor_instance.producer:
+                                event = {
+                                    'message_id': generate_message_id(),
+                                    'action': 'connect',
+                                    'cp_id': cp_id,
+                                    'data': {
+                                        'max_power_kw': 22.0,
+                                        'tariff_per_kwh': 0.30,
+                                        'location': 'Desconocido'
+                                    },
+                                    'timestamp': current_timestamp()
+                                }
+                                monitor_instance.producer.send(KAFKA_TOPICS['cp_events'], event)
+                                monitor_instance.producer.flush()
+                                await ws.send_str(json.dumps({'type': 'info', 'message': f'Conectando {cp_id}...'}))
+                            else:
+                                await ws.send_str(json.dumps({'type': 'error', 'message': 'Kafka no disponible'}))
+                        except Exception as e:
+                            print(f"[MONITOR] ⚠️ Error enviando connect: {e}")
+                            await ws.send_str(json.dumps({'type': 'error', 'message': f'Error de Kafka: {e}'}))
+                    
+                    elif msg_type == 'stop_local_charging':
+                        # Detener suministro local desde el interfaz del CP
+                        cp_id = data.get('cp_id')
+                        if not cp_id:
+                            await ws.send_str(json.dumps({'type': 'error', 'message': 'cp_id requerido'}))
+                            continue
+                        try:
+                            if monitor_instance.producer:
+                                event = {
+                                    'message_id': generate_message_id(),
+                                    'action': 'charging_stopped',
+                                    'cp_id': cp_id,
+                                    'username': 'cp_local',
+                                    'energy_kwh': random.uniform(5, 30),  # Simular energía consumida
+                                    'timestamp': current_timestamp()
+                                }
+                                monitor_instance.producer.send(KAFKA_TOPICS['cp_events'], event)
+                                monitor_instance.producer.flush()
+                                print(f"[MONITOR] 🛑 charging_stopped emitido para {cp_id}")
+                                await ws.send_str(json.dumps({'type': 'info', 'message': f'Deteniendo carga en {cp_id}...'}))
+                            else:
+                                await ws.send_str(json.dumps({'type': 'error', 'message': 'Kafka no disponible'}))
+                        except Exception as e:
+                            print(f"[MONITOR] ⚠️ Error enviando charging_stopped: {e}")
+                            await ws.send_str(json.dumps({'type': 'error', 'message': f'Error de Kafka: {e}'}))
                         
                 except json.JSONDecodeError:
                     print(f"[WS] Invalid JSON from {client_id}")
@@ -338,6 +433,7 @@ async def kafka_listener():
 async def process_kafka_event(event):
     """Procesa eventos de Kafka y genera alertas"""
     action = event.get('action', '')
+    event_type = event.get('event_type', '')
     
     if action == 'charging_started':
         cp_id = event.get('cp_id')
@@ -394,6 +490,40 @@ async def process_kafka_event(event):
         await broadcast_alert(alert)
         # Actualizar dashboard inmediatamente
         await broadcast_monitor_data()
+
+    # Respuesta de autorización para solicitudes locales
+    if event_type == 'AUTHORIZATION_RESPONSE':
+        client_id = event.get('client_id')
+        with shared_state.lock:
+            info = shared_state.pending_local.get(client_id)
+        if info:
+            cp_id = info.get('cp_id')
+            authorized = bool(event.get('authorized'))
+            # Si autorizado, publicar inicio de carga para que CENTRAL actualice estado
+            if authorized and monitor_instance.producer:
+                print(f"[MONITOR] ✅ AUTHORIZATION_RESPONSE recibido (client_id={client_id}, cp_id={cp_id}) → enviando charging_started")
+                start_event = {
+                    'message_id': generate_message_id(),
+                    'action': 'charging_started',
+                    'cp_id': cp_id,
+                    'username': 'cp_local',
+                    'correlation_id': client_id,
+                    'timestamp': current_timestamp()
+                }
+                try:
+                    monitor_instance.producer.send(KAFKA_TOPICS['cp_events'], start_event)
+                    monitor_instance.producer.flush()
+                    print(f"[MONITOR] ⚡ charging_started publicado para {cp_id}")
+                except Exception as e:
+                    print(f"[MONITOR] ❌ Error publicando charging_started: {e}")
+                # Actualizar dashboard inmediatamente
+                await broadcast_monitor_data()
+            # Limpiar correlación sin enviar mensajes a la UI local
+            with shared_state.lock:
+                shared_state.pending_local.pop(client_id, None)
+        else:
+            # No se encontró correlación, probablemente expiró o es de otro origen
+            print(f"[MONITOR] ⚠️ AUTHORIZATION_RESPONSE con client_id desconocido: {client_id}")
 
 async def broadcast_alert(alert):
     """Broadcast una alerta a todos los clientes WebSocket"""
@@ -494,9 +624,14 @@ async def main():
         print("Run: pip install websockets aiohttp")
         return
     
-    # Verificar base de datos
-    db_path = Path(__file__).parent.parent / 'ev_charging.db'
-    if not db_path.exists():
+    # Verificar base de datos (mismo criterio que Driver/Central)
+    # En Docker: /app/ev_charging.db (mapeado por volumen)
+    # Fuera de Docker: ../ev_charging.db
+    if Path('/app/ev_charging.db').exists():
+        db_path = Path('/app/ev_charging.db')
+    elif (Path(__file__).parent.parent / 'ev_charging.db').exists():
+        db_path = Path(__file__).parent.parent / 'ev_charging.db'
+    else:
         print("⚠️  Database not found. Please run: python init_db.py")
         return
     
@@ -515,14 +650,15 @@ async def main():
         print(f"[HTTP] Server started on http://0.0.0.0:{SERVER_PORT}")
         print(f"[WS] WebSocket endpoint at ws://0.0.0.0:{SERVER_PORT}/ws")
         
-        # Iniciar broadcast de actualizaciones
+        # Iniciar broadcast de actualizaciones y listener de Kafka
         broadcast_task = asyncio.create_task(broadcast_updates())
+        kafka_task = asyncio.create_task(kafka_listener())
         
         print("\n All services started successfully!")
         print(f" Open http://localhost:{SERVER_PORT} in your browser\n")
         
         # Mantener el servidor corriendo
-        await broadcast_task
+        await asyncio.gather(broadcast_task, kafka_task)
         
     except Exception as e:
         print(f"\n❌ Error starting server: {e}")

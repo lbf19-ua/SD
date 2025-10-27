@@ -605,6 +605,12 @@
                         <span class="metric-value">${cp.sessions_today || 0}</span>
                     </div>
                 </div>
+
+                <div style="margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap;">
+                    ${normStatus === 'available' ? `<button onclick="requestLocalCharging('${cp.cp_id}')" style="padding: 10px 14px; background: #28a745; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">⚡ Solicitar suministro local</button>` : ''}
+                    ${normStatus === 'offline' ? `<button onclick="connectCP('${cp.cp_id}')" style="padding: 10px 14px; background: #17a2b8; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">🔌 Conectar</button>` : ''}
+                    ${normStatus === 'charging' || normStatus === 'reserved' ? `<button onclick="stopLocalCharging('${cp.cp_id}')" style="padding: 10px 14px; background: #dc3545; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">🛑 Detener suministro</button>` : ''}
+                </div>
             `;
 
             return card;
@@ -688,6 +694,26 @@
                 ws.send(JSON.stringify({ type: 'get_monitor_data' }));
             }
         }, 3000);
+
+        // Local actions
+        function requestLocalCharging(cpId) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'request_local_charging', cp_id: cpId }));
+            }
+        }
+        
+        function stopLocalCharging(cpId) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'stop_local_charging', cp_id: cpId }));
+            }
+        }
+        
+        function connectCP(cpId) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'cp_connect', cp_id: cpId }));
+            }
+        }
+        // (Opción A) Sin helper de notificaciones locales
 
         // Initialize
         connectWebSocket();
