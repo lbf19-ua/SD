@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from queue import Queue
 
 # WebSocket y HTTP server
 try:
@@ -37,6 +38,7 @@ class SharedState:
         self.client_users = {}  # Mapeo: {client_id: username}
         self.charging_sessions = {}  # Diccionario: {username: session_data}
         self.pending_authorizations = {}  # Diccionario: {client_id: {cp_id, username, websocket}}
+        self.notification_queue = Queue()  # Cola para notificaciones desde threads
         self.lock = threading.Lock()
 
 shared_state = SharedState()
@@ -98,7 +100,6 @@ class EV_DriverWS:
                             if client_id in shared_state.pending_authorizations:
                                 auth_data = shared_state.pending_authorizations.pop(client_id)
                                 username = auth_data.get('username')
-                                ws = auth_data.get('websocket')
                                 
                                 if authorized:
                                     print(f"[DRIVER] ✅ Central autorizó carga en {cp_id}")
@@ -127,11 +128,24 @@ class EV_DriverWS:
                                             'cp_id': cp_id,
                                             'start_time': time.time(),
                                             'energy': 0.0,
-                                            'cost': 0.0
+                                            'cost': 0.0,
+                                            'tariff': 0.30  # Tariff por defecto
                                         }
+                                        
+                                        # Notificar al websocket que la carga ha iniciado
+                                        shared_state.notification_queue.put({
+                                            'type': 'charging_started',
+                                            'username': username,
+                                            'cp_id': cp_id
+                                        })
                                 else:
                                     print(f"[DRIVER] ❌ Central rechazó autorización: {reason}")
-                                    # NO podemos enviar desde aquí porque estamos en un thread diferente
+                                    # Notificar rechazo al websocket
+                                    shared_state.notification_queue.put({
+                                        'type': 'authorization_rejected',
+                                        'username': username,
+                                        'reason': reason
+                                    })
                 
             except Exception as e:
                 print(f"[KAFKA] ⚠️ Consumer error: {e}")
@@ -985,6 +999,62 @@ async def start_http_server():
     await site.start()
     print(f"[HTTP] 🌐 Server started on http://0.0.0.0:{SERVER_PORT}")
 
+async def process_notifications():
+    """Procesa notificaciones desde la cola y las envía a los websockets"""
+    while True:
+        try:
+            # Obtener notificación de la cola (sin bloquear)
+            try:
+                notification = shared_state.notification_queue.get_nowait()
+            except:
+                await asyncio.sleep(0.1)
+                continue
+            
+            # Buscar websockets para el usuario
+            with shared_state.lock:
+                clients_to_notify = list(shared_state.connected_clients)
+            
+            if notification['type'] == 'charging_started':
+                username = notification['username']
+                cp_id = notification['cp_id']
+                
+                message = json.dumps({
+                    'type': 'charging_started',
+                    'username': username,
+                    'cp_id': cp_id,
+                    'message': f'Carga iniciada en {cp_id}'
+                })
+                
+                for client in clients_to_notify:
+                    try:
+                        if hasattr(client, 'send_str'):
+                            await client.send_str(message)
+                        else:
+                            await client.send(message)
+                    except:
+                        pass
+                        
+            elif notification['type'] == 'authorization_rejected':
+                username = notification['username']
+                reason = notification['reason']
+                
+                message = json.dumps({
+                    'type': 'error',
+                    'message': f'Autorización rechazada: {reason}'
+                })
+                
+                for client in clients_to_notify:
+                    try:
+                        if hasattr(client, 'send_str'):
+                            await client.send_str(message)
+                        else:
+                            await client.send(message)
+                    except:
+                        pass
+                        
+        except Exception as e:
+            print(f"[NOTIF] Error processing notification: {e}")
+
 async def broadcast_updates():
     """Simula actualizaciones de carga y las broadcast a todos los clientes"""
     while True:
@@ -1084,12 +1154,14 @@ async def main():
         
         # Iniciar broadcast de actualizaciones
         broadcast_task = asyncio.create_task(broadcast_updates())
+        # Iniciar procesador de notificaciones
+        notification_task = asyncio.create_task(process_notifications())
         
         print("\n All services started successfully!")
         print(f" Open http://localhost:{SERVER_PORT} in your browser\n")
         
-        # Mantener el servidor corriendo
-        await broadcast_task
+        # Mantener el servidor corriendo - ambas tareas en paralelo
+        await asyncio.gather(broadcast_task, notification_task)
         
     except Exception as e:
         print(f"\n❌ Error starting server: {e}")
