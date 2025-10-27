@@ -400,10 +400,25 @@
         }
 
         function requestCharging() {
+            // Deshabilitar el botón para evitar múltiples clicks
+            const btn = document.getElementById('startBtn');
+            if (btn.disabled) return;
+            
+            btn.disabled = true;
+            btn.textContent = 'Procesando...';
+            
             ws.send(JSON.stringify({
                 type: 'request_charging',
                 username: currentUser
             }));
+            
+            // Re-habilitar después de 5 segundos como failsafe
+            setTimeout(() => {
+                if (btn.disabled) {
+                    btn.disabled = false;
+                    btn.textContent = 'Solicitar Carga';
+                }
+            }, 5000);
         }
 
         function stopCharging() {
@@ -513,12 +528,23 @@
                     }
                     break;
 
+                case 'charging_pending':
+                    document.getElementById('chargingStatus').textContent = 'ESPERANDO AUTORIZACIÓN...';
+                    addEvent('⏳ ' + (data.message || 'Esperando autorización...'));
+                    break;
+                
                 case 'charging_started':
                     sessionData.charging = true;
                     sessionData.cp_id = data.cp_id;
                     document.getElementById('chargingStatus').textContent = 'CARGANDO ⚡';
                     document.getElementById('chargingPoint').textContent = data.cp_id;
-                    document.getElementById('startBtn').classList.add('hidden');
+                    
+                    // Ocultar botón de inicio y mostrar de detención
+                    const startBtn = document.getElementById('startBtn');
+                    startBtn.classList.add('hidden');
+                    startBtn.disabled = false;
+                    startBtn.textContent = 'Solicitar Carga';
+                    
                     document.getElementById('stopBtn').classList.remove('hidden');
                     document.getElementById('progressSection').classList.remove('hidden');
                     addEvent(`Carga iniciada en ${data.cp_id}`);
@@ -588,6 +614,13 @@
                 case 'error':
                     alert('Error: ' + data.message);
                     addEvent('❌ ' + data.message);
+                    
+                    // Re-habilitar botón de inicio si está deshabilitado
+                    const startBtn2 = document.getElementById('startBtn');
+                    if (startBtn2.disabled) {
+                        startBtn2.disabled = false;
+                        startBtn2.textContent = 'Solicitar Carga';
+                    }
                     break;
             }
         }

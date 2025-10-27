@@ -39,6 +39,7 @@ class SharedState:
         self.charging_sessions = {}  # Diccionario: {username: session_data}
         self.pending_authorizations = {}  # Diccionario: {client_id: {cp_id, username, websocket}}
         self.notification_queue = Queue()  # Cola para notificaciones desde threads
+        self.main_loop = None  # Loop principal de asyncio
         self.lock = threading.Lock()
 
 shared_state = SharedState()
@@ -134,15 +135,17 @@ class EV_DriverWS:
                                         }
                                         
                                         # Notificar al websocket que la carga ha iniciado
+                                        # NO poner websocket en la queue, guardar client_id
+                                        print(f"[DRIVER] 📬 Encolando notificación charging_started para {username}, client_id={client_id}")
                                         shared_state.notification_queue.put({
                                             'type': 'charging_started',
                                             'username': username,
                                             'cp_id': cp_id,
-                                            'websocket': websocket_ref
+                                            'client_id': client_id
                                         })
                                     
-                                    # Limpiar pending_authorizations
-                                    shared_state.pending_authorizations.pop(client_id, None)
+                                    # NO limpiar pending_authorizations todavía
+                                    # Lo limpiaremos después de enviar la notificación
                                 else:
                                     print(f"[DRIVER] ❌ Central rechazó autorización: {reason}")
                                     # Notificar rechazo al websocket
@@ -150,11 +153,10 @@ class EV_DriverWS:
                                         'type': 'authorization_rejected',
                                         'username': username,
                                         'reason': reason,
-                                        'websocket': websocket_ref
+                                        'client_id': client_id
                                     })
                                     
-                                    # Limpiar pending_authorizations
-                                    shared_state.pending_authorizations.pop(client_id, None)
+                                    # NO limpiar aún, se limpiará en el procesador
                 
             except Exception as e:
                 print(f"[KAFKA] ⚠️ Consumer error: {e}")
@@ -800,6 +802,9 @@ async def websocket_handler_http(request):
                                 with shared_state.lock:
                                     if client_id in shared_state.pending_authorizations:
                                         shared_state.pending_authorizations[client_id]['websocket'] = ws
+                                        print(f"[WS] 💾 Websocket guardado para client_id={client_id}, user={username}")
+                                    else:
+                                        print(f"[WS] ⚠️ client_id={client_id} no existe en pending_authorizations")
                                 
                                 await ws.send_str(json.dumps({
                                     'type': 'charging_pending',
@@ -1021,7 +1026,9 @@ async def process_notifications():
             if notification['type'] == 'charging_started':
                 username = notification['username']
                 cp_id = notification['cp_id']
-                ws = notification.get('websocket')
+                client_id = notification.get('client_id')
+                
+                print(f"[NOTIF] 📨 Procesando charging_started: user={username}, cp={cp_id}, client_id={client_id}")
                 
                 message = json.dumps({
                     'type': 'charging_started',
@@ -1030,37 +1037,91 @@ async def process_notifications():
                     'message': f'Carga iniciada en {cp_id}'
                 })
                 
-                # Enviar al websocket específico
-                if ws:
-                    try:
-                        if hasattr(ws, 'send_str'):
-                            await ws.send_str(message)
+                # Buscar el websocket usando client_id
+                sent = False
+                with shared_state.lock:
+                    print(f"[NOTIF] 🔍 Buscando websocket para client_id={client_id}")
+                    print(f"[NOTIF] 📋 pending_authorizations keys: {list(shared_state.pending_authorizations.keys())}")
+                    
+                    if client_id and client_id in shared_state.pending_authorizations:
+                        ws = shared_state.pending_authorizations[client_id].get('websocket')
+                        print(f"[NOTIF] 🎯 Websocket encontrado: {ws is not None}")
+                        
+                        # Limpiar pending_authorizations
+                        shared_state.pending_authorizations.pop(client_id, None)
+                        
+                        # Enviar al websocket específico
+                        if ws:
+                            try:
+                                if hasattr(ws, 'send_str'):
+                                    await ws.send_str(message)
+                                else:
+                                    await ws.send(message)
+                                print(f"[NOTIF] ✅ Notificación enviada a {username} en {cp_id}")
+                                sent = True
+                            except Exception as e:
+                                print(f"[NOTIF] Error enviando a {username}: {e}")
                         else:
-                            await ws.send(message)
-                        print(f"[NOTIF] ✅ Notificación enviada a {username}")
-                    except Exception as e:
-                        print(f"[NOTIF] Error enviando a {username}: {e}")
+                            print(f"[NOTIF] ⚠️ Websocket no encontrado para client_id {client_id}")
+                    else:
+                        print(f"[NOTIF] ⚠️ client_id {client_id} NO está en pending_authorizations")
+                
+                # Fallback: enviar a todos los clientes si no se envió
+                if not sent:
+                    with shared_state.lock:
+                        clients_to_notify = list(shared_state.connected_clients)
+                    for client in clients_to_notify:
+                        try:
+                            if hasattr(client, 'send_str'):
+                                await client.send_str(message)
+                            else:
+                                await client.send(message)
+                        except:
+                            pass
                         
             elif notification['type'] == 'authorization_rejected':
                 username = notification['username']
                 reason = notification['reason']
-                ws = notification.get('websocket')
+                client_id = notification.get('client_id')
                 
                 message = json.dumps({
                     'type': 'error',
                     'message': f'Autorización rechazada: {reason}'
                 })
                 
-                # Enviar al websocket específico
-                if ws:
-                    try:
-                        if hasattr(ws, 'send_str'):
-                            await ws.send_str(message)
-                        else:
-                            await ws.send(message)
-                        print(f"[NOTIF] ❌ Rechazo enviado a {username}")
-                    except Exception as e:
-                        print(f"[NOTIF] Error enviando rechazo a {username}: {e}")
+                # Buscar el websocket usando client_id
+                sent = False
+                with shared_state.lock:
+                    if client_id and client_id in shared_state.pending_authorizations:
+                        ws = shared_state.pending_authorizations[client_id].get('websocket')
+                        
+                        # Limpiar pending_authorizations
+                        shared_state.pending_authorizations.pop(client_id, None)
+                        
+                        # Enviar al websocket específico
+                        if ws:
+                            try:
+                                if hasattr(ws, 'send_str'):
+                                    await ws.send_str(message)
+                                else:
+                                    await ws.send(message)
+                                print(f"[NOTIF] ❌ Rechazo enviado a {username}")
+                                sent = True
+                            except Exception as e:
+                                print(f"[NOTIF] Error enviando rechazo a {username}: {e}")
+                
+                # Fallback: enviar a todos si no se envió
+                if not sent:
+                    with shared_state.lock:
+                        clients_to_notify = list(shared_state.connected_clients)
+                    for client in clients_to_notify:
+                        try:
+                            if hasattr(client, 'send_str'):
+                                await client.send_str(message)
+                            else:
+                                await client.send(message)
+                        except:
+                            pass
                         
         except Exception as e:
             print(f"[NOTIF] Error processing notification: {e}")
