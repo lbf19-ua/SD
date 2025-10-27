@@ -251,7 +251,7 @@ class EV_DriverWS:
                 with shared_state.lock:
                     shared_state.pending_authorizations[client_id] = {
                         'username': username,
-                        'cp_id': cp_id,
+                        'cp_id': None,  # Central asignará el CP
                         'user_id': users.get(username, {}).get('id', 1),
                         'websocket': None  # Se asignará en el handler
                     }

@@ -662,11 +662,13 @@ async def kafka_listener():
                         client_id = event.get('client_id')
                         username = event.get('username')
                         
+                        print(f"[CENTRAL] 🔍 DEBUG - cp_id recibido: {cp_id!r} (tipo: {type(cp_id).__name__})")
+                        
                         if not client_id:
                             raise ValueError("Client ID es requerido")
                         
                         # Si no se especifica CP, buscar y reservar automáticamente (atómico)
-                        if not cp_id or cp_id == 'None':
+                        if not cp_id or cp_id == 'None' or cp_id == 'null':
                             print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, buscando CP disponible...")
                             
                             # Buscar y reservar atomicamente para evitar condiciones de carrera
