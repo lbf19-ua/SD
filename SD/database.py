@@ -104,7 +104,7 @@ def init_database():
     print(f"[DB] Database initialized at {DB_PATH}")
 
 # Devuelve el hash de la contraseña
-def constraseña(password: str) -> str:
+def contraseña_hash(password: str) -> str:
     """Genera hash SHA256 de una contraseña"""
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -139,7 +139,7 @@ def seed_test_data():
             cursor.execute("""
                 INSERT INTO usuarios (nombre, contraseña, email, role, balance)
                 VALUES (?, ?, ?, ?, ?)
-            """, (nombre, constraseña(password), email, role, balance))
+            """, (nombre, contraseña_hash(password), email, role, balance))
         except sqlite3.IntegrityError:
             pass  # Usuario ya existe
     
@@ -244,7 +244,7 @@ def autentificación_usuario(nombre: str, password: str) -> dict | None:
     conn = get_connection()
     cursor = conn.cursor()
     
-    contraseña = constraseña(password)
+    contraseña = contraseña_hash(password)
     cursor.execute("""
         SELECT id, nombre, email, role, balance, active
         FROM usuarios

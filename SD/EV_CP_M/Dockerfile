@@ -21,16 +21,16 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copiar requirements primero (para aprovechar cache de Docker)
-COPY ../requirements.txt /app/requirements.txt
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar archivos de configuración
-COPY ../network_config.py /app/network_config.py
-COPY ../database.py /app/database.py
-COPY ../event_utils.py /app/event_utils.py
+COPY network_config.py /app/network_config.py
+COPY database.py /app/database.py
+COPY event_utils.py /app/event_utils.py
 
-# Copiar archivos del componente
-COPY . /app/EV_CP_M/
+# Copiar archivos del componente EV_CP_M
+COPY EV_CP_M/ /app/EV_CP_M/
 
 # Crear directorio para la base de datos
 RUN mkdir -p /app/data
