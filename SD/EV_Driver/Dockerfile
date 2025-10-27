@@ -29,8 +29,8 @@ COPY network_config.py /app/network_config.py
 COPY database.py /app/database.py
 COPY event_utils.py /app/event_utils.py
 
-# Copiar archivos del componente EV_Driver
-COPY EV_Driver/ /app/EV_Driver/
+# Copiar archivos del componente EV_Driver (copiar directamente a /app)
+COPY EV_Driver/ /app/
 
 # Crear directorio para la base de datos
 RUN mkdir -p /app/data
@@ -43,4 +43,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import socket; s=socket.socket(); s.connect(('localhost', 8001)); s.close()" || exit 1
 
 # Comando por defecto (WebSocket version)
-CMD ["python", "/app/EV_Driver/EV_Driver_WebSocket.py"]
+CMD ["python", "EV_Driver_WebSocket.py"]
