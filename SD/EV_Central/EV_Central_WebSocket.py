@@ -581,10 +581,9 @@ async def kafka_listener():
                     *KAFKA_TOPICS_CONSUME,
                     bootstrap_servers=KAFKA_BROKER,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                    auto_offset_reset='earliest',
+                    auto_offset_reset='latest',  # Solo mensajes nuevos
                     group_id='ev_central_ws_group',
-                    consumer_timeout_ms=10000,
-                    enable_auto_commit=False
+                    enable_auto_commit=True  # Guardar progreso
                 )
                 # Test connection
                 consumer.topics()
@@ -662,10 +661,39 @@ async def kafka_listener():
                         cp_id = event.get('cp_id')
                         client_id = event.get('client_id')
                         username = event.get('username')
-                        if not cp_id or not client_id:
-                            raise ValueError("CP ID y Client ID son requeridos")
                         
-                        print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, cp={cp_id}, client={client_id}")
+                        if not client_id:
+                            raise ValueError("Client ID es requerido")
+                        
+                        # Si no se especifica CP, buscar uno disponible automáticamente
+                        if not cp_id or cp_id == 'None':
+                            print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, buscando CP disponible...")
+                            # Buscar primer CP disponible u offline
+                            conn = db.get_connection()
+                            cursor = conn.cursor()
+                            cursor.execute("""
+                                SELECT cp_id FROM charging_points 
+                                WHERE estado IN ('available', 'offline') 
+                                AND active = 1 
+                                ORDER BY cp_id 
+                                LIMIT 1
+                            """)
+                            result = cursor.fetchone()
+                            conn.close()
+                            
+                            if not result:
+                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                    'client_id': client_id,
+                                    'cp_id': None,
+                                    'authorized': False,
+                                    'reason': 'No hay CPs disponibles'
+                                })
+                                continue
+                            
+                            cp_id = result[0]
+                            print(f"[CENTRAL] 🎯 CP asignado automáticamente: {cp_id}")
+                        else:
+                            print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, cp={cp_id}, client={client_id}")
                         
                         # Verificar estado del punto de carga
                         cp = db.get_charging_point_by_id(cp_id)
@@ -682,13 +710,12 @@ async def kafka_listener():
                         print(f"[CENTRAL] 📊 CP {cp_id} tiene estado: {current_status}")
                         
                         # Solo rechazar si está en estado 'fault' o 'out_of_service'
-                        # Permitir 'available', 'offline', y None (que se asumirá como disponible)
-                        if current_status in ('fault', 'out_of_service'):
+                        if current_status in ('fault', 'out_of_service', 'charging', 'reserved'):
                             central_instance.publish_event('AUTHORIZATION_RESPONSE', {
                                 'client_id': client_id,
                                 'cp_id': cp_id,
                                 'authorized': False,
-                                'reason': f'CP averiado o fuera de servicio (estado: {current_status})'
+                                'reason': f'CP no disponible (estado: {current_status})'
                             })
                             continue
                         

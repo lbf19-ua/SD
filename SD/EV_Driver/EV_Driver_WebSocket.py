@@ -226,13 +226,7 @@ class EV_DriverWS:
         """
         try:
             # ====================================================================
-            # Solicitar primer CP offline o available (Central decidirá)
-            # ====================================================================
-            # Simulamos que siempre intentamos CP_001
-            cp_id = 'CP_001'
-            
-            # ====================================================================
-            # ENVIAR PETICIÓN DE AUTORIZACIÓN A CENTRAL (sin validaciones locales)
+            # NO especificar CP - Central asignará uno disponible automáticamente
             # ====================================================================
             client_id = generate_message_id()
             
@@ -242,13 +236,13 @@ class EV_DriverWS:
                     'event_type': 'AUTHORIZATION_REQUEST',
                     'driver_id': self.driver_id,
                     'username': username,
-                    'cp_id': cp_id,
+                    'cp_id': None,  # Central asignará automáticamente
                     'client_id': client_id,
                     'timestamp': current_timestamp()
                 }
                 self.producer.send(KAFKA_TOPIC_PRODUCE, event)
                 self.producer.flush()
-                print(f"[DRIVER] 🔐 Solicitando autorización a Central para {cp_id}")
+                print(f"[DRIVER] 🔐 Solicitando autorización a Central (asignación automática de CP)")
                 
                 # Datos simulados de usuario (solo para tracking local)
                 users = {'driver1': {'id': 1}, 'driver2': {'id': 2}, 'maria_garcia': {'id': 3}}
