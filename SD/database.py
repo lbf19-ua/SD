@@ -10,7 +10,12 @@ import json
 import sys
 
 # Ruta de la base de datos (en la carpeta SD)
-DB_PATH = Path(__file__).parent / "ev_charging.db"
+# En Docker: la BD está en /app/ev_charging.db
+# Fuera de Docker: en el directorio padre de database.py
+if Path('/app/ev_charging.db').exists():
+    DB_PATH = Path('/app/ev_charging.db')
+else:
+    DB_PATH = Path(__file__).parent / "ev_charging.db"
 
 # Abre y devuelve una conexión SQLite
 def get_connection():

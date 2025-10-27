@@ -912,10 +912,14 @@ async def main():
         return
     
     # Verificar base de datos
-    db_path = Path(__file__).parent.parent / 'ev_charging.db'
+    # En Docker, la BD está en /app/ev_charging.db
+    db_path = Path('/app/ev_charging.db')
     if not db_path.exists():
-        print("⚠️  Database not found. Please run: python init_db.py")
-        return
+        # Intentar también en el directorio actual
+        db_path = Path('ev_charging.db')
+        if not db_path.exists():
+            print("⚠️  Database not found. Please run: python init_db.py")
+            return
     else:
         # Requisito: al iniciar Central TODO debe estar apagado
         try:

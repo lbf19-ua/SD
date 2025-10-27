@@ -17,13 +17,13 @@
 # ==== CONFIGURACIÓN DE IPS POR PC ====
 
 # PC1 - EV_Driver (Interfaz de conductor)
-PC1_IP = "localhost"  # ⚠️ CAMBIAR por la IP real del PC1
+PC1_IP = "192.168.1.228"  # ⚠️ CAMBIAR por la IP real del PC1
 
 # PC2 - EV_Central (Servidor central + Kafka Broker)
-PC2_IP = "localhost"  # ⚠️ CAMBIAR por la IP real del PC2 (donde corre Kafka)
+PC2_IP = "192.168.1.235"  # ⚠️ CAMBIAR por la IP real del PC2 (donde corre Kafka)
 
 # PC3 - EV_CP (Monitor & Engine - Punto de carga)
-PC3_IP = "localhost"  # ⚠️ CAMBIAR por la IP real del PC3
+PC3_IP = "192.168.1.228"  # ⚠️ CAMBIAR por la IP real del PC3
 
 # ==== CONFIGURACIÓN DE PUERTOS ====
 CENTRAL_PORT = 5000
