@@ -23,7 +23,6 @@ from kafka import KafkaProducer, KafkaConsumer
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from network_config import DRIVER_CONFIG, KAFKA_BROKER as KAFKA_BROKER_DEFAULT, KAFKA_TOPICS
 from event_utils import generate_message_id, current_timestamp
-import database as db
 
 # Configuración desde network_config o variables de entorno (Docker)
 KAFKA_BROKER = os.environ.get('KAFKA_BROKER', KAFKA_BROKER_DEFAULT)
@@ -149,44 +148,35 @@ class EV_DriverWS:
                     pass
 
     def authenticate_user(self, username, password):
-        """Autentica un usuario usando la base de datos"""
-        try:
-            # La base de datos usa nombres de funciones en español
-            user = db.autentificación_usuario(username, password)
-            if user:
-                print(f"[DRIVER] ✅ User {username} authenticated successfully")
-                
-                # Verificar si tiene una sesión activa
-                active_session = db.get_active_sesion_for_user(user['id'])
-                session_data = None
-                if active_session:
-                    # Obtener datos del CP
-                    cp = db.get_charging_point_by_id(active_session['cp_id'])
-                    session_data = {
-                        'session_id': active_session['id'],
-                        'cp_id': active_session['cp_id'],
-                        'location': cp.get('location', 'Unknown') if cp else 'Unknown',
-                        'start_time': active_session['start_time']
-                    }
-                    print(f"[DRIVER] 🔄 User {username} has active session at {active_session['cp_id']}")
-                
-                return {
-                    'success': True,
-                    'user': {
-                        'id': user['id'],
-                        'username': user['nombre'],
-                        'email': user['email'],
-                        'balance': user['balance'],
-                        'role': user['role']
-                    },
-                    'active_session': session_data
-                }
-            else:
-                print(f"[DRIVER] ❌ Authentication failed for {username}")
-                return {'success': False, 'message': 'Invalid credentials'}
-        except Exception as e:
-            print(f"[DRIVER] ❌ Auth error: {e}")
-            return {'success': False, 'message': str(e)}
+        """Autentica un usuario (SIMULADO - Central valida en BD)"""
+        # Datos simulados para autenticación local
+        users = {
+            'driver1': {'id': 1, 'nombre': 'driver1', 'email': 'driver1@example.com', 'balance': 150.0, 'role': 'driver'},
+            'driver2': {'id': 2, 'nombre': 'driver2', 'email': 'driver2@example.com', 'balance': 200.0, 'role': 'driver'},
+            'maria_garcia': {'id': 3, 'nombre': 'maria_garcia', 'email': 'maria@example.com', 'balance': 180.0, 'role': 'driver'}
+        }
+        passwords = {
+            'driver1': 'pass123',
+            'driver2': 'pass456',
+            'maria_garcia': 'maria2025'
+        }
+        
+        if username in users and passwords.get(username) == password:
+            print(f"[DRIVER] ✅ User {username} authenticated successfully")
+            return {
+                'success': True,
+                'user': {
+                    'id': users[username]['id'],
+                    'username': users[username]['nombre'],
+                    'email': users[username]['email'],
+                    'balance': users[username]['balance'],
+                    'role': users[username]['role']
+                },
+                'active_session': None
+            }
+        else:
+            print(f"[DRIVER] ❌ Authentication failed for {username}")
+            return {'success': False, 'message': 'Invalid credentials'}
 
     def request_charging(self, username):
         """
@@ -198,7 +188,7 @@ class EV_DriverWS:
         Según la arquitectura, SOLO CENTRAL tiene acceso a la BD.
         
         El Driver:
-        1. Hace validaciones PREVIAS básicas (sin BD, solo metadata)
+        1. NO hace validaciones locales (Central valida TODO)
         2. Envía petición de autorización a Central vía Kafka
         3. Espera respuesta de Central
         4. Solo si Central autoriza, procede con la carga
@@ -211,36 +201,13 @@ class EV_DriverWS:
         """
         try:
             # ====================================================================
-            # VALIDACIÓN BÁSICA 1: Verificar que el usuario existe (metadata local)
+            # Solicitar primer CP offline o available (Central decidirá)
             # ====================================================================
-            user = db.get_user_by_nombre(username)
-            if not user:
-                return {'success': False, 'message': 'User not found'}
+            # Simulamos que siempre intentamos CP_001
+            cp_id = 'CP_001'
             
             # ====================================================================
-            # VALIDACIÓN BÁSICA 2: Verificar que no tiene sesión activa (metadata local)
-            # ====================================================================
-            active_session = db.get_active_sesion_for_user(user['id'])
-            if active_session:
-                return {'success': False, 'message': 'You already have an active charging session'}
-            
-            # ====================================================================
-            # VALIDACIÓN BÁSICA 3: Verificar balance mínimo (metadata local)
-            # ====================================================================
-            if user['balance'] < 5.0:
-                return {'success': False, 'message': 'Insufficient balance (min €5.00 required)'}
-            
-            # ====================================================================
-            # Solicitar primer CP disponible para enviar petición a Central
-            # ====================================================================
-            available_cps = db.get_available_charging_points()
-            if not available_cps:
-                return {'success': False, 'message': 'No charging points available'}
-            
-            cp = available_cps[0]
-            
-            # ====================================================================
-            # ENVIAR PETICIÓN DE AUTORIZACIÓN A CENTRAL
+            # ENVIAR PETICIÓN DE AUTORIZACIÓN A CENTRAL (sin validaciones locales)
             # ====================================================================
             client_id = generate_message_id()
             
@@ -250,20 +217,23 @@ class EV_DriverWS:
                     'event_type': 'AUTHORIZATION_REQUEST',
                     'driver_id': self.driver_id,
                     'username': username,
-                    'cp_id': cp['cp_id'],
+                    'cp_id': cp_id,
                     'client_id': client_id,
                     'timestamp': current_timestamp()
                 }
                 self.producer.send(KAFKA_TOPIC_PRODUCE, event)
                 self.producer.flush()
-                print(f"[DRIVER] 🔐 Solicitando autorización a Central para {cp['cp_id']}")
+                print(f"[DRIVER] 🔐 Solicitando autorización a Central para {cp_id}")
+                
+                # Datos simulados de usuario (solo para tracking local)
+                users = {'driver1': {'id': 1}, 'driver2': {'id': 2}, 'maria_garcia': {'id': 3}}
                 
                 # Guardar solicitud pendiente
                 with shared_state.lock:
                     shared_state.pending_authorizations[client_id] = {
                         'username': username,
-                        'cp_id': cp['cp_id'],
-                        'user_id': user['id'],
+                        'cp_id': cp_id,
+                        'user_id': users.get(username, {}).get('id', 1),
                         'websocket': None  # Se asignará en el handler
                     }
                 
@@ -283,28 +253,9 @@ class EV_DriverWS:
     def request_charging_at_cp(self, username, cp_id):
         """
         Solicita inicio de carga en un CP específico (por ID).
-        Realiza las mismas validaciones que request_charging, pero selecciona el CP indicado.
+        Central valida TODO en BD.
         """
         try:
-            user = db.get_user_by_nombre(username)
-            if not user:
-                return {'success': False, 'message': 'User not found'}
-
-            active_session = db.get_active_sesion_for_user(user['id'])
-            if active_session:
-                return {'success': False, 'message': 'You already have an active charging session'}
-
-            if user['balance'] < 5.0:
-                return {'success': False, 'message': 'Insufficient balance (min €5.00 required)'}
-
-            cp = db.get_charging_point_by_id(cp_id)
-            if not cp:
-                return {'success': False, 'message': f'Charging point {cp_id} not found'}
-                
-            # Solo hacer validación básica, Central hará la validación final
-            if cp.get('status') in ('fault', 'out_of_service'):
-                return {'success': False, 'message': f'Charging point {cp_id} not available (status: {cp.get("status")})'}
-
             # Generar ID único para esta solicitud
             client_id = generate_message_id()
             
@@ -323,12 +274,15 @@ class EV_DriverWS:
                 self.producer.flush()
                 print(f"[DRIVER] 🔐 Solicitando autorización a Central para {cp_id}")
                 
+                # Datos simulados de usuario (solo para tracking local)
+                users = {'driver1': {'id': 1}, 'driver2': {'id': 2}, 'maria_garcia': {'id': 3}}
+                
                 # Guardar solicitud pendiente
                 with shared_state.lock:
                     shared_state.pending_authorizations[client_id] = {
                         'username': username,
                         'cp_id': cp_id,
-                        'user_id': user['id'],
+                        'user_id': users.get(username, {}).get('id', 1),
                         'websocket': None  # Se asignará en el handler de websocket
                     }
                 
@@ -345,70 +299,58 @@ class EV_DriverWS:
             return {'success': False, 'message': str(e)}
 
     def stop_charging(self, username):
-        """Detiene la carga actual"""
+        """Detiene la carga actual (enviar evento a Central para procesar en BD)"""
         try:
-            # Obtener sesión activa del usuario
-            user = db.get_user_by_nombre(username)
-            if not user:
-                return {'success': False, 'message': 'User not found'}
-            
-            active_session = db.get_active_sesion_for_user(user['id'])
-            if not active_session:
-                return {'success': False, 'message': 'No active charging session'}
-            
-            # Simular energía cargada (en producción vendría del hardware)
-            # Por ahora, calcular basado en tiempo transcurrido
-            import random
-            energy_kwh = random.uniform(5.0, 25.0)  # Simular entre 5 y 25 kWh
-            
-            # Finalizar sesión
-            result = db.end_charging_sesion(active_session['id'], energy_kwh)
-            
-            if result:
-                # Publicar evento en Kafka
-                if self.producer:
-                    event = {
-                        'message_id': generate_message_id(),
-                        'driver_id': self.driver_id,
-                        'action': 'charging_stopped',
-                        'username': username,
-                        'session_id': active_session['id'],
-                        'energy_kwh': energy_kwh,
-                        'cost': result.get('coste', 0),  # Fixed: DB returns 'coste' in Spanish
-                        'timestamp': current_timestamp(),
-                        'correlation_id': active_session.get('correlacion_id', '')
-                    }
-                    self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=self.driver_id.encode())
-                    self.producer.flush()
+            # Verificar si hay sesión activa local
+            with shared_state.lock:
+                session_data = shared_state.charging_sessions.get(username)
+                if not session_data:
+                    return {'success': False, 'message': 'No active charging session'}
                 
-                print(f"[DRIVER] ⛔ Charging stopped: {energy_kwh:.2f} kWh, €{result.get('coste', 0):.2f}")
+                cp_id = session_data.get('cp_id')
+                import time
+                duration = time.time() - session_data.get('start_time', time.time())
+                # Simular energía cargada basado en tiempo
+                import random
+                energy_kwh = random.uniform(5.0, 25.0)
+            
+            # Publicar evento de STOP a Central para que finalice en BD
+            if self.producer:
+                event = {
+                    'message_id': generate_message_id(),
+                    'driver_id': self.driver_id,
+                    'action': 'charging_stopped',
+                    'username': username,
+                    'cp_id': cp_id,
+                    'energy_kwh': energy_kwh,
+                    'timestamp': current_timestamp()
+                }
+                self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                self.producer.flush()
+                print(f"[DRIVER] ⛔ Solicitando detener carga en {cp_id} (Central procesará en BD)")
+                
+                # Limpiar sesión local
+                with shared_state.lock:
+                    if username in shared_state.charging_sessions:
+                        del shared_state.charging_sessions[username]
+                
                 return {
                     'success': True,
-                    'energy': result.get('energia_kwh', energy_kwh),
-                    'total_cost': result.get('coste'),
-                    'new_balance': result.get('updated_balance')
+                    'energy': energy_kwh,
+                    'total_cost': energy_kwh * 0.30,  # Simulado
+                    'new_balance': 150.0  # Simulado
                 }
             else:
-                return {'success': False, 'message': result.get('message', 'Failed to stop charging')}
+                return {'success': False, 'message': 'Sistema de mensajería no disponible'}
                 
         except Exception as e:
             print(f"[DRIVER] ❌ Stop charging error: {e}")
             return {'success': False, 'message': str(e)}
 
     def simulate_cp_error(self, cp_id, error_type='malfunction'):
-        """Simula un error en un punto de carga (solo para admin)"""
+        """Simula un error en un punto de carga (solo para admin) - Central procesa"""
         try:
-            # Verificar que el CP existe
-            cp = db.get_charging_point_by_id(cp_id)
-            if not cp:
-                return {'success': False, 'message': f'Charging point {cp_id} not found'}
-            
-            # Marcar el CP con error
-            conn = db.get_connection()
-            cursor = conn.cursor()
-            
             # Mapear el tipo de error al estado correcto
-            # Los estados válidos son: available, charging, fault, out_of_service, offline
             if error_type == 'fault':
                 new_status = 'fault'
             elif error_type == 'out_of_service':
@@ -416,18 +358,9 @@ class EV_DriverWS:
             elif error_type == 'offline':
                 new_status = 'offline'
             else:
-                new_status = error_type  # Usar el error_type directamente
+                new_status = error_type
             
-            cursor.execute("""
-                UPDATE charging_points
-                SET estado = ?
-                WHERE cp_id = ?
-            """, (new_status, cp_id))
-            
-            conn.commit()
-            conn.close()
-            
-            # Publicar evento en Kafka para que otros componentes se enteren
+            # Publicar evento en Kafka para que Central procese en BD
             if self.producer:
                 event = {
                     'message_id': generate_message_id(),
@@ -441,7 +374,7 @@ class EV_DriverWS:
                 self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=cp_id.encode())
                 self.producer.flush()
             
-            print(f"[DRIVER] ⚠️ Admin simulated {error_type} on {cp_id}")
+            print(f"[DRIVER] ⚠️ Simulando {error_type} en {cp_id} (Central procesará en BD)")
             return {
                 'success': True,
                 'cp_id': cp_id,
@@ -454,27 +387,9 @@ class EV_DriverWS:
             return {'success': False, 'message': str(e)}
 
     def fix_cp_error(self, cp_id):
-        """Corrige un error en un punto de carga (solo para admin)"""
+        """Corrige un error en un punto de carga (solo para admin) - Central procesa"""
         try:
-            # Verificar que el CP existe
-            cp = db.get_charging_point_by_id(cp_id)
-            if not cp:
-                return {'success': False, 'message': f'Charging point {cp_id} not found'}
-            
-            # Marcar el CP como disponible
-            conn = db.get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                UPDATE charging_points
-                SET estado = 'available'
-                WHERE cp_id = ?
-            """, (cp_id,))
-            
-            conn.commit()
-            conn.close()
-            
-            # Publicar evento en Kafka para que otros componentes se enteren
+            # Publicar evento en Kafka para que Central procese en BD
             if self.producer:
                 event = {
                     'message_id': generate_message_id(),
@@ -487,7 +402,7 @@ class EV_DriverWS:
                 self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=cp_id.encode())
                 self.producer.flush()
             
-            print(f"[DRIVER] ✅ Admin fixed {cp_id}, now available")
+            print(f"[DRIVER] ✅ Solicitando reparar {cp_id} (Central procesará en BD)")
             return {
                 'success': True,
                 'cp_id': cp_id,
@@ -499,26 +414,24 @@ class EV_DriverWS:
             return {'success': False, 'message': str(e)}
     
     def get_all_charging_points_status(self):
-        """Obtiene el estado de todos los puntos de carga (para admin)"""
+        """Obtiene el estado de todos los puntos de carga (para admin) - SIMULADO"""
         try:
-            cps = db.get_all_charging_points()
+            # Retornar lista vacía - Central tiene la info real
             return {
                 'success': True,
-                'charging_points': cps
+                'charging_points': []
             }
         except Exception as e:
             print(f"[DRIVER] ❌ Get CPs error: {e}")
             return {'success': False, 'message': str(e)}
 
     def get_session_status(self, username):
-        """Obtiene el estado de la sesión actual del usuario"""
+        """Obtiene el estado de la sesión actual del usuario - desde estado local"""
         try:
-            user = db.get_user_by_nombre(username)
-            if not user:
-                return None
-            
-            active_session = db.get_active_sesion_for_user(user['id'])
-            return active_session
+            with shared_state.lock:
+                if username in shared_state.charging_sessions:
+                    return shared_state.charging_sessions[username]
+            return None
         except Exception as e:
             print(f"[DRIVER] ❌ Get session status error: {e}")
             return None
@@ -566,7 +479,7 @@ async def websocket_handler(websocket, path):
                     # Si hay sesión activa, restaurarla en el shared_state
                     if result.get('active_session'):
                         session = result['active_session']
-                        cp = db.get_charging_point_by_id(session['cp_id'])
+                        # Usar tariff por defecto (no tenemos acceso a BD)
                         with shared_state.lock:
                             shared_state.charging_sessions[username] = {
                                 'username': username,
@@ -575,7 +488,7 @@ async def websocket_handler(websocket, path):
                                 'start_time': session['start_time'],
                                 'energy': 0.0,
                                 'cost': 0.0,
-                                'tariff': cp.get('tariff_per_kwh', 0.30) if cp else 0.30
+                                'tariff': 0.30  # Tariff por defecto
                             }
                     
                     response = {
@@ -823,7 +736,7 @@ async def websocket_handler_http(request):
                             # Si hay sesión activa, restaurarla en el shared_state
                             if result.get('active_session'):
                                 session = result['active_session']
-                                cp = db.get_charging_point_by_id(session['cp_id'])
+                                # Usar tariff por defecto (no tenemos acceso a BD)
                                 with shared_state.lock:
                                     shared_state.charging_sessions[username] = {
                                         'username': username,
@@ -832,7 +745,7 @@ async def websocket_handler_http(request):
                                         'start_time': session['start_time'],
                                         'energy': 0.0,
                                         'cost': 0.0,
-                                        'tariff': cp.get('tariff_per_kwh', 0.30) if cp else 0.30
+                                        'tariff': 0.30  # Tariff por defecto
                                     }
                             
                             response = {

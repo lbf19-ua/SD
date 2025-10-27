@@ -445,12 +445,15 @@ def set_all_cps_status_offline() -> int:
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        # Resetear TODOS los estados excepto fault y out_of_service
         cursor.execute("""
             UPDATE charging_points
             SET estado = 'offline'
-            WHERE active = 1
+            WHERE active = 1 
+            AND estado NOT IN ('fault', 'out_of_service')
         """)
         conn.commit()
+        print(f"[DB] ✅ Reset {cursor.rowcount} CPs to offline")
         return cursor.rowcount
     except Exception as e:
         print(f"[DB] ❌ Error setting all CPs offline: {e}")
