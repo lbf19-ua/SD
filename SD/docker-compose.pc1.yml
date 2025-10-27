@@ -32,17 +32,21 @@ services:
       context: .
       dockerfile: EV_Driver/Dockerfile
     container_name: ev-driver
-    network_mode: "host"  # Usar red del host para conectar a PC2
+    ports:
+      - "8001:8001"
     environment:
       # Kafka broker está en PC2
       # Central server está en PC2
       - WS_PORT=8001
       - PYTHONUNBUFFERED=1
     volumes:
-      - ./ev_charging.db:/app/data/ev_charging.db:ro
-      - ./network_config.py:/app/network_config.py:ro
-      - ./database.py:/app/database.py:ro
-      - ./event_utils.py:/app/event_utils.py:ro
+      - ./ev_charging.db:/app/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+      - ./EV_Driver/dashboard.html:/app/dashboard.html
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
 # ==============================================================================

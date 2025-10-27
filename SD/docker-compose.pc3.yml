@@ -39,10 +39,11 @@ services:
       - WS_PORT=8003
       - PYTHONUNBUFFERED=1
     volumes:
-      - ./ev_charging.db:/app/data/ev_charging.db:ro
+      - ./ev_charging.db:/app/ev_charging.db:ro
       - ./network_config.py:/app/network_config.py:ro
       - ./database.py:/app/database.py:ro
       - ./event_utils.py:/app/event_utils.py:ro
+      - ./EV_CP_M/monitor_dashboard.html:/app/monitor_dashboard.html:ro
     restart: unless-stopped
 
 # ==============================================================================

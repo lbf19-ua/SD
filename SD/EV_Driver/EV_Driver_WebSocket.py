@@ -216,46 +216,48 @@ class EV_DriverWS:
 
     def request_charging(self, username):
         """
-        Solicita inicio de carga.
+        Solicita inicio de carga mediante flujo de autorización.
         
         ============================================================================
-        REQUISITO b) AUTORIZACIÓN DE SUMINISTRO
+        REQUISITO b) AUTORIZACIÓN DE SUMINISTRO - ARQUITECTURA CORRECTA
         ============================================================================
-        Esta función implementa el proceso completo de autorización antes de
-        permitir el suministro eléctrico. Valida múltiples condiciones:
+        Según la arquitectura, SOLO CENTRAL tiene acceso a la BD.
         
-        1. Usuario existe y está activo
-        2. Usuario no tiene otra sesión activa
-        3. Balance suficiente (mínimo €5.00)
-        4. Existe al menos un punto de carga disponible
+        El Driver:
+        1. Hace validaciones PREVIAS básicas (sin BD, solo metadata)
+        2. Envía petición de autorización a Central vía Kafka
+        3. Espera respuesta de Central
+        4. Solo si Central autoriza, procede con la carga
         
-        Solo si TODAS las validaciones pasan, se autoriza el suministro y se
-        crea la sesión de carga.
+        Central:
+        1. Recibe petición de autorización
+        2. Valida en BD: usuario, balance, sesiones activas, CP disponible
+        3. Responde AUTORIZADO o RECHAZADO vía Kafka
         ============================================================================
         """
         try:
             # ====================================================================
-            # VALIDACIÓN 1: Verificar que el usuario existe
+            # VALIDACIÓN BÁSICA 1: Verificar que el usuario existe (metadata local)
             # ====================================================================
             user = db.get_user_by_nombre(username)
             if not user:
                 return {'success': False, 'message': 'User not found'}
             
             # ====================================================================
-            # VALIDACIÓN 2: Verificar que no tiene sesión activa
+            # VALIDACIÓN BÁSICA 2: Verificar que no tiene sesión activa (metadata local)
             # ====================================================================
             active_session = db.get_active_sesion_for_user(user['id'])
             if active_session:
                 return {'success': False, 'message': 'You already have an active charging session'}
             
             # ====================================================================
-            # VALIDACIÓN 3: Verificar balance mínimo (autorización económica)
+            # VALIDACIÓN BÁSICA 3: Verificar balance mínimo (metadata local)
             # ====================================================================
             if user['balance'] < 5.0:
                 return {'success': False, 'message': 'Insufficient balance (min €5.00 required)'}
             
             # ====================================================================
-            # VALIDACIÓN 4: Verificar disponibilidad de puntos de carga
+            # Solicitar primer CP disponible para enviar petición a Central
             # ====================================================================
             available_cps = db.get_available_charging_points()
             if not available_cps:
@@ -264,38 +266,41 @@ class EV_DriverWS:
             cp = available_cps[0]
             
             # ====================================================================
-            # ✅ AUTORIZACIÓN CONCEDIDA - Crear sesión de carga
+            # ENVIAR PETICIÓN DE AUTORIZACIÓN A CENTRAL
             # ====================================================================
-            correlation_id = generate_message_id()
-            session_id = db.create_charging_session(user['id'], cp['cp_id'], correlation_id)
+            client_id = generate_message_id()
             
-            if session_id:
-                # Publicar evento en Kafka para notificar a la Central
-                if self.producer:
-                    event = {
-                        'message_id': generate_message_id(),
-                        'driver_id': self.driver_id,
-                        'action': 'charging_started',
+            if self.producer:
+                event = {
+                    'message_id': generate_message_id(),
+                    'event_type': 'AUTHORIZATION_REQUEST',
+                    'driver_id': self.driver_id,
+                    'username': username,
+                    'cp_id': cp['cp_id'],
+                    'client_id': client_id,
+                    'timestamp': current_timestamp()
+                }
+                self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                self.producer.flush()
+                print(f"[DRIVER] 🔐 Solicitando autorización a Central para {cp['cp_id']}")
+                
+                # Guardar solicitud pendiente
+                with shared_state.lock:
+                    shared_state.pending_authorizations[client_id] = {
                         'username': username,
                         'cp_id': cp['cp_id'],
-                        'session_id': session_id,
-                        'timestamp': current_timestamp(),
-                        'correlation_id': correlation_id
+                        'user_id': user['id'],
+                        'websocket': None  # Se asignará en el handler
                     }
-                    self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=self.driver_id.encode())
-                    self.producer.flush()
                 
-                print(f"[DRIVER] ⚡ Charging session {session_id} started for {username} at {cp['cp_id']}")
                 return {
                     'success': True,
-                    'session_id': session_id,
-                    'cp_id': cp['cp_id'],
-                    'location': cp['location'],
-                    'power_output': cp.get('max_power_kw', 22.0),
-                    'tariff': cp.get('tariff_per_kwh', 0.30)
+                    'pending': True,
+                    'client_id': client_id,
+                    'message': 'Solicitud enviada a Central'
                 }
             else:
-                return {'success': False, 'message': 'Failed to create charging session'}
+                return {'success': False, 'message': 'Sistema de mensajería no disponible'}
                 
         except Exception as e:
             print(f"[DRIVER] ❌ Charging request error: {e}")
@@ -622,25 +627,24 @@ async def websocket_handler(websocket, path):
                 username = data.get('username')
                 result = driver_instance.request_charging(username)
                 
-                if result['success']:
-                    with shared_state.lock:
-                        shared_state.charging_sessions[username] = {
-                            'username': username,
-                            'session_id': result['session_id'],
-                            'cp_id': result['cp_id'],
-                            'start_time': time.time(),
-                            'energy': 0.0,
-                            'cost': 0.0,
-                            'tariff': result['tariff']
-                        }
-                    
-                    await websocket.send(json.dumps({
-                        'type': 'charging_started',
-                        'cp_id': result['cp_id'],
-                        'location': result['location'],
-                        'power_output': result['power_output'],
-                        'tariff': result['tariff']
-                    }))
+                if result.get('success'):
+                    if result.get('pending'):
+                        # Guardar el websocket para la respuesta
+                        client_id = result['client_id']
+                        with shared_state.lock:
+                            if client_id in shared_state.pending_authorizations:
+                                shared_state.pending_authorizations[client_id]['websocket'] = websocket
+                        
+                        await websocket.send(json.dumps({
+                            'type': 'charging_pending',
+                            'message': 'Esperando autorización de Central...'
+                        }))
+                    else:
+                        # Respuesta directa (no debería pasar con el nuevo flujo)
+                        await websocket.send(json.dumps({
+                            'type': 'error',
+                            'message': result.get('message', 'Error en el flujo de autorización')
+                        }))
                 else:
                     await websocket.send(json.dumps({
                         'type': 'error',
@@ -880,26 +884,24 @@ async def websocket_handler_http(request):
                         username = data.get('username')
                         result = driver_instance.request_charging(username)
                         
-                        if result['success']:
-                            with shared_state.lock:
-                                shared_state.charging_sessions[username] = {
-                                    'username': username,
-                                    'session_id': result['session_id'],
-                                    'cp_id': result['cp_id'],
-                                    'start_time': time.time(),
-                                    'energy': 0.0,
-                                    'cost': 0.0,
-                                    'tariff': result['tariff']
-                                }
-                            
-                            await ws.send_str(json.dumps({
-                                'type': 'charging_started',
-                                'session_id': result['session_id'],
-                                'cp_id': result['cp_id'],
-                                'location': result['location'],
-                                'power_output': result['power_output'],
-                                'tariff': result['tariff']
-                            }))
+                        if result.get('success'):
+                            if result.get('pending'):
+                                # Guardar el websocket para la respuesta
+                                client_id = result['client_id']
+                                with shared_state.lock:
+                                    if client_id in shared_state.pending_authorizations:
+                                        shared_state.pending_authorizations[client_id]['websocket'] = ws
+                                
+                                await ws.send_str(json.dumps({
+                                    'type': 'charging_pending',
+                                    'message': 'Esperando autorización de Central...'
+                                }))
+                            else:
+                                # Respuesta directa (no debería pasar con el nuevo flujo)
+                                await ws.send_str(json.dumps({
+                                    'type': 'error',
+                                    'message': result.get('message', 'Error en el flujo de autorización')
+                                }))
                         else:
                             await ws.send_str(json.dumps({
                                 'type': 'error',
@@ -1165,8 +1167,16 @@ async def main():
         return
     
     # Inicializar base de datos si no existe
-    db_path = Path(__file__).parent.parent / 'ev_charging.db'
-    if not db_path.exists():
+    # En Docker: /app/ev_charging.db
+    # Fuera de Docker: ../ev_charging.db
+    if Path('/app/ev_charging.db').exists():
+        db_path = Path('/app/ev_charging.db')
+    elif (Path(__file__).parent.parent / 'ev_charging.db').exists():
+        db_path = Path(__file__).parent.parent / 'ev_charging.db'
+    else:
+        db_path = None
+    
+    if not db_path or not db_path.exists():
         print("⚠️  Database not found. Please run: python init_db.py")
         return
     
