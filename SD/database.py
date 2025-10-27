@@ -591,12 +591,21 @@ def find_and_reserve_available_cp(max_attempts: int = 10) -> str:
     Busca y reserva atomicamente el primer CP disponible.
     Retorna el cp_id reservado, o None si no hay CPs disponibles.
     Esta operación es completamente atómica para evitar condiciones de carrera.
+    
+    Usa BEGIN IMMEDIATE para obtener un lock exclusivo de escritura antes de leer,
+    evitando que múltiples transacciones concurrentes reserven el mismo CP.
     """
+    import time
+    
     for attempt in range(max_attempts):
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            # Buscar un CP disponible que NO haya sido reservado
+            # BEGIN IMMEDIATE obtiene un lock de escritura ANTES de hacer el SELECT
+            # Esto previene race conditions en lecturas concurrentes
+            cursor.execute("BEGIN IMMEDIATE")
+            
+            # Buscar un CP disponible que NO esté reservado ni en sesión activa
             cursor.execute("""
                 SELECT cp_id FROM charging_points
                 WHERE estado IN ('available', 'offline')
@@ -604,18 +613,22 @@ def find_and_reserve_available_cp(max_attempts: int = 10) -> str:
                 AND cp_id NOT IN (
                     SELECT DISTINCT cp_id FROM charging_sesiones WHERE estado = 'active'
                 )
+                AND cp_id NOT IN (
+                    SELECT DISTINCT cp_id FROM charging_points WHERE estado = 'reserved'
+                )
                 ORDER BY cp_id
                 LIMIT 1
             """)
             
             result = cursor.fetchone()
             if not result:
+                conn.rollback()
                 print(f"[DB] ⚠️ No available CPs to reserve")
                 return None
             
             cp_id = result[0]
             
-            # Intentar reservar atomicamente (solo si sigue disponible)
+            # Reservar el CP (ahora tenemos el lock exclusivo, nadie más puede leer/escribir)
             cursor.execute("""
                 UPDATE charging_points
                 SET estado = 'reserved'
@@ -626,20 +639,34 @@ def find_and_reserve_available_cp(max_attempts: int = 10) -> str:
             
             if cursor.rowcount > 0:
                 conn.commit()
-                print(f"[DB] ✅ CP {cp_id} found and reserved atomically")
+                print(f"[DB] ✅ CP {cp_id} found and reserved atomically (attempt {attempt + 1})")
                 return cp_id
             else:
-                # Otro proceso lo reservó primero, intentar con el siguiente
-                print(f"[DB] ⚠️ CP {cp_id} was taken, retry {attempt + 1}/{max_attempts}")
+                # Otro proceso lo reservó primero (no debería pasar con BEGIN IMMEDIATE)
                 conn.rollback()
+                print(f"[DB] ⚠️ CP {cp_id} was taken, retry {attempt + 1}/{max_attempts}")
+                time.sleep(0.05)  # Esperar 50ms antes de reintentar
                 continue
                 
         except Exception as e:
-            print(f"[DB] ❌ Error finding/reserving CP: {e}")
-            conn.rollback()
-            return None
+            print(f"[DB] ❌ Error finding/reserving CP (attempt {attempt + 1}): {e}")
+            try:
+                conn.rollback()
+            except:
+                pass
+            
+            # Si es un error de lock (database is locked), reintentar
+            if "locked" in str(e).lower():
+                print(f"[DB] 🔒 Database locked, retrying in 100ms...")
+                time.sleep(0.1)
+                continue
+            else:
+                return None
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except:
+                pass
     
     # Si llegamos aquí, se agotaron los intentos
     print(f"[DB] ❌ Failed to reserve CP after {max_attempts} attempts")

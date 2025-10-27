@@ -721,11 +721,17 @@ async def kafka_listener():
                             )
                             
                             # Ya está reservado, enviar respuesta positiva
-                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                'client_id': client_id,
-                                'cp_id': cp_id, 
-                                'authorized': True
-                            })
+                            print(f"[CENTRAL] 📤 Enviando AUTHORIZATION_RESPONSE: client_id={client_id}, cp_id={cp_id}, authorized=True")
+                            try:
+                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                    'client_id': client_id,
+                                    'cp_id': cp_id, 
+                                    'authorized': True
+                                })
+                                print(f"[CENTRAL] ✅ AUTHORIZATION_RESPONSE enviado exitosamente")
+                            except Exception as e:
+                                print(f"[CENTRAL] ❌ Error enviando AUTHORIZATION_RESPONSE: {e}")
+                            
                             asyncio.run_coroutine_threadsafe(
                                 broadcast_admin_progress({
                                     'step': 3,

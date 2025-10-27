@@ -85,6 +85,23 @@ class EV_DriverWS:
         print(f"[KAFKA] 📡 Consumer started, listening to {KAFKA_TOPICS_CONSUME}")
         while True:
             try:
+                # Verificar que el consumer exista
+                if self.consumer is None:
+                    print(f"[KAFKA] ⚠️ Consumer not initialized, retrying...")
+                    time.sleep(5)
+                    try:
+                        self.consumer = KafkaConsumer(
+                            *KAFKA_TOPICS_CONSUME,
+                            bootstrap_servers=self.kafka_broker,
+                            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                            auto_offset_reset='latest',
+                            group_id=f'ev_driver_group_{self.driver_id}'
+                        )
+                        print(f"[KAFKA] ✅ Consumer reconnected successfully")
+                    except Exception as e:
+                        print(f"[KAFKA] ❌ Failed to reconnect consumer: {e}")
+                        continue
+                
                 for message in self.consumer:
                     event = message.value
                     event_type = event.get('event_type')
@@ -1033,45 +1050,37 @@ async def process_notifications():
                 
                 # Buscar el websocket usando client_id
                 sent = False
+                ws = None
                 with shared_state.lock:
                     print(f"[NOTIF] 🔍 Buscando websocket para client_id={client_id}")
                     print(f"[NOTIF] 📋 pending_authorizations keys: {list(shared_state.pending_authorizations.keys())}")
                     
                     if client_id and client_id in shared_state.pending_authorizations:
                         ws = shared_state.pending_authorizations[client_id].get('websocket')
-                        print(f"[NOTIF] 🎯 Websocket encontrado: {ws is not None}")
-                        
-                        # Limpiar pending_authorizations
-                        shared_state.pending_authorizations.pop(client_id, None)
-                        
-                        # Enviar al websocket específico
-                        if ws:
-                            try:
-                                if hasattr(ws, 'send_str'):
-                                    await ws.send_str(message)
-                                else:
-                                    await ws.send(message)
-                                print(f"[NOTIF] ✅ Notificación enviada a {username} en {cp_id}")
-                                sent = True
-                            except Exception as e:
-                                print(f"[NOTIF] Error enviando a {username}: {e}")
-                        else:
-                            print(f"[NOTIF] ⚠️ Websocket no encontrado para client_id {client_id}")
-                    else:
-                        print(f"[NOTIF] ⚠️ client_id {client_id} NO está en pending_authorizations")
+                        print(f"[NOTIF] 🎯 Websocket encontrado: {ws is not None}, tipo={type(ws)}, valor={ws}")
                 
-                # Fallback: enviar a todos los clientes si no se envió
-                if not sent:
+                # Enviar al websocket específico (fuera del lock para operación async)
+                print(f"[NOTIF] 🔍 Verificando ws antes de enviar: {ws is not None}, tipo={type(ws)}")
+                if ws is not None:
+                    try:
+                        if hasattr(ws, 'send_str'):
+                            await ws.send_str(message)
+                        else:
+                            await ws.send(message)
+                        print(f"[NOTIF] ✅ Notificación enviada a {username} en {cp_id}")
+                        sent = True
+                    except Exception as e:
+                        print(f"[NOTIF] Error enviando a {username}: {e}")
+                    
+                    # Limpiar pending_authorizations después de enviar
                     with shared_state.lock:
-                        clients_to_notify = list(shared_state.connected_clients)
-                    for client in clients_to_notify:
-                        try:
-                            if hasattr(client, 'send_str'):
-                                await client.send_str(message)
-                            else:
-                                await client.send(message)
-                        except:
-                            pass
+                        shared_state.pending_authorizations.pop(client_id, None)
+                else:
+                    print(f"[NOTIF] ⚠️ Websocket no encontrado para client_id {client_id}")
+                
+                # NO usar fallback - solo enviar al cliente específico
+                if not sent:
+                    print(f"[NOTIF] ⚠️ No se pudo enviar charging_started a {username} - websocket no encontrado")
                         
             elif notification['type'] == 'authorization_rejected':
                 username = notification['username']
@@ -1104,18 +1113,9 @@ async def process_notifications():
                             except Exception as e:
                                 print(f"[NOTIF] Error enviando rechazo a {username}: {e}")
                 
-                # Fallback: enviar a todos si no se envió
+                # NO usar fallback - solo enviar al cliente específico
                 if not sent:
-                    with shared_state.lock:
-                        clients_to_notify = list(shared_state.connected_clients)
-                    for client in clients_to_notify:
-                        try:
-                            if hasattr(client, 'send_str'):
-                                await client.send_str(message)
-                            else:
-                                await client.send(message)
-                        except:
-                            pass
+                    print(f"[NOTIF] ⚠️ No se pudo enviar authorization_rejected a {username} - websocket no encontrado")
                         
         except Exception as e:
             print(f"[NOTIF] Error processing notification: {e}")
