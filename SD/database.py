@@ -538,6 +538,65 @@ def terminate_all_active_sessions(mark_cp_offline: bool = True) -> tuple[int, in
 
 # === Funciones de reserva de puntos de carga ===
 
+def find_and_reserve_available_cp(max_attempts: int = 10) -> str:
+    """
+    Busca y reserva atomicamente el primer CP disponible.
+    Retorna el cp_id reservado, o None si no hay CPs disponibles.
+    Esta operación es completamente atómica para evitar condiciones de carrera.
+    """
+    for attempt in range(max_attempts):
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            # Buscar un CP disponible que NO haya sido reservado
+            cursor.execute("""
+                SELECT cp_id FROM charging_points
+                WHERE estado IN ('available', 'offline')
+                AND active = 1
+                AND cp_id NOT IN (
+                    SELECT DISTINCT cp_id FROM charging_sesiones WHERE estado = 'active'
+                )
+                ORDER BY cp_id
+                LIMIT 1
+            """)
+            
+            result = cursor.fetchone()
+            if not result:
+                print(f"[DB] ⚠️ No available CPs to reserve")
+                return None
+            
+            cp_id = result[0]
+            
+            # Intentar reservar atomicamente (solo si sigue disponible)
+            cursor.execute("""
+                UPDATE charging_points
+                SET estado = 'reserved'
+                WHERE cp_id = ? 
+                AND estado IN ('available', 'offline')
+                AND active = 1
+            """, (cp_id,))
+            
+            if cursor.rowcount > 0:
+                conn.commit()
+                print(f"[DB] ✅ CP {cp_id} found and reserved atomically")
+                return cp_id
+            else:
+                # Otro proceso lo reservó primero, intentar con el siguiente
+                print(f"[DB] ⚠️ CP {cp_id} was taken, retry {attempt + 1}/{max_attempts}")
+                conn.rollback()
+                continue
+                
+        except Exception as e:
+            print(f"[DB] ❌ Error finding/reserving CP: {e}")
+            conn.rollback()
+            return None
+        finally:
+            conn.close()
+    
+    # Si llegamos aquí, se agotaron los intentos
+    print(f"[DB] ❌ Failed to reserve CP after {max_attempts} attempts")
+    return None
+
 def reserve_charging_point(cp_id: str, timeout_seconds: int = 5) -> bool:
     """
     Intenta reservar un punto de carga de forma atómica.

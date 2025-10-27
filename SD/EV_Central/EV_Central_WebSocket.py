@@ -665,23 +665,14 @@ async def kafka_listener():
                         if not client_id:
                             raise ValueError("Client ID es requerido")
                         
-                        # Si no se especifica CP, buscar uno disponible automáticamente
+                        # Si no se especifica CP, buscar y reservar automáticamente (atómico)
                         if not cp_id or cp_id == 'None':
                             print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, buscando CP disponible...")
-                            # Buscar primer CP disponible u offline
-                            conn = db.get_connection()
-                            cursor = conn.cursor()
-                            cursor.execute("""
-                                SELECT cp_id FROM charging_points 
-                                WHERE estado IN ('available', 'offline') 
-                                AND active = 1 
-                                ORDER BY cp_id 
-                                LIMIT 1
-                            """)
-                            result = cursor.fetchone()
-                            conn.close()
                             
-                            if not result:
+                            # Buscar y reservar atomicamente para evitar condiciones de carrera
+                            cp_id = db.find_and_reserve_available_cp()
+                            
+                            if not cp_id:
                                 central_instance.publish_event('AUTHORIZATION_RESPONSE', {
                                     'client_id': client_id,
                                     'cp_id': None,
@@ -690,50 +681,57 @@ async def kafka_listener():
                                 })
                                 continue
                             
-                            cp_id = result[0]
-                            print(f"[CENTRAL] 🎯 CP asignado automáticamente: {cp_id}")
-                        else:
-                            print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, cp={cp_id}, client={client_id}")
-                        
-                        # Verificar estado del punto de carga
-                        cp = db.get_charging_point_by_id(cp_id)
-                        if not cp:
-                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                'client_id': client_id,
-                                'cp_id': cp_id,
-                                'authorized': False,
-                                'reason': 'CP no encontrado'
-                            })
-                            continue
+                            print(f"[CENTRAL] 🎯 CP {cp_id} asignado y reservado automáticamente para {username}")
                             
-                        current_status = cp.get('status') or cp.get('estado')
-                        print(f"[CENTRAL] 📊 CP {cp_id} tiene estado: {current_status}")
-                        
-                        # Solo rechazar si está en estado 'fault' o 'out_of_service'
-                        if current_status in ('fault', 'out_of_service', 'charging', 'reserved'):
-                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                'client_id': client_id,
-                                'cp_id': cp_id,
-                                'authorized': False,
-                                'reason': f'CP no disponible (estado: {current_status})'
-                            })
-                            continue
-                        
-                        # Intentar reservar el punto de carga
-                        if db.reserve_charging_point(cp_id):
-                            print(f"[CENTRAL] ✅ CP {cp_id} reservado para cliente {client_id}")
+                            # Ya está reservado, enviar respuesta positiva
                             central_instance.publish_event('AUTHORIZATION_RESPONSE', {
                                 'client_id': client_id,
                                 'cp_id': cp_id, 
                                 'authorized': True
                             })
                         else:
-                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                'client_id': client_id,
-                                'cp_id': cp_id,
-                                'authorized': False,
-                                'reason': 'No se pudo reservar el CP'
-                            })
+                            # Si se especifica un CP concreto, verificar y reservar
+                            print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, cp={cp_id}, client={client_id}")
+                            
+                            # Verificar estado del punto de carga
+                            cp = db.get_charging_point_by_id(cp_id)
+                            if not cp:
+                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                    'client_id': client_id,
+                                    'cp_id': cp_id,
+                                    'authorized': False,
+                                    'reason': 'CP no encontrado'
+                                })
+                                continue
+                                
+                            current_status = cp.get('status') or cp.get('estado')
+                            print(f"[CENTRAL] 📊 CP {cp_id} tiene estado: {current_status}")
+                            
+                            # Solo rechazar si está en estado 'fault', 'out_of_service', 'charging' o 'reserved'
+                            if current_status in ('fault', 'out_of_service', 'charging', 'reserved'):
+                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                    'client_id': client_id,
+                                    'cp_id': cp_id,
+                                    'authorized': False,
+                                    'reason': f'CP no disponible (estado: {current_status})'
+                                })
+                                continue
+                            
+                            # Intentar reservar el punto de carga específico
+                            if db.reserve_charging_point(cp_id):
+                                print(f"[CENTRAL] ✅ CP {cp_id} reservado para cliente {client_id}")
+                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                    'client_id': client_id,
+                                    'cp_id': cp_id, 
+                                    'authorized': True
+                                })
+                            else:
+                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                    'client_id': client_id,
+                                    'cp_id': cp_id,
+                                    'authorized': False,
+                                    'reason': 'No se pudo reservar el CP'
+                                })
                     except Exception as e:
                         print(f"[CENTRAL] ⚠️ Error procesando autorización: {e}")
                         if client_id and cp_id:
