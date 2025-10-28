@@ -108,16 +108,39 @@ class EV_CentralWS:
         self.consumer = None
         self.initialize_kafka()
 
-    def initialize_kafka(self):
-        """Inicializa el productor de Kafka"""
-        try:
-            self.producer = KafkaProducer(
-                bootstrap_servers=self.kafka_broker,
-                value_serializer=lambda v: json.dumps(v).encode('utf-8')
-            )
-            print(f"[CENTRAL] ✅ Kafka producer initialized")
-        except Exception as e:
-            print(f"[CENTRAL] ⚠️  Warning: Kafka not available: {e}")
+    def initialize_kafka(self, max_retries=10):
+        """Inicializa el productor de Kafka con reintentos"""
+        for attempt in range(max_retries):
+            try:
+                self.producer = KafkaProducer(
+                    bootstrap_servers=self.kafka_broker,
+                    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                )
+                print(f"[CENTRAL] ✅ Kafka producer initialized")
+                return
+            except Exception as e:
+                print(f"[CENTRAL] ⚠️  Attempt {attempt+1}/{max_retries} - Kafka not available: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"[CENTRAL] ❌ Failed to connect to Kafka after {max_retries} attempts")
+    
+    def ensure_producer(self):
+        """Asegura que el producer esté disponible, reintentando si es necesario"""
+        if self.producer is None:
+            print(f"[CENTRAL] 🔄 Producer not initialized, attempting reconnection...")
+            try:
+                self.producer = KafkaProducer(
+                    bootstrap_servers=self.kafka_broker,
+                    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                )
+                print(f"[CENTRAL] ✅ Kafka producer reconnected successfully")
+                return True
+            except Exception as e:
+                print(f"[CENTRAL] ❌ Producer reconnection failed: {e}")
+                return False
+        return True
 
     def _normalize_status(self, status: str) -> str:
         s = (status or '').lower()
@@ -262,7 +285,7 @@ class EV_CentralWS:
 
     def publish_event(self, event_type, data):
         """Publica un evento en Kafka"""
-        if self.producer:
+        if self.ensure_producer():
             try:
                 event = {
                     'message_id': generate_message_id(),
@@ -373,6 +396,15 @@ async def websocket_handler_http(request):
                         # Actualizar estado en BD
                         db.update_charging_point_status(cp_id, new_status)
                         
+                        # 🆕 PUBLICAR EVENTO EN KAFKA para notificar al Driver
+                        central_instance.publish_event('CP_ERROR_SIMULATED', {
+                            'cp_id': cp_id,
+                            'error_type': error_type,
+                            'new_status': new_status,
+                            'message': f'Error "{error_type}" simulado en {cp_id}'
+                        })
+                        print(f"[CENTRAL] 📢 Publicado CP_ERROR_SIMULATED en Kafka para {cp_id}")
+                        
                         # Enviar confirmación
                         await ws.send_str(json.dumps({
                             'type': 'error_simulated',
@@ -397,6 +429,14 @@ async def websocket_handler_http(request):
                         
                         # Cambiar estado a available
                         db.update_charging_point_status(cp_id, 'available')
+                        
+                        # 🆕 PUBLICAR EVENTO EN KAFKA para notificar al Driver
+                        central_instance.publish_event('CP_ERROR_FIXED', {
+                            'cp_id': cp_id,
+                            'new_status': 'available',
+                            'message': f'Error corregido en {cp_id}'
+                        })
+                        print(f"[CENTRAL] 📢 Publicado CP_ERROR_FIXED en Kafka para {cp_id}")
                         
                         # Enviar confirmación
                         await ws.send_str(json.dumps({
@@ -842,11 +882,34 @@ async def broadcast_kafka_event(event):
                     print(f"[CENTRAL] ⚠️ Error liberando reserva de CP {cp_id} para inicio de carga")
         
         elif action in ['charging_stopped']:
-            # Marcar CP disponible cuando termina el suministro (liberando reserva si existe)
-            if db.release_charging_point(cp_id, 'available'):
-                print(f"[CENTRAL] ✅ Suministro finalizado - CP {cp_id} ahora disponible")
-            else:
-                print(f"[CENTRAL] ⚠️ Error liberando CP {cp_id} tras fin de carga")
+            # Finalizar sesión de carga y liberar CP
+            username = event.get('username')
+            energy_kwh = event.get('energy_kwh', 0)
+            
+            print(f"[CENTRAL] ⛔ Procesando charging_stopped: user={username}, cp={cp_id}, energy={energy_kwh}")
+            
+            # 1. Buscar sesión activa del usuario
+            try:
+                session = db.get_active_session_by_username(username)
+                if session:
+                    session_id = session.get('id') or session.get('session_id') or session.get('sesion_id')
+                    
+                    # 2. Finalizar sesión en BD
+                    if session_id:
+                        db.end_charging_session(session_id, energy_kwh)
+                        print(f"[CENTRAL] ✅ Sesión {session_id} finalizada en BD con {energy_kwh} kWh")
+                    
+                    # 3. Liberar CP
+                    if db.release_charging_point(cp_id, 'available'):
+                        print(f"[CENTRAL] ✅ Suministro finalizado - CP {cp_id} ahora disponible")
+                else:
+                    print(f"[CENTRAL] ⚠️ No se encontró sesión activa para {username}")
+                    # Liberar el CP de todas formas
+                    db.release_charging_point(cp_id, 'available')
+            except Exception as e:
+                print(f"[CENTRAL] ❌ Error procesando charging_stopped: {e}")
+                # Liberar el CP de todas formas
+                db.release_charging_point(cp_id, 'available')
         elif action in ['cp_status_change']:
             status = event.get('status')
             if status:

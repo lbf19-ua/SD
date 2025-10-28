@@ -157,6 +157,43 @@ class EV_DriverWS:
                                     })
                                     
                                     # NO limpiar aún, se limpiará en el procesador
+                    
+                    # 🆕 PROCESAR EVENTOS DE ERROR DE CP
+                    elif event_type == 'CP_ERROR_SIMULATED':
+                        cp_id = event.get('cp_id')
+                        error_type = event.get('error_type')
+                        message_text = event.get('message')
+                        
+                        print(f"[DRIVER] ⚠️ CP {cp_id} tiene error: {error_type}")
+                        
+                        # Verificar si algún usuario está usando ese CP
+                        with shared_state.lock:
+                            for username, session in list(shared_state.charging_sessions.items()):
+                                if session.get('cp_id') == cp_id:
+                                    # Notificar al usuario
+                                    notification = {
+                                        'type': 'cp_error',
+                                        'cp_id': cp_id,
+                                        'error_type': error_type,
+                                        'message': message_text,
+                                        'username': username
+                                    }
+                                    shared_state.notification_queue.put(notification)
+                                    print(f"[DRIVER] 📢 Notificando error a {username}")
+                    
+                    elif event_type == 'CP_ERROR_FIXED':
+                        cp_id = event.get('cp_id')
+                        message_text = event.get('message')
+                        
+                        print(f"[DRIVER] ✅ CP {cp_id} reparado")
+                        
+                        # Notificar a todos los usuarios conectados
+                        notification = {
+                            'type': 'cp_fixed',
+                            'cp_id': cp_id,
+                            'message': message_text
+                        }
+                        shared_state.notification_queue.put(notification)
                 
             except Exception as e:
                 print(f"[KAFKA] ⚠️ Consumer error: {e}")
@@ -829,6 +866,7 @@ async def websocket_handler_http(request):
                             
                             await ws.send_str(json.dumps({
                                 'type': 'charging_stopped',
+                                'username': username,  # Incluir username para filtrado en frontend
                                 'energy': result['energy'],
                                 'total_cost': result['total_cost'],
                                 'new_balance': result['new_balance']
@@ -1062,6 +1100,7 @@ async def process_notifications():
                 
                 # Fallback: enviar a todos los clientes si no se envió
                 if not sent:
+                    print(f"[NOTIF] ⚠️ WARNING: Usando BROADCAST a todos los clientes para {username}")
                     with shared_state.lock:
                         clients_to_notify = list(shared_state.connected_clients)
                     for client in clients_to_notify:
@@ -1072,6 +1111,7 @@ async def process_notifications():
                                 await client.send(message)
                         except:
                             pass
+                    print(f"[NOTIF] 📢 Broadcast enviado a {len(clients_to_notify)} clientes")
                         
             elif notification['type'] == 'authorization_rejected':
                 username = notification['username']
@@ -1106,6 +1146,7 @@ async def process_notifications():
                 
                 # Fallback: enviar a todos si no se envió
                 if not sent:
+                    print(f"[NOTIF] ⚠️ WARNING: Usando BROADCAST a todos los clientes para rechazo de {username}")
                     with shared_state.lock:
                         clients_to_notify = list(shared_state.connected_clients)
                     for client in clients_to_notify:
@@ -1116,6 +1157,56 @@ async def process_notifications():
                                 await client.send(message)
                         except:
                             pass
+                    print(f"[NOTIF] 📢 Broadcast de rechazo enviado a {len(clients_to_notify)} clientes")
+            
+            # 🆕 NOTIFICACIONES DE ERROR DE CP
+            elif notification['type'] == 'cp_error':
+                username = notification.get('username')
+                cp_id = notification['cp_id']
+                message_text = notification['message']
+                
+                message = json.dumps({
+                    'type': 'cp_error',
+                    'cp_id': cp_id,
+                    'message': message_text,
+                    'username': username
+                })
+                
+                # Broadcast a todos (el frontend filtrará)
+                with shared_state.lock:
+                    clients = list(shared_state.connected_clients)
+                for client in clients:
+                    try:
+                        if hasattr(client, 'send_str'):
+                            await client.send_str(message)
+                        else:
+                            await client.send(message)
+                        print(f"[NOTIF] ⚠️ Error de CP notificado a cliente")
+                    except:
+                        pass
+            
+            elif notification['type'] == 'cp_fixed':
+                cp_id = notification['cp_id']
+                message_text = notification['message']
+                
+                message = json.dumps({
+                    'type': 'cp_fixed',
+                    'cp_id': cp_id,
+                    'message': message_text
+                })
+                
+                # Broadcast a todos
+                with shared_state.lock:
+                    clients = list(shared_state.connected_clients)
+                for client in clients:
+                    try:
+                        if hasattr(client, 'send_str'):
+                            await client.send_str(message)
+                        else:
+                            await client.send(message)
+                        print(f"[NOTIF] ✅ Reparación de CP notificada a cliente")
+                    except:
+                        pass
                         
         except Exception as e:
             print(f"[NOTIF] Error processing notification: {e}")

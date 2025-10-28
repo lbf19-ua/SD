@@ -534,6 +534,12 @@
                     break;
                 
                 case 'charging_started':
+                    // FILTRAR: Solo procesar si es para el usuario actual
+                    if (data.username && data.username !== currentUser) {
+                        console.log(`[WS] Ignorando charging_started de otro usuario: ${data.username}`);
+                        break;
+                    }
+                    
                     sessionData.charging = true;
                     sessionData.cp_id = data.cp_id;
                     document.getElementById('chargingStatus').textContent = 'CARGANDO ⚡';
@@ -567,6 +573,12 @@
                     break;
 
                 case 'charging_stopped':
+                    // FILTRAR: Solo procesar si es para el usuario actual
+                    if (data.username && data.username !== currentUser) {
+                        console.log(`[WS] Ignorando charging_stopped de otro usuario: ${data.username}`);
+                        break;
+                    }
+                    
                     sessionData.charging = false;
                     document.getElementById('chargingStatus').textContent = 'COMPLETADO ✓';
                     document.getElementById('startBtn').classList.remove('hidden');
@@ -587,6 +599,31 @@
                 case 'error_fixed':
                     addEvent(`✅ Error corregido en ${data.cp_id}`);
                     refreshCPs();
+                    break;
+                
+                // 🆕 EVENTOS DE ERROR DE CP DESDE CENTRAL
+                case 'cp_error':
+                    // Si el usuario está cargando en este CP, mostrar error
+                    if (sessionData.cp_id === data.cp_id) {
+                        document.getElementById('chargingStatus').textContent = '❌ ERROR EN CP';
+                        addEvent(`⚠️ ${data.message}`);
+                        alert(`Error en tu punto de carga: ${data.message}\nLa carga debe detenerse.`);
+                        
+                        // Mostrar botón de inicio, ocultar botón de detener
+                        document.getElementById('startBtn').classList.remove('hidden');
+                        document.getElementById('stopBtn').classList.add('hidden');
+                        
+                        // Limpiar sesión local
+                        sessionData.charging = false;
+                        sessionData.cp_id = null;
+                    } else if (data.username && data.username === currentUser) {
+                        // Si el error es para este usuario pero no está cargando
+                        addEvent(`⚠️ ${data.message}`);
+                    }
+                    break;
+                
+                case 'cp_fixed':
+                    addEvent(`✅ ${data.message}`);
                     break;
                 
                 case 'all_cps_status':
