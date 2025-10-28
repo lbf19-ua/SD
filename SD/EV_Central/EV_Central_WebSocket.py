@@ -393,6 +393,22 @@ async def websocket_handler_http(request):
                         }
                         new_status = status_map.get(error_type, 'fault')
                         
+                        # 🆕 FINALIZAR SESIÓN ACTIVA si existe en este CP
+                        try:
+                            # Buscar sesión activa en este CP
+                            sesiones_activas = db.get_sesiones_actividad()
+                            for sesion in sesiones_activas:
+                                if sesion.get('cp_id') == cp_id:
+                                    session_id = sesion.get('id')
+                                    print(f"[CENTRAL] ⚠️ Finalizando sesión {session_id} por error en {cp_id}")
+                                    # Finalizar con 0 kWh (error interrumpió la carga)
+                                    result = db.end_charging_sesion(session_id, 0.0)
+                                    if result:
+                                        print(f"[CENTRAL] ✅ Sesión {session_id} finalizada por error")
+                                    break
+                        except Exception as e:
+                            print(f"[CENTRAL] ⚠️ Error finalizando sesión en CP con error: {e}")
+                        
                         # Actualizar estado en BD
                         db.update_charging_point_status(cp_id, new_status)
                         
