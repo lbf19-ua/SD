@@ -1,0 +1,42 @@
+EJECUTA ESTE COMANDO EN EL PC DEL DRIVER:
+============================================
+
+docker logs ev-driver --tail 100 | Select-String "Kafka|AUTHORIZATION|charging_started|producer|📤|✅|⚠️"
+
+O si usas Python directo, mira la salida de la consola.
+
+
+BUSCA ESPECIFICAMENTE:
+============================================
+
+1. ✅ [DRIVER] ✅ Kafka producer and consumer initialized
+   → Si aparece: Producer se inicializó OK
+   → Si NO aparece: Producer falló al iniciar
+
+2. [KAFKA] 📨 Received AUTHORIZATION_RESPONSE from Central
+   → Si aparece: Driver recibió la autorización
+
+3. [DRIVER] ✅ Central autorizó carga en CP_XXX
+   → Si aparece: Driver procesó la autorización
+
+4. [DRIVER] 📤 Enviado evento charging_started a Central
+   → Si aparece: Evento se envió correctamente
+   → Si NO aparece: AQUÍ ESTÁ EL PROBLEMA ❌
+
+
+INTERPRETACIÓN:
+============================================
+
+SI VES 1, 2, 3 PERO NO VES 4:
+  → self.producer es None en el momento de enviar charging_started
+  → Necesita el fix de reconexión
+
+SI NO VES NI 1:
+  → Kafka no estaba disponible al arrancar
+  → self.producer nunca se inicializó
+  → Necesita el fix de reconexión
+
+SI VES 1, 2, 3 Y 4:
+  → El evento se envió pero Kafka lo perdió
+  → Problema de red o Kafka
+
