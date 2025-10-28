@@ -37,8 +37,8 @@ services:
       - "8001:8001"
     environment:
       # Kafka broker está en PC2
-      - KAFKA_BROKER=192.168.1.42:9092
-      - CENTRAL_IP=192.168.1.42
+      - KAFKA_BROKER=192.168.71.1:9092
+      - CENTRAL_IP=192.168.71.1
       - WS_PORT=8001
       - PYTHONUNBUFFERED=1
     volumes:
@@ -47,12 +47,19 @@ services:
       - ./database.py:/app/database.py
       - ./event_utils.py:/app/event_utils.py
       - ./EV_Driver/dashboard.html:/app/dashboard.html
+    networks:
+      - ev-network
     restart: unless-stopped
 
 # ==============================================================================
 # NOTA: Se usa network_mode: "host" para que el contenedor pueda acceder
 # directamente a los servicios en PC2 (Kafka y EV_Central)
 # ==============================================================================
+
+networks:
+  ev-network:
+    external: true
+    name: ev-network
 
 # ==============================================================================
 # VERIFICACIÓN DE CONECTIVIDAD

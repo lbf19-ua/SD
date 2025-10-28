@@ -62,16 +62,19 @@ class EV_DriverWS:
         kafka_thread = threading.Thread(target=self.kafka_listener, daemon=True)
         kafka_thread.start()
 
+        # Iniciar reintentos de Producer en segundo plano
+        threading.Thread(target=self._producer_keeper, daemon=True).start()
+
     def initialize_kafka(self):
         """Inicializa el productor de Kafka"""
         try:
             self.producer = KafkaProducer(
-                bootstrap_servers=self.kafka_broker,
+                bootstrap_servers=self._bootstrap_candidates(),
                 value_serializer=lambda v: json.dumps(v).encode('utf-8')
             )
             self.consumer = KafkaConsumer(
                 *KAFKA_TOPICS_CONSUME,
-                bootstrap_servers=self.kafka_broker,
+                bootstrap_servers=self._bootstrap_candidates(),
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                 auto_offset_reset='latest',
                 group_id=f'ev_driver_group_{self.driver_id}'
@@ -79,6 +82,118 @@ class EV_DriverWS:
             print(f"[DRIVER] ✅ Kafka producer and consumer initialized")
         except Exception as e:
             print(f"[DRIVER] ⚠️  Warning: Kafka not available: {e}")
+            # Asegurar que quedan a None si falló
+            self.producer = None
+            self.consumer = None
+
+    def _bootstrap_candidates(self):
+        """Devuelve una lista de bootstrap servers priorizando el configurado por el usuario (IP),
+        con fallback a broker:29092 para entornos Docker."""
+        servers = []
+        # Aceptar lista separada por comas o un único valor
+        if isinstance(self.kafka_broker, str):
+            servers = [s.strip() for s in self.kafka_broker.split(',') if s.strip()]
+        else:
+            try:
+                servers = list(self.kafka_broker)
+            except Exception:
+                servers = []
+        # Añadir fallback interno si no está ya presente
+        if 'broker:29092' not in servers:
+            servers.append('broker:29092')
+        return servers
+
+    def _bootstrap_primary(self):
+        """Devuelve el primer servidor configurado por el usuario (o el string completo si es único)."""
+        if isinstance(self.kafka_broker, str):
+            parts = [s.strip() for s in self.kafka_broker.split(',') if s.strip()]
+            return parts[0] if parts else self.kafka_broker
+        try:
+            return list(self.kafka_broker)[0]
+        except Exception:
+            return str(self.kafka_broker)
+
+    def _producer_keeper(self):
+        """Hilo que intenta (re)crear el Producer periódicamente si no está disponible."""
+        while True:
+            try:
+                if self.producer is None:
+                    try:
+                        # Intento 1: primario (lo que configuró el usuario)
+                        try:
+                            self.producer = KafkaProducer(
+                                bootstrap_servers=[self._bootstrap_primary()],
+                                value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                            )
+                            print("[KAFKA] ✅ Producer (re)connected via primary")
+                        except Exception:
+                            # Intento 2: fallback interno broker:29092
+                            self.producer = KafkaProducer(
+                                bootstrap_servers=['broker:29092'],
+                                value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                            )
+                            print("[KAFKA] ✅ Producer (re)connected via fallback broker:29092")
+                    except Exception as e:
+                        # Esperar y reintentar
+                        time.sleep(3)
+                        continue
+            except Exception:
+                pass
+            time.sleep(3)
+
+    def _get_or_create_producer(self):
+        """Devuelve un Producer válido; intenta crearlo si está ausente."""
+        if self.producer is None:
+            try:
+                try:
+                    self.producer = KafkaProducer(
+                        bootstrap_servers=[self._bootstrap_primary()],
+                        value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                    )
+                    print("[KAFKA] ✅ Producer connected on demand (primary)")
+                except Exception:
+                    self.producer = KafkaProducer(
+                        bootstrap_servers=['broker:29092'],
+                        value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                    )
+                    print("[KAFKA] ✅ Producer connected on demand (fallback broker:29092)")
+            except Exception as e:
+                print(f"[KAFKA] ❌ Producer not available: {e}")
+                self.producer = None
+                return None
+        return self.producer
+
+    def _send_event(self, topic, event, key: bytes | None = None):
+        """Envía un evento a Kafka con reintento único en caso de fallo; devuelve True/False."""
+        producer = self._get_or_create_producer()
+        if producer is None:
+            return False
+        try:
+            if key is not None:
+                producer.send(topic, event, key=key)
+            else:
+                producer.send(topic, event)
+            producer.flush()
+            return True
+        except Exception as e:
+            print(f"[KAFKA] ❌ Send failed, retrying once: {e}")
+            # invalidar y re-crear una vez
+            try:
+                self.producer = None
+                producer = self._get_or_create_producer()
+                if producer is None:
+                    return False
+                if key is not None:
+                    producer.send(topic, event, key=key)
+                else:
+                    producer.send(topic, event)
+                producer.flush()
+                print("[KAFKA] 🔁 Send succeeded after reconnect")
+                return True
+            except Exception as e2:
+                print(f"[KAFKA] ❌ Send failed after reconnect: {e2}")
+                self.producer = None
+                return False
             
     def kafka_listener(self):
         """Escucha mensajes de Kafka, especialmente las respuestas de autorización"""
@@ -90,14 +205,26 @@ class EV_DriverWS:
                     print(f"[KAFKA] ⚠️ Consumer not initialized, retrying...")
                     time.sleep(5)
                     try:
-                        self.consumer = KafkaConsumer(
-                            *KAFKA_TOPICS_CONSUME,
-                            bootstrap_servers=self.kafka_broker,
-                            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                            auto_offset_reset='latest',
-                            group_id=f'ev_driver_group_{self.driver_id}'
-                        )
-                        print(f"[KAFKA] ✅ Consumer reconnected successfully")
+                        try:
+                            # Intento 1: primario (IP configurada)
+                            self.consumer = KafkaConsumer(
+                                *KAFKA_TOPICS_CONSUME,
+                                bootstrap_servers=[self._bootstrap_primary()],
+                                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                                auto_offset_reset='latest',
+                                group_id=f'ev_driver_group_{self.driver_id}'
+                            )
+                            print(f"[KAFKA] ✅ Consumer reconnected via primary")
+                        except Exception:
+                            # Intento 2: fallback interno broker:29092
+                            self.consumer = KafkaConsumer(
+                                *KAFKA_TOPICS_CONSUME,
+                                bootstrap_servers=['broker:29092'],
+                                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                                auto_offset_reset='latest',
+                                group_id=f'ev_driver_group_{self.driver_id}'
+                            )
+                            print(f"[KAFKA] ✅ Consumer reconnected via fallback broker:29092")
                     except Exception as e:
                         print(f"[KAFKA] ❌ Failed to reconnect consumer: {e}")
                         continue
@@ -125,7 +252,7 @@ class EV_DriverWS:
                                     
                                     # Enviar evento para que CENTRAL cree la sesión (solo Central modifica BD)
                                     correlation_id = generate_message_id()
-                                    if self.producer:
+                                    if self._get_or_create_producer():
                                         start_event = {
                                             'message_id': generate_message_id(),
                                             'event_type': 'charging_started',
@@ -137,8 +264,7 @@ class EV_DriverWS:
                                             'correlation_id': correlation_id,
                                             'timestamp': current_timestamp()
                                         }
-                                        self.producer.send(KAFKA_TOPIC_PRODUCE, start_event)
-                                        self.producer.flush()
+                                        self._send_event(KAFKA_TOPIC_PRODUCE, start_event)
                                         print(f"[DRIVER] 📤 Enviado evento charging_started a Central para sesión en {cp_id}")
                                         
                                         # Almacenar en estado local (sin BD)
@@ -179,13 +305,22 @@ class EV_DriverWS:
                 print(f"[KAFKA] ⚠️ Consumer error: {e}")
                 # Intentar reconectar
                 try:
-                    self.consumer = KafkaConsumer(
-                        *KAFKA_TOPICS_CONSUME,
-                        bootstrap_servers=self.kafka_broker,
-                        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                        auto_offset_reset='latest',
-                        group_id=f'ev_driver_group_{self.driver_id}'
-                    )
+                    try:
+                        self.consumer = KafkaConsumer(
+                            *KAFKA_TOPICS_CONSUME,
+                            bootstrap_servers=[self._bootstrap_primary()],
+                            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                            auto_offset_reset='latest',
+                            group_id=f'ev_driver_group_{self.driver_id}'
+                        )
+                    except Exception:
+                        self.consumer = KafkaConsumer(
+                            *KAFKA_TOPICS_CONSUME,
+                            bootstrap_servers=['broker:29092'],
+                            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                            auto_offset_reset='latest',
+                            group_id=f'ev_driver_group_{self.driver_id}'
+                        )
                 except:
                     pass
 
@@ -247,7 +382,7 @@ class EV_DriverWS:
             # ====================================================================
             client_id = generate_message_id()
             
-            if self.producer:
+            if self._get_or_create_producer():
                 event = {
                     'message_id': generate_message_id(),
                     'event_type': 'AUTHORIZATION_REQUEST',
@@ -257,8 +392,8 @@ class EV_DriverWS:
                     'client_id': client_id,
                     'timestamp': current_timestamp()
                 }
-                self.producer.send(KAFKA_TOPIC_PRODUCE, event)
-                self.producer.flush()
+                if not self._send_event(KAFKA_TOPIC_PRODUCE, event):
+                    return {'success': False, 'message': 'Sistema de mensajería no disponible'}
                 print(f"[DRIVER] 🔐 Solicitando autorización a Central (asignación automática de CP)")
                 
                 # Datos simulados de usuario (solo para tracking local)
@@ -296,7 +431,7 @@ class EV_DriverWS:
             client_id = generate_message_id()
             
             # Publicar solicitud de autorización
-            if self.producer:
+            if self._get_or_create_producer():
                 event = {
                     'message_id': generate_message_id(),
                     'event_type': 'AUTHORIZATION_REQUEST',
@@ -306,8 +441,8 @@ class EV_DriverWS:
                     'client_id': client_id,
                     'timestamp': current_timestamp()
                 }
-                self.producer.send(KAFKA_TOPIC_PRODUCE, event)
-                self.producer.flush()
+                if not self._send_event(KAFKA_TOPIC_PRODUCE, event):
+                    return {'success': False, 'message': 'Sistema de mensajería no disponible'}
                 print(f"[DRIVER] 🔐 Solicitando autorización a Central para {cp_id}")
                 
                 # Datos simulados de usuario (solo para tracking local)
@@ -351,7 +486,7 @@ class EV_DriverWS:
                 energy_kwh = random.uniform(5.0, 25.0)
             
             # Publicar evento de STOP a Central para que finalice en BD
-            if self.producer:
+            if self._get_or_create_producer():
                 event = {
                     'message_id': generate_message_id(),
                     'driver_id': self.driver_id,
@@ -361,8 +496,8 @@ class EV_DriverWS:
                     'energy_kwh': energy_kwh,
                     'timestamp': current_timestamp()
                 }
-                self.producer.send(KAFKA_TOPIC_PRODUCE, event)
-                self.producer.flush()
+                if not self._send_event(KAFKA_TOPIC_PRODUCE, event):
+                    return {'success': False, 'message': 'Sistema de mensajería no disponible'}
                 print(f"[DRIVER] ⛔ Solicitando detener carga en {cp_id} (Central procesará en BD)")
                 
                 # Limpiar sesión local
@@ -397,7 +532,7 @@ class EV_DriverWS:
                 new_status = error_type
             
             # Publicar evento en Kafka para que Central procese en BD
-            if self.producer:
+            if self._get_or_create_producer():
                 event = {
                     'message_id': generate_message_id(),
                     'driver_id': self.driver_id,
@@ -407,8 +542,7 @@ class EV_DriverWS:
                     'new_status': new_status,
                     'timestamp': current_timestamp()
                 }
-                self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=cp_id.encode())
-                self.producer.flush()
+                self._send_event(KAFKA_TOPIC_PRODUCE, event, key=cp_id.encode())
             
             print(f"[DRIVER] ⚠️ Simulando {error_type} en {cp_id} (Central procesará en BD)")
             return {
@@ -426,7 +560,7 @@ class EV_DriverWS:
         """Corrige un error en un punto de carga (solo para admin) - Central procesa"""
         try:
             # Publicar evento en Kafka para que Central procese en BD
-            if self.producer:
+            if self._get_or_create_producer():
                 event = {
                     'message_id': generate_message_id(),
                     'driver_id': self.driver_id,
@@ -435,8 +569,7 @@ class EV_DriverWS:
                     'new_status': 'available',
                     'timestamp': current_timestamp()
                 }
-                self.producer.send(KAFKA_TOPIC_PRODUCE, event, key=cp_id.encode())
-                self.producer.flush()
+                self._send_event(KAFKA_TOPIC_PRODUCE, event, key=cp_id.encode())
             
             print(f"[DRIVER] ✅ Solicitando reparar {cp_id} (Central procesará en BD)")
             return {

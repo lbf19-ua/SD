@@ -260,21 +260,36 @@ class EV_CentralWS:
                 }
             }
 
-    def publish_event(self, event_type, data):
-        """Publica un evento en Kafka"""
-        if self.producer:
-            try:
-                event = {
-                    'message_id': generate_message_id(),
-                    'event_type': event_type,
-                    **data,
-                    'timestamp': current_timestamp()
-                }
-                self.producer.send('central-events', event)
-                self.producer.flush()
-                print(f"[CENTRAL] Published event: {event_type} to central-events: {data}")
-            except Exception as e:
-                print(f"[CENTRAL] ⚠️  Failed to publish event: {e}")
+    def publish_event(self, event_type, data) -> bool:
+        """Publica un evento en Kafka; crea/reconecta el Producer si es necesario. Devuelve True si se envió."""
+        try:
+            # (Re)crear producer si no existe
+            if not self.producer:
+                try:
+                    self.producer = KafkaProducer(
+                        bootstrap_servers=self.kafka_broker,
+                        value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                    )
+                    print(f"[CENTRAL] ✅ Producer (re)connected for publishing")
+                except Exception as e:
+                    print(f"[CENTRAL] ❌ Cannot create Kafka producer: {e}")
+                    return False
+
+            event = {
+                'message_id': generate_message_id(),
+                'event_type': event_type,
+                **data,
+                'timestamp': current_timestamp()
+            }
+            self.producer.send('central-events', event)
+            self.producer.flush()
+            print(f"[CENTRAL] 📤 Published event: {event_type} to central-events: {data}")
+            return True
+        except Exception as e:
+            print(f"[CENTRAL] ⚠️  Failed to publish event: {e}")
+            # invalidar producer para reintento posterior
+            self.producer = None
+            return False
 
 # Instancia global del central
 central_instance = EV_CentralWS(kafka_broker=KAFKA_BROKER)
@@ -722,15 +737,15 @@ async def kafka_listener():
                             
                             # Ya está reservado, enviar respuesta positiva
                             print(f"[CENTRAL] 📤 Enviando AUTHORIZATION_RESPONSE: client_id={client_id}, cp_id={cp_id}, authorized=True")
-                            try:
-                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                    'client_id': client_id,
-                                    'cp_id': cp_id, 
-                                    'authorized': True
-                                })
+                            ok = central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                'client_id': client_id,
+                                'cp_id': cp_id, 
+                                'authorized': True
+                            })
+                            if ok:
                                 print(f"[CENTRAL] ✅ AUTHORIZATION_RESPONSE enviado exitosamente")
-                            except Exception as e:
-                                print(f"[CENTRAL] ❌ Error enviando AUTHORIZATION_RESPONSE: {e}")
+                            else:
+                                print(f"[CENTRAL] ❌ Error enviando AUTHORIZATION_RESPONSE: producer no disponible")
                             
                             asyncio.run_coroutine_threadsafe(
                                 broadcast_admin_progress({
