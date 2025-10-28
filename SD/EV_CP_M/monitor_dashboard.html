@@ -374,6 +374,8 @@
             <div class="empty-state">Esperando datos de puntos de carga...</div>
         </div>
 
+        
+
         <!-- Usage Chart -->
         <div class="chart-container">
             <h2>📈 Uso de Puntos de Carga (Últimas 24h)</h2>
@@ -493,6 +495,8 @@
                 grid.appendChild(card);
             });
         }
+
+        
 
         // Normaliza estados legacy a los 4 oficiales
         function normalizeStatus(status) {
@@ -688,6 +692,8 @@
                 ws.send(JSON.stringify({ type: 'get_monitor_data' }));
             }
         }, 3000);
+
+        
 
         // Initialize
         connectWebSocket();

@@ -106,6 +106,12 @@ class EV_CentralWS:
         self.kafka_broker = kafka_broker
         self.producer = None
         self.consumer = None
+        # Mapa temporal de reservas pendientes por CP
+        # { cp_id: { 'user_id': int, 'username': str, 'client_id': str, 'correlation_id': str, 'ts': float } }
+        self.pending_reservations = {}
+        # Telemetría/estadísticas en vivo por CP durante sesiones activas
+        # { cp_id: { 'session_id': int, 'user_id': int, 'username': str, 'tariff': float, 'energy': float, 'cost': float, 'last_ts': float } }
+        self.live_sessions = {}
         self.initialize_kafka()
 
     def initialize_kafka(self, max_retries=10):
@@ -224,7 +230,7 @@ class EV_CentralWS:
                 # Calcular energía y costo simulado basado en tiempo
                 start_time = datetime.fromtimestamp(session['start_time'])
                 elapsed_hours = (datetime.now() - start_time).total_seconds() / 3600
-                energy = elapsed_hours * 7.4  # Simular 7.4 kW
+                energy = elapsed_hours * 7.4  # Simulación por defecto (fallback)
                 
                 # Obtener tarifa del CP
                 cp_row = db.get_charging_point_by_id(session['cp_id']) if hasattr(db, 'get_charging_point_by_id') else None
@@ -232,8 +238,14 @@ class EV_CentralWS:
                 cost = energy * tariff
                 
                 std_session = self._standardize_session(session)
-                std_session['energy'] = round(energy, 2)
-                std_session['cost'] = round(cost, 2)
+                # Si hay telemetría en vivo para este CP, usarla
+                live = self.live_sessions.get(session['cp_id'])
+                if live and live.get('session_id') == session['id']:
+                    std_session['energy'] = round(live.get('energy', 0.0), 2)
+                    std_session['cost'] = round(live.get('cost', 0.0), 2)
+                else:
+                    std_session['energy'] = round(energy, 2)
+                    std_session['cost'] = round(cost, 2)
                 active_sessions.append(std_session)
             
             # Calcular estadísticas
@@ -717,6 +729,14 @@ async def kafka_listener():
                         cp_id = event.get('cp_id')
                         client_id = event.get('client_id')
                         username = event.get('username')
+                        # Buscar user_id para trazabilidad
+                        user_id = None
+                        try:
+                            user_row = db.get_user_by_nombre(username)
+                            if user_row:
+                                user_id = user_row.get('id')
+                        except Exception:
+                            user_id = None
                         
                         print(f"[CENTRAL] 🔍 DEBUG - cp_id recibido: {cp_id!r} (tipo: {type(cp_id).__name__})")
                         
@@ -746,6 +766,25 @@ async def kafka_listener():
                                 'client_id': client_id,
                                 'cp_id': cp_id, 
                                 'authorized': True
+                            })
+
+                            # Guardar reserva pendiente y solicitar ACK al CP
+                            from time import time as _time
+                            corr_id = generate_message_id()
+                            central_instance.pending_reservations[cp_id] = {
+                                'user_id': user_id,
+                                'username': username,
+                                'client_id': client_id,
+                                'correlation_id': corr_id,
+                                'ts': _time()
+                            }
+                            central_instance.publish_event('CP_AUTH_REQUEST', {
+                                'cp_id': cp_id,
+                                'client_id': client_id,
+                                'username': username,
+                                'user_id': user_id,
+                                'correlation_id': corr_id,
+                                'message': 'Autorización concedida. CP debe confirmar y esperar enchufe.'
                             })
                         else:
                             # Si se especifica un CP concreto, verificar y reservar
@@ -782,6 +821,25 @@ async def kafka_listener():
                                     'client_id': client_id,
                                     'cp_id': cp_id, 
                                     'authorized': True
+                                })
+
+                                # Guardar reserva pendiente y solicitar ACK al CP
+                                from time import time as _time
+                                corr_id = generate_message_id()
+                                central_instance.pending_reservations[cp_id] = {
+                                    'user_id': user_id,
+                                    'username': username,
+                                    'client_id': client_id,
+                                    'correlation_id': corr_id,
+                                    'ts': _time()
+                                }
+                                central_instance.publish_event('CP_AUTH_REQUEST', {
+                                    'cp_id': cp_id,
+                                    'client_id': client_id,
+                                    'username': username,
+                                    'user_id': user_id,
+                                    'correlation_id': corr_id,
+                                    'message': 'Autorización concedida. CP debe confirmar y esperar enchufe.'
                                 })
                             else:
                                 central_instance.publish_event('AUTHORIZATION_RESPONSE', {
@@ -883,9 +941,30 @@ async def broadcast_kafka_event(event):
             if user_id and cp_id:
                 try:
                     # Crear sesión de carga (esto cambia el CP a 'charging')
-                    session_id = db.create_charging_session(user_id, cp_id, event.get('correlation_id'))
+                    # Evitar duplicados si ya hay sesión activa para este usuario
+                    existing = db.get_active_sesion_for_user(user_id)
+                    if existing:
+                        print(f"[CENTRAL] ℹ️ Sesión ya activa para user_id={user_id}, cp={existing.get('cp_id')}. Ignorando duplicado.")
+                        session_id = existing.get('id')
+                    else:
+                        session_id = db.create_charging_session(user_id, cp_id, event.get('correlation_id'))
                     if session_id:
                         print(f"[CENTRAL] ⚡ Suministro iniciado - Sesión {session_id} en CP {cp_id} para usuario {username}")
+                        # Inicializar telemetría en vivo
+                        try:
+                            cp_row = db.get_charging_point_by_id(cp_id)
+                            tariff = cp_row.get('tarifa_kwh') if cp_row else 0.30
+                        except Exception:
+                            tariff = 0.30
+                        central_instance.live_sessions[cp_id] = {
+                            'session_id': session_id,
+                            'user_id': user_id,
+                            'username': username,
+                            'tariff': float(tariff or 0.30),
+                            'energy': 0.0,
+                            'cost': 0.0,
+                            'last_ts': time.time()
+                        }
                     else:
                         print(f"[CENTRAL] ⚠️ Error creando sesión de carga para CP {cp_id}")
                 except Exception as e:
@@ -944,6 +1023,56 @@ async def broadcast_kafka_event(event):
                 traceback.print_exc()
                 # Liberar el CP de todas formas
                 db.release_charging_point(cp_id, 'available')
+        # Iniciar sesión cuando el CP reporta enchufe (simulador)
+        elif event_type in ['VEHICLE_PLUGGED'] or action in ['vehicle_plugged']:
+            try:
+                pending = central_instance.pending_reservations.get(cp_id)
+                if not pending:
+                    print(f"[CENTRAL] ⚠️ VEHICLE_PLUGGED recibido para {cp_id} sin reserva pendiente")
+                else:
+                    user_id = pending.get('user_id')
+                    username = pending.get('username')
+                    corr_id = pending.get('correlation_id') or event.get('correlation_id')
+                    # Evitar duplicados si ya existe sesión activa
+                    existing = db.get_active_sesion_for_user(user_id) if user_id else None
+                    if existing:
+                        print(f"[CENTRAL] ℹ️ Sesión ya activa para user_id={user_id}. Limpio reserva pendiente de {cp_id}.")
+                        central_instance.pending_reservations.pop(cp_id, None)
+                    else:
+                        session_id = None
+                        if user_id:
+                            session_id = db.create_charging_session(user_id, cp_id, corr_id)
+                        else:
+                            # Fallback si no hay user_id
+                            db.release_charging_point(cp_id, 'charging')
+                        print(f"[CENTRAL] ⚡ VEHICLE_PLUGGED → sesión {session_id} iniciada en {cp_id} para {username}")
+                        # Publicar evento para dashboards/monitor
+                        central_instance.publish_event('CHARGING_STARTED', {
+                            'action': 'charging_started',
+                            'cp_id': cp_id,
+                            'username': username,
+                            'user_id': user_id,
+                            'correlation_id': corr_id
+                        })
+                        # Inicializar telemetría en vivo
+                        try:
+                            cp_row = db.get_charging_point_by_id(cp_id)
+                            tariff = cp_row.get('tarifa_kwh') if cp_row else 0.30
+                        except Exception:
+                            tariff = 0.30
+                        central_instance.live_sessions[cp_id] = {
+                            'session_id': session_id,
+                            'user_id': user_id,
+                            'username': username,
+                            'tariff': float(tariff or 0.30),
+                            'energy': 0.0,
+                            'cost': 0.0,
+                            'last_ts': time.time()
+                        }
+                        # Limpiar reserva
+                        central_instance.pending_reservations.pop(cp_id, None)
+            except Exception as e:
+                print(f"[CENTRAL] ❌ Error procesando VEHICLE_PLUGGED: {e}")
         elif action in ['cp_status_change']:
             status = event.get('status')
             if status:
@@ -959,6 +1088,84 @@ async def broadcast_kafka_event(event):
             new_status = event.get('new_status') or event.get('status')
             if new_status:
                 db.update_charging_point_status(cp_id, new_status)
+                # Si deja de cargar, limpiar telemetría
+                if new_status != 'charging':
+                    central_instance.live_sessions.pop(cp_id, None)
+
+        # Telemetría periódica desde CP
+        elif event_type in ['CP_TELEMETRY'] or action in ['cp_telemetry']:
+            try:
+                power_kw = float(event.get('power_kw') or 0.0)
+                now_ts = time.time()
+                live = central_instance.live_sessions.get(cp_id)
+                if not live:
+                    # Intentar enlazar con sesión activa en BD
+                    try:
+                        conn = db.get_connection()
+                        cur = conn.cursor()
+                        cur.execute("""
+                            SELECT s.id, s.user_id, u.nombre, cp.tarifa_kwh
+                            FROM charging_sesiones s
+                            JOIN usuarios u ON u.id = s.user_id
+                            JOIN charging_points cp ON cp.cp_id = s.cp_id
+                            WHERE s.cp_id = ? AND s.estado = 'active'
+                            ORDER BY s.start_time DESC LIMIT 1
+                        """, (cp_id,))
+                        row = cur.fetchone()
+                        conn.close()
+                        if row:
+                            live = {
+                                'session_id': row['id'],
+                                'user_id': row['user_id'],
+                                'username': row['nombre'],
+                                'tariff': float(row['tarifa_kwh'] or 0.30),
+                                'energy': 0.0,
+                                'cost': 0.0,
+                                'last_ts': now_ts
+                            }
+                            central_instance.live_sessions[cp_id] = live
+                    except Exception:
+                        pass
+                if live:
+                    dt = max(0.0, now_ts - float(live.get('last_ts') or now_ts))
+                    # Integración simple: kWh += kW * h
+                    live['energy'] = float(live.get('energy', 0.0)) + (power_kw * (dt / 3600.0))
+                    live['cost'] = float(live.get('energy', 0.0)) * float(live.get('tariff', 0.30))
+                    live['last_ts'] = now_ts
+
+                    # Publicar actualización para Driver (Kafka) y Admin (WS directo)
+                    central_instance.publish_event('SESSION_UPDATE', {
+                        'action': 'session_update',
+                        'cp_id': cp_id,
+                        'username': live.get('username'),
+                        'user_id': live.get('user_id'),
+                        'energy_kwh': round(live['energy'], 3),
+                        'cost': round(live['cost'], 2)
+                    })
+                    # Broadcast directo a clientes admin para mostrar consumo e importe
+                    if shared_state.connected_clients:
+                        ws_msg = json.dumps({
+                            'type': 'session_update',
+                            'username': live.get('username'),
+                            'cp_id': cp_id,
+                            'energy': round(live['energy'], 2),
+                            'cost': round(live['cost'], 2)
+                        })
+                        disconnected = set()
+                        for client in shared_state.connected_clients:
+                            try:
+                                if hasattr(client, 'send_str'):
+                                    await client.send_str(ws_msg)
+                                else:
+                                    await client.send(ws_msg)
+                            except:
+                                disconnected.add(client)
+                        for client in disconnected:
+                            shared_state.connected_clients.discard(client)
+                    # Evitar enviar evento genérico CP_TELEMETRY al stream
+                    return
+            except Exception as e:
+                print(f"[CENTRAL] ⚠️ Error procesando CP_TELEMETRY: {e}")
 
     # Si no hay clientes conectados, no hace falta construir ni enviar mensajes
     if not shared_state.connected_clients:
@@ -999,6 +1206,14 @@ async def broadcast_kafka_event(event):
             'cp_id': event.get('cp_id'),
             'status': event.get('new_status'),
             'message': f"✅ {event.get('cp_id')} reparado y disponible"
+        })
+    elif action == 'session_update':
+        message = json.dumps({
+            'type': 'session_update',
+            'username': event.get('username'),
+            'cp_id': event.get('cp_id'),
+            'energy': event.get('energy_kwh'),
+            'cost': event.get('cost')
         })
     else:
         # Para cualquier otro evento, enviar como evento genérico del sistema

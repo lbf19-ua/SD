@@ -64,21 +64,33 @@ class EV_DriverWS:
 
     def initialize_kafka(self):
         """Inicializa el productor de Kafka"""
-        try:
-            self.producer = KafkaProducer(
-                bootstrap_servers=self.kafka_broker,
-                value_serializer=lambda v: json.dumps(v).encode('utf-8')
-            )
-            self.consumer = KafkaConsumer(
-                *KAFKA_TOPICS_CONSUME,
-                bootstrap_servers=self.kafka_broker,
-                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                auto_offset_reset='latest',
-                group_id=f'ev_driver_group_{self.driver_id}'
-            )
-            print(f"[DRIVER] ✅ Kafka producer and consumer initialized")
-        except Exception as e:
-            print(f"[DRIVER] ⚠️  Warning: Kafka not available: {e}")
+        max_attempts = 10
+        backoff_sec = 1
+        last_error = None
+        print(f"[DRIVER] 🔌 Inicializando Kafka en {self.kafka_broker} ...")
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.producer = KafkaProducer(
+                    bootstrap_servers=self.kafka_broker,
+                    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                )
+                self.consumer = KafkaConsumer(
+                    *KAFKA_TOPICS_CONSUME,
+                    bootstrap_servers=self.kafka_broker,
+                    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                    auto_offset_reset='latest',
+                    group_id=f'ev_driver_group_{self.driver_id}'
+                )
+                print(f"[DRIVER] ✅ Kafka producer and consumer initialized")
+                return
+            except Exception as e:
+                last_error = e
+                self.producer = None
+                self.consumer = None
+                print(f"[DRIVER] ⚠️  Kafka no disponible (intento {attempt}/{max_attempts}): {e}")
+                time.sleep(backoff_sec)
+                backoff_sec = min(backoff_sec * 2, 8)
+        print(f"[DRIVER] ❌ No se pudo inicializar Kafka tras {max_attempts} intentos. Broker: {self.kafka_broker}. Último error: {last_error}")
             
     def kafka_listener(self):
         """Escucha mensajes de Kafka, especialmente las respuestas de autorización"""
@@ -194,6 +206,40 @@ class EV_DriverWS:
                             'message': message_text
                         }
                         shared_state.notification_queue.put(notification)
+                    
+                    # 🆕 ACTUALIZACIONES DE SESIÓN DESDE CENTRAL (telemetría)
+                    elif event_type == 'SESSION_UPDATE' or event.get('action') == 'session_update':
+                        username = event.get('username')
+                        cp_id = event.get('cp_id')
+                        energy = float(event.get('energy_kwh') or 0.0)
+                        cost = float(event.get('cost') or 0.0)
+                        if not username:
+                            continue
+                        # Actualizar estado local sin simular
+                        with shared_state.lock:
+                            session = shared_state.charging_sessions.get(username)
+                            if not session:
+                                session = {
+                                    'username': username,
+                                    'cp_id': cp_id,
+                                    'start_time': time.time(),
+                                    'energy': 0.0,
+                                    'cost': 0.0,
+                                    'tariff': 0.30
+                                }
+                                shared_state.charging_sessions[username] = session
+                            session['energy'] = energy
+                            session['cost'] = cost
+                            session['cp_id'] = cp_id or session.get('cp_id')
+                            session['source'] = 'central'
+                        # Encolar notificación para los websockets
+                        shared_state.notification_queue.put({
+                            'type': 'session_update',
+                            'username': username,
+                            'cp_id': cp_id,
+                            'energy': energy,
+                            'cost': cost
+                        })
                 
             except Exception as e:
                 print(f"[KAFKA] ⚠️ Consumer error: {e}")
@@ -300,7 +346,38 @@ class EV_DriverWS:
                     'message': 'Solicitud enviada a Central'
                 }
             else:
-                return {'success': False, 'message': 'Sistema de mensajería no disponible'}
+                # Intentar re-inicializar una vez en caliente
+                self.initialize_kafka()
+                if self.producer:
+                    try:
+                        event = {
+                            'message_id': generate_message_id(),
+                            'event_type': 'AUTHORIZATION_REQUEST',
+                            'driver_id': self.driver_id,
+                            'username': username,
+                            'cp_id': None,
+                            'client_id': client_id,
+                            'timestamp': current_timestamp()
+                        }
+                        self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                        self.producer.flush()
+                        print(f"[DRIVER] 🔐 Solicitando autorización a Central (reintento tras reconexión)")
+                        with shared_state.lock:
+                            shared_state.pending_authorizations[client_id] = {
+                                'username': username,
+                                'cp_id': None,
+                                'user_id': {'driver1': 1, 'driver2': 2, 'maria_garcia': 3}.get(username, 1),
+                                'websocket': None
+                            }
+                        return {
+                            'success': True,
+                            'pending': True,
+                            'client_id': client_id,
+                            'message': 'Solicitud enviada a Central'
+                        }
+                    except Exception as e:
+                        print(f"[DRIVER] ❌ Error enviando tras reconexión: {e}")
+                return {'success': False, 'message': f'Sistema de mensajería no disponible. Broker: {self.kafka_broker}'}
                 
         except Exception as e:
             print(f"[DRIVER] ❌ Charging request error: {e}")
@@ -349,7 +426,38 @@ class EV_DriverWS:
                     'message': 'Solicitud enviada a Central'
                 }
             else:
-                return {'success': False, 'message': 'Sistema de mensajería no disponible'}
+                # Reintento de inicialización
+                self.initialize_kafka()
+                if self.producer:
+                    try:
+                        event = {
+                            'message_id': generate_message_id(),
+                            'event_type': 'AUTHORIZATION_REQUEST',
+                            'driver_id': self.driver_id,
+                            'username': username,
+                            'cp_id': cp_id,
+                            'client_id': client_id,
+                            'timestamp': current_timestamp()
+                        }
+                        self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                        self.producer.flush()
+                        print(f"[DRIVER] 🔐 Solicitando autorización a Central para {cp_id} (reintento tras reconexión)")
+                        with shared_state.lock:
+                            shared_state.pending_authorizations[client_id] = {
+                                'username': username,
+                                'cp_id': cp_id,
+                                'user_id': {'driver1': 1, 'driver2': 2, 'maria_garcia': 3}.get(username, 1),
+                                'websocket': None
+                            }
+                        return {
+                            'success': True,
+                            'pending': True,
+                            'client_id': client_id,
+                            'message': 'Solicitud enviada a Central'
+                        }
+                    except Exception as e:
+                        print(f"[DRIVER] ❌ Error enviando tras reconexión: {e}")
+                return {'success': False, 'message': f'Sistema de mensajería no disponible. Broker: {self.kafka_broker}'}
         except Exception as e:
             print(f"[DRIVER] ❌ Charging request (specific CP) error: {e}")
             return {'success': False, 'message': str(e)}
@@ -402,7 +510,36 @@ class EV_DriverWS:
                     'new_balance': 150.0  # Simulado
                 }
             else:
-                return {'success': False, 'message': 'Sistema de mensajería no disponible'}
+                # Reintentar inicializar antes de fallar
+                self.initialize_kafka()
+                if self.producer:
+                    try:
+                        users = {'driver1': {'id': 1}, 'driver2': {'id': 2}, 'maria_garcia': {'id': 3}}
+                        user_id = users.get(username, {}).get('id', 1)
+                        event = {
+                            'message_id': generate_message_id(),
+                            'driver_id': self.driver_id,
+                            'action': 'charging_stopped',
+                            'username': username,
+                            'user_id': user_id,
+                            'cp_id': cp_id,
+                            'energy_kwh': energy_kwh,
+                            'timestamp': current_timestamp()
+                        }
+                        self.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                        self.producer.flush()
+                        with shared_state.lock:
+                            if username in shared_state.charging_sessions:
+                                del shared_state.charging_sessions[username]
+                        return {
+                            'success': True,
+                            'energy': energy_kwh,
+                            'total_cost': energy_kwh * 0.30,
+                            'new_balance': 150.0
+                        }
+                    except Exception as e:
+                        print(f"[DRIVER] ❌ Error stop tras reconexión: {e}")
+                return {'success': False, 'message': f'Sistema de mensajería no disponible. Broker: {self.kafka_broker}'}
                 
         except Exception as e:
             print(f"[DRIVER] ❌ Stop charging error: {e}")
@@ -1212,6 +1349,28 @@ async def process_notifications():
                         print(f"[NOTIF] ✅ Reparación de CP notificada a cliente")
                     except:
                         pass
+            
+            # 🆕 ACTUALIZACIÓN DE SESIÓN: reenviar a frontend como charging_update
+            elif notification['type'] == 'session_update':
+                username = notification.get('username')
+                energy = notification.get('energy')
+                cost = notification.get('cost')
+                message = json.dumps({
+                    'type': 'charging_update',
+                    'username': username,
+                    'energy': round(float(energy or 0.0), 2),
+                    'cost': round(float(cost or 0.0), 2)
+                })
+                with shared_state.lock:
+                    clients = list(shared_state.connected_clients)
+                for client in clients:
+                    try:
+                        if hasattr(client, 'send_str'):
+                            await client.send_str(message)
+                        else:
+                            await client.send(message)
+                    except:
+                        pass
                         
         except Exception as e:
             print(f"[NOTIF] Error processing notification: {e}")
@@ -1224,11 +1383,13 @@ async def broadcast_updates():
         with shared_state.lock:
             # Actualizar TODAS las sesiones activas
             for username, session in list(shared_state.charging_sessions.items()):
-                # Simular incremento de energía basado en tiempo transcurrido
-                elapsed = time.time() - session['start_time']
-                # Simular carga a 7.4 kW (carga lenta típica)
-                session['energy'] = (elapsed / 3600) * 7.4  # kWh
-                session['cost'] = session['energy'] * session['tariff']
+                # Si la fuente es CENTRAL, no simular; usar valores recibidos
+                if session.get('source') != 'central':
+                    # Simular incremento de energía basado en tiempo transcurrido
+                    elapsed = time.time() - session['start_time']
+                    # Simular carga a 7.4 kW (carga lenta típica)
+                    session['energy'] = (elapsed / 3600) * 7.4  # kWh
+                    session['cost'] = session['energy'] * session['tariff']
                 
                 # Broadcast a todos los clientes conectados
                 if shared_state.connected_clients:

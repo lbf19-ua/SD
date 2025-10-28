@@ -32,14 +32,17 @@ services:
       context: .
       dockerfile: EV_CP_M/Dockerfile
     container_name: ev-monitor
-    network_mode: "host"  # Usar red del host para conectar a PC2
+    # En Windows, network_mode: "host" no está soportado para Docker Desktop.
+    # Usamos mapeo de puertos para exponer el dashboard en el host.
+    ports:
+      - "8003:8003"
     environment:
       # Kafka broker está en PC2
       # Central server está en PC2
       - WS_PORT=8003
       - PYTHONUNBUFFERED=1
     volumes:
-      - ./ev_charging.db:/app/ev_charging.db:ro
+      - ./ev_charging.db:/app/ev_charging.db
       - ./network_config.py:/app/network_config.py:ro
       - ./database.py:/app/database.py:ro
       - ./event_utils.py:/app/event_utils.py:ro

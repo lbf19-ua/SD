@@ -51,6 +51,15 @@ class EV_MonitorWS:
         self.initialize_kafka()
         self.initialize_metrics()
 
+    def ensure_producer(self):
+        """Asegura que el producer de Kafka esté disponible."""
+        if self.producer is None:
+            try:
+                self.initialize_kafka()
+            except Exception:
+                return False
+        return self.producer is not None
+
     def initialize_kafka(self):
         """Inicializa el productor de Kafka"""
         try:
@@ -61,6 +70,27 @@ class EV_MonitorWS:
             print(f"[MONITOR] ✅ Kafka producer initialized")
         except Exception as e:
             print(f"[MONITOR] ⚠️  Warning: Kafka not available: {e}")
+
+    def publish_cp_event(self, event_type: str, data: dict):
+        """Publica un evento del CP (cp-events) para que lo consuma la Central."""
+        if not self.ensure_producer():
+            print("[MONITOR] ❌ No Kafka producer available to publish cp-event")
+            return False
+        try:
+            event = {
+                'message_id': generate_message_id(),
+                'event_type': event_type,
+                **(data or {}),
+                'timestamp': current_timestamp()
+            }
+            # Enviar al topic de CPs (no al de monitor)
+            self.producer.send(KAFKA_TOPICS['cp_events'], event)
+            self.producer.flush()
+            print(f"[MONITOR] 📤 Published CP event: {event_type} -> cp-events: {data}")
+            return True
+        except Exception as e:
+            print(f"[MONITOR] ⚠️  Failed to publish cp-event: {e}")
+            return False
 
     def initialize_metrics(self):
         """Inicializa métricas simuladas para cada CP"""
@@ -82,27 +112,32 @@ class EV_MonitorWS:
             charging_points = []
             
             for cp in charging_points_raw:
+                # Mapear nombres de columnas de BD -> modelo del dashboard
+                status = cp.get('estado', 'offline')
+                location = cp.get('localizacion', '')
+                max_power = cp.get('max_kw', 22.0)
+                tariff = cp.get('tarifa_kwh', 0.30)
+
                 # Obtener métricas simuladas
                 metrics = shared_state.cp_metrics.get(cp['cp_id'], {})
-                
+
                 # Calcular uptime
                 uptime_seconds = time.time() - metrics.get('uptime_start', time.time())
                 hours = int(uptime_seconds // 3600)
                 minutes = int((uptime_seconds % 3600) // 60)
                 uptime = f"{hours}h {minutes}m"
-                
+
                 # Determinar potencia actual basada en estado
                 current_power = 0.0
-                max_power = cp.get('max_power_kw', 22.0)
-                if cp['status'] == 'charging':
-                    current_power = max_power * random.uniform(0.85, 0.95)
-                
+                if str(status).lower() == 'charging':
+                    current_power = float(max_power) * random.uniform(0.85, 0.95)
+
                 charging_points.append({
                     'cp_id': cp['cp_id'],
-                    'location': cp['location'],
+                    'location': location,
                     'power_output': max_power,
-                    'tariff': cp.get('tariff_per_kwh', 0.30),
-                    'status': cp['status'],
+                    'tariff': tariff,
+                    'status': status,
                     'temperature': metrics.get('temperature', 25.0),
                     'efficiency': metrics.get('efficiency', 100.0),
                     'uptime': uptime,
@@ -276,10 +311,40 @@ async def start_http_server():
 async def broadcast_updates():
     """Broadcast actualizaciones periódicas a todos los clientes"""
     while True:
-        await asyncio.sleep(3)  # Cada 3 segundos
+        await asyncio.sleep(1)  # Cada 1 segundo para telemetría
         
         # Simular actualización de métricas
         monitor_instance.simulate_metrics_update()
+        
+        # Publicar telemetría de CPs en carga hacia CENTRAL
+        try:
+            cps = db.get_all_charging_points()
+            for cp in cps:
+                status = (cp.get('estado') or cp.get('status') or '').lower()
+                if status == 'charging':
+                    cp_id = cp['cp_id']
+                    max_kw = float(cp.get('max_kw') or cp.get('power_output') or 22.0)
+                    # Calcular potencia actual (suave/aleatoria alrededor del 90%)
+                    metrics = shared_state.cp_metrics.setdefault(cp_id, {
+                        'temperature': 25.0,
+                        'efficiency': 100.0,
+                        'uptime_start': time.time(),
+                        'sessions_today': 0,
+                        'current_power': 0.0
+                    })
+                    # Suavizado de potencia
+                    import random as _rnd
+                    current_power = max_kw * _rnd.uniform(0.85, 0.95)
+                    metrics['current_power'] = round(current_power, 2)
+
+                    # Enviar evento de telemetría al topic cp-events
+                    monitor_instance.publish_cp_event('CP_TELEMETRY', {
+                        'action': 'cp_telemetry',
+                        'cp_id': cp_id,
+                        'power_kw': round(current_power, 2)
+                    })
+        except Exception as e:
+            print(f"[MONITOR] ⚠️  Error publishing telemetry: {e}")
         
         if shared_state.connected_clients:
             monitor_data = monitor_instance.get_monitor_data()
@@ -338,6 +403,7 @@ async def kafka_listener():
 async def process_kafka_event(event):
     """Procesa eventos de Kafka y genera alertas"""
     action = event.get('action', '')
+    event_type = event.get('event_type', '')
     
     if action == 'charging_started':
         cp_id = event.get('cp_id')
@@ -394,6 +460,26 @@ async def process_kafka_event(event):
         await broadcast_alert(alert)
         # Actualizar dashboard inmediatamente
         await broadcast_monitor_data()
+    
+    # Auto-ACK a peticiones de autorización del Central
+    elif event_type == 'CP_AUTH_REQUEST':
+        cp_id = event.get('cp_id')
+        correlation_id = event.get('correlation_id')
+        username = event.get('username')
+        client_id = event.get('client_id')
+        # Publicar ACK en cp-events para que lo consuma el Central
+        published = monitor_instance.publish_cp_event('CP_AUTH_ACK', {
+            'cp_id': cp_id,
+            'correlation_id': correlation_id,
+            'username': username,
+            'client_id': client_id,
+            'action': 'cp_auth_ack',
+            'message': f'ACK de autorización en {cp_id} para {username}'
+        })
+        level = 'info' if published else 'warning'
+        msg = f"🔐 ACK de autorización enviado por {cp_id} para usuario {username}" if published else f"⚠️ No se pudo enviar ACK de autorización para {cp_id}"
+        alert = monitor_instance.add_alert(level, msg)
+        await broadcast_alert(alert)
 
 async def broadcast_alert(alert):
     """Broadcast una alerta a todos los clientes WebSocket"""
@@ -497,33 +583,44 @@ async def main():
     # Verificar base de datos
     db_path = Path(__file__).parent.parent / 'ev_charging.db'
     if not db_path.exists():
-        print("⚠️  Database not found. Please run: python init_db.py")
-        return
+        print("⚠️  Database not found at /app/ev_charging.db. Attempting auto-initialize...")
+        try:
+            # Intentar crear e inicializar la base de datos con datos de prueba
+            db.init_database()
+            db.seed_test_data()
+            if db_path.exists():
+                print(f"[DB] ✅ Database created at {db_path}")
+            else:
+                print("[DB] ❌ Failed to create database file. Please ensure the volume is writable or create ev_charging.db on host.")
+                # Continuar sin DB para levantar el dashboard (solo mostrará vacío)
+        except Exception as e:
+            print(f"[DB] ❌ Error initializing database automatically: {e}")
+            # Continuar sin DB para levantar el dashboard (solo mostrará vacío)
     
     try:
         # Crear aplicación web que maneje tanto HTTP como WebSocket
         app = web.Application()
         app.router.add_get('/', serve_dashboard)
         app.router.add_get('/ws', websocket_handler_http)
-        
+
         # Iniciar servidor
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', SERVER_PORT)
         await site.start()
-        
+
         print(f"[HTTP] Server started on http://0.0.0.0:{SERVER_PORT}")
         print(f"[WS] WebSocket endpoint at ws://0.0.0.0:{SERVER_PORT}/ws")
-        
+
         # Iniciar broadcast de actualizaciones
         broadcast_task = asyncio.create_task(broadcast_updates())
-        
+
         print("\n All services started successfully!")
         print(f" Open http://localhost:{SERVER_PORT} in your browser\n")
-        
+
         # Mantener el servidor corriendo
         await broadcast_task
-        
+
     except Exception as e:
         print(f"\n❌ Error starting server: {e}")
 

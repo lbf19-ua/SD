@@ -518,8 +518,14 @@
                     break;
 
                 case 'session_update':
-                    addEventLog(`📊 Actualización de sesión: ${data.username} - ${data.energy.toFixed(2)} kWh`);
-                    showRefreshIndicator();
+                    try {
+                        const energy = Number(data.energy || data.energy_kwh || 0);
+                        const cost = Number(data.cost || 0);
+                        addEventLog(`📊 Sesión ${data.username} @ ${data.cp_id}: ${energy.toFixed(2)} kWh | €${cost.toFixed(2)}`);
+                        updateSessionRow({ username: data.username, cp_id: data.cp_id, energy, cost });
+                    } catch (e) {
+                        console.error('session_update parse error', e);
+                    }
                     break;
 
                 case 'session_started':
@@ -692,6 +698,56 @@
                 `;
                 tbody.appendChild(row);
             });
+        }
+
+        // 🆕 Actualiza/crea la fila de sesión activa en vivo sin esperar refresh
+        function updateSessionRow({ username, cp_id, energy, cost }) {
+            const tbody = document.getElementById('sessionsBody');
+            // Eliminar estado vacío si existe
+            const firstRow = tbody.querySelector('tr');
+            if (firstRow && firstRow.querySelector('.empty-state')) {
+                tbody.innerHTML = '';
+            }
+            // Buscar fila existente por Usuario + CP
+            let targetRow = null;
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            for (const r of rows) {
+                const cells = r.querySelectorAll('td');
+                if (cells.length >= 4) {
+                    const userCell = cells[0].textContent.trim();
+                    const cpCell = cells[1].textContent.trim();
+                    if (userCell.includes(username) && cpCell === String(cp_id)) {
+                        targetRow = r;
+                        break;
+                    }
+                }
+            }
+            // Crear si no existe
+            if (!targetRow) {
+                targetRow = document.createElement('tr');
+                targetRow.innerHTML = `
+                    <td><strong>${username}</strong></td>
+                    <td>${cp_id}</td>
+                    <td>0.00 kWh</td>
+                    <td>€0.00</td>
+                    <td><span class="status-badge status-active">
+                        <span class="status-dot green"></span>Activa
+                    </span></td>
+                `;
+                tbody.appendChild(targetRow);
+            }
+            // Actualizar energía y coste
+            const tds = targetRow.querySelectorAll('td');
+            if (tds.length >= 4) {
+                tds[2].textContent = `${Number(energy || 0).toFixed(2)} kWh`;
+                tds[3].textContent = `€${Number(cost || 0).toFixed(2)}`;
+            }
+            // Actualizar contador de sesiones activas si pasamos de vacío a 1
+            const countEl = document.getElementById('activeSessions');
+            if (countEl && rows.length === 0) {
+                const n = Number(countEl.textContent || '0');
+                countEl.textContent = String(n + 1);
+            }
         }
 
         function updateUsersTable() {
