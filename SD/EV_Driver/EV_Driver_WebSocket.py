@@ -372,18 +372,23 @@ class EV_DriverWS:
             
             # Publicar evento de STOP a Central para que finalice en BD
             if self.producer:
+                # Buscar user_id (simulado o desde auth_data)
+                users = {'driver1': {'id': 1}, 'driver2': {'id': 2}, 'maria_garcia': {'id': 3}}
+                user_id = users.get(username, {}).get('id', 1)
+                
                 event = {
                     'message_id': generate_message_id(),
                     'driver_id': self.driver_id,
                     'action': 'charging_stopped',
                     'username': username,
+                    'user_id': user_id,  # ← AGREGADO para que Central pueda buscar la sesión
                     'cp_id': cp_id,
                     'energy_kwh': energy_kwh,
                     'timestamp': current_timestamp()
                 }
                 self.producer.send(KAFKA_TOPIC_PRODUCE, event)
                 self.producer.flush()
-                print(f"[DRIVER] ⛔ Solicitando detener carga en {cp_id} (Central procesará en BD)")
+                print(f"[DRIVER] ⛔ Solicitando detener carga en {cp_id} (user_id={user_id}, Central procesará en BD)")
                 
                 # Limpiar sesión local
                 with shared_state.lock:

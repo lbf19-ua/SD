@@ -884,30 +884,48 @@ async def broadcast_kafka_event(event):
         elif action in ['charging_stopped']:
             # Finalizar sesión de carga y liberar CP
             username = event.get('username')
+            user_id = event.get('user_id')
             energy_kwh = event.get('energy_kwh', 0)
             
             print(f"[CENTRAL] ⛔ Procesando charging_stopped: user={username}, cp={cp_id}, energy={energy_kwh}")
             
-            # 1. Buscar sesión activa del usuario
+            # 1. Si no tenemos user_id, buscar por username
+            if not user_id and username:
+                try:
+                    user = db.get_user_by_username(username)
+                    if user:
+                        user_id = user.get('id')
+                except Exception as e:
+                    print(f"[CENTRAL] ⚠️ Error buscando usuario {username}: {e}")
+            
+            # 2. Buscar sesión activa del usuario
             try:
-                session = db.get_active_session_by_username(username)
-                if session:
-                    session_id = session.get('id') or session.get('session_id') or session.get('sesion_id')
-                    
-                    # 2. Finalizar sesión en BD
-                    if session_id:
-                        db.end_charging_session(session_id, energy_kwh)
-                        print(f"[CENTRAL] ✅ Sesión {session_id} finalizada en BD con {energy_kwh} kWh")
-                    
-                    # 3. Liberar CP
-                    if db.release_charging_point(cp_id, 'available'):
-                        print(f"[CENTRAL] ✅ Suministro finalizado - CP {cp_id} ahora disponible")
+                if user_id:
+                    session = db.get_active_sesion_for_user(user_id)
+                    if session:
+                        session_id = session.get('id')
+                        
+                        # 3. Finalizar sesión en BD (usa end_charging_sesion, no session)
+                        if session_id:
+                            result = db.end_charging_sesion(session_id, energy_kwh)
+                            if result:
+                                print(f"[CENTRAL] ✅ Sesión {session_id} finalizada: {energy_kwh} kWh, coste={result.get('coste', 0):.2f} EUR")
+                            else:
+                                print(f"[CENTRAL] ⚠️ Error finalizando sesión {session_id}")
+                        
+                        # Note: end_charging_sesion ya libera el CP automáticamente
+                    else:
+                        print(f"[CENTRAL] ⚠️ No se encontró sesión activa para user_id={user_id}")
+                        # Liberar el CP de todas formas
+                        db.release_charging_point(cp_id, 'available')
                 else:
-                    print(f"[CENTRAL] ⚠️ No se encontró sesión activa para {username}")
+                    print(f"[CENTRAL] ⚠️ No se pudo obtener user_id para {username}")
                     # Liberar el CP de todas formas
                     db.release_charging_point(cp_id, 'available')
             except Exception as e:
                 print(f"[CENTRAL] ❌ Error procesando charging_stopped: {e}")
+                import traceback
+                traceback.print_exc()
                 # Liberar el CP de todas formas
                 db.release_charging_point(cp_id, 'available')
         elif action in ['cp_status_change']:
