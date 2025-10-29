@@ -5,6 +5,7 @@ import os
 import asyncio
 import json
 import threading
+import argparse
 from pathlib import Path
 from queue import Queue
 
@@ -26,10 +27,12 @@ from network_config import DRIVER_CONFIG, KAFKA_BROKER as KAFKA_BROKER_DEFAULT, 
 from event_utils import generate_message_id, current_timestamp
 
 # Configuración desde network_config o variables de entorno (Docker)
+# Estos valores se sobrescribirán en main() si se pasan argumentos de línea de comandos
 KAFKA_BROKER = os.environ.get('KAFKA_BROKER', KAFKA_BROKER_DEFAULT)
-KAFKA_TOPICS_CONSUME = [KAFKA_TOPICS['central_events']]
+# 🆕 También escuchar cp_events para recibir charging_progress del CP_E
+KAFKA_TOPICS_CONSUME = [KAFKA_TOPICS['central_events'], KAFKA_TOPICS['cp_events']]
 KAFKA_TOPIC_PRODUCE = KAFKA_TOPICS['driver_events']
-SERVER_PORT = DRIVER_CONFIG['ws_port']
+SERVER_PORT = int(os.environ.get('DRIVER_PORT', DRIVER_CONFIG['ws_port']))
 
 # Estado global compartido
 class SharedState:
@@ -106,43 +109,28 @@ class EV_DriverWS:
                                 if authorized:
                                     print(f"[DRIVER] ✅ Central autorizó carga en {cp_id}")
                                     
-                                    # Enviar evento para que CENTRAL cree la sesión (solo Central modifica BD)
-                                    correlation_id = generate_message_id()
-                                    if self.producer:
-                                        start_event = {
-                                            'message_id': generate_message_id(),
-                                            'event_type': 'charging_started',
-                                            'action': 'charging_started',
-                                            'driver_id': self.driver_id,
-                                            'username': username,
-                                            'user_id': auth_data['user_id'],
-                                            'cp_id': cp_id,
-                                            'correlation_id': correlation_id,
-                                            'timestamp': current_timestamp()
-                                        }
-                                        self.producer.send(KAFKA_TOPIC_PRODUCE, start_event)
-                                        self.producer.flush()
-                                        print(f"[DRIVER] 📤 Enviado evento charging_started a Central para sesión en {cp_id}")
-                                        
-                                        # Almacenar en estado local (sin BD)
-                                        shared_state.charging_sessions[username] = {
-                                            'username': username,
-                                            'cp_id': cp_id,
-                                            'start_time': time.time(),
-                                            'energy': 0.0,
-                                            'cost': 0.0,
-                                            'tariff': 0.30  # Tariff por defecto
-                                        }
-                                        
-                                        # Notificar al websocket que la carga ha iniciado
-                                        # NO poner websocket en la queue, guardar client_id
-                                        print(f"[DRIVER] 📬 Encolando notificación charging_started para {username}, client_id={client_id}")
-                                        shared_state.notification_queue.put({
-                                            'type': 'charging_started',
-                                            'username': username,
-                                            'cp_id': cp_id,
-                                            'client_id': client_id
-                                        })
+                                    # 🔴 ARQUITECTURA REAL:
+                                    # Central ya envió el comando 'charging_started' al CP_E.
+                                    # Driver solo crea sesión local para tracking y espera actualizaciones del CP_E.
+                                    
+                                    # Almacenar en estado local (sin BD)
+                                    shared_state.charging_sessions[username] = {
+                                        'username': username,
+                                        'cp_id': cp_id,
+                                        'start_time': time.time(),
+                                        'energy': 0.0,
+                                        'cost': 0.0,
+                                        'tariff': 0.30  # Tariff por defecto
+                                    }
+                                    
+                                    # Notificar al websocket que la carga ha iniciado
+                                    print(f"[DRIVER] 📬 Encolando notificación charging_started para {username}, client_id={client_id}")
+                                    shared_state.notification_queue.put({
+                                        'type': 'charging_started',
+                                        'username': username,
+                                        'cp_id': cp_id,
+                                        'client_id': client_id
+                                    })
                                     
                                     # NO limpiar pending_authorizations todavía
                                     # Lo limpiaremos después de enviar la notificación
@@ -194,6 +182,20 @@ class EV_DriverWS:
                             'message': message_text
                         }
                         shared_state.notification_queue.put(notification)
+                    
+                    # 🆕 RECIBIR ACTUALIZACIONES DE CARGA DEL CP_E
+                    elif event_type == 'charging_progress':
+                        # El CP_E publica progreso cada 5 segundos
+                        username = event.get('username')
+                        energy_kwh = event.get('energy_kwh', 0.0)
+                        cost = event.get('cost', 0.0)
+                        
+                        # Actualizar sesión local con datos REALES del CP_E
+                        with shared_state.lock:
+                            if username in shared_state.charging_sessions:
+                                shared_state.charging_sessions[username]['energy'] = energy_kwh
+                                shared_state.charging_sessions[username]['cost'] = cost
+                                print(f"[DRIVER] 📊 Actualización de CP_E: {username} → {energy_kwh:.2f} kWh, €{cost:.2f}")
                 
             except Exception as e:
                 print(f"[KAFKA] ⚠️ Consumer error: {e}")
@@ -355,7 +357,11 @@ class EV_DriverWS:
             return {'success': False, 'message': str(e)}
 
     def stop_charging(self, username):
-        """Detiene la carga actual (enviar evento a Central para procesar en BD)"""
+        """
+        Detiene la carga actual (enviar evento a Central para procesar en BD)
+        
+        🔴 ARQUITECTURA REAL: Usa la energía REAL reportada por CP_E, no simulada.
+        """
         try:
             # Verificar si hay sesión activa local
             with shared_state.lock:
@@ -364,11 +370,9 @@ class EV_DriverWS:
                     return {'success': False, 'message': 'No active charging session'}
                 
                 cp_id = session_data.get('cp_id')
-                import time
-                duration = time.time() - session_data.get('start_time', time.time())
-                # Simular energía cargada basado en tiempo
-                import random
-                energy_kwh = random.uniform(5.0, 25.0)
+                # ✅ Usar energía REAL del CP_E (no simulada)
+                energy_kwh = session_data.get('energy', 0.0)
+                cost = session_data.get('cost', 0.0)
             
             # Publicar evento de STOP a Central para que finalice en BD
             if self.producer:
@@ -381,14 +385,14 @@ class EV_DriverWS:
                     'driver_id': self.driver_id,
                     'action': 'charging_stopped',
                     'username': username,
-                    'user_id': user_id,  # ← AGREGADO para que Central pueda buscar la sesión
+                    'user_id': user_id,
                     'cp_id': cp_id,
-                    'energy_kwh': energy_kwh,
+                    'energy_kwh': energy_kwh,  # ✅ Energía REAL del CP_E
                     'timestamp': current_timestamp()
                 }
                 self.producer.send(KAFKA_TOPIC_PRODUCE, event)
                 self.producer.flush()
-                print(f"[DRIVER] ⛔ Solicitando detener carga en {cp_id} (user_id={user_id}, Central procesará en BD)")
+                print(f"[DRIVER] ⛔ Solicitando detener carga en {cp_id} (energy={energy_kwh:.2f} kWh del CP_E)")
                 
                 # Limpiar sesión local
                 with shared_state.lock:
@@ -398,8 +402,8 @@ class EV_DriverWS:
                 return {
                     'success': True,
                     'energy': energy_kwh,
-                    'total_cost': energy_kwh * 0.30,  # Simulado
-                    'new_balance': 150.0  # Simulado
+                    'total_cost': cost,
+                    'new_balance': 150.0  # Simulado (se actualiza en BD por Central)
                 }
             else:
                 return {'success': False, 'message': 'Sistema de mensajería no disponible'}
@@ -929,6 +933,9 @@ async def websocket_handler_http(request):
                                     'status': 'skipped',
                                     'reason': start_res.get('message', 'unknown')
                                 }))
+                                # REQUISITO 12: Esperar 4 segundos antes del siguiente servicio
+                                if idx < len(cp_ids):
+                                    await asyncio.sleep(4)
                                 continue
 
                             await ws.send_str(json.dumps({
@@ -961,6 +968,11 @@ async def websocket_handler_http(request):
                                     'status': 'stopped',
                                     'error': stop_res.get('message')
                                 }))
+                            
+                            # REQUISITO 12: Esperar 4 segundos antes del siguiente servicio
+                            if idx < len(cp_ids):
+                                print(f"[DRIVER] ⏳ Esperando 4 segundos antes del siguiente servicio...")
+                                await asyncio.sleep(4)
 
                         await ws.send_str(json.dumps({'type': 'batch_complete'}))
                     
@@ -1217,26 +1229,26 @@ async def process_notifications():
             print(f"[NOTIF] Error processing notification: {e}")
 
 async def broadcast_updates():
-    """Simula actualizaciones de carga y las broadcast a todos los clientes"""
+    """
+    🔴 ARQUITECTURA REAL CON EV_CP_E:
+    Ya NO simulamos la carga aquí. El CP_E (Engine) publica eventos 'charging_progress'
+    vía Kafka que son consumidos en kafka_listener() y actualizan shared_state.charging_sessions.
+    
+    Esta función ahora solo hace broadcast de los datos que recibimos del CP_E real.
+    """
     while True:
         await asyncio.sleep(2)
         
         with shared_state.lock:
-            # Actualizar TODAS las sesiones activas
+            # Broadcast del estado actual (sin modificar, solo mostrar)
             for username, session in list(shared_state.charging_sessions.items()):
-                # Simular incremento de energía basado en tiempo transcurrido
-                elapsed = time.time() - session['start_time']
-                # Simular carga a 7.4 kW (carga lenta típica)
-                session['energy'] = (elapsed / 3600) * 7.4  # kWh
-                session['cost'] = session['energy'] * session['tariff']
-                
-                # Broadcast a todos los clientes conectados
+                # Los datos vienen del CP_E vía Kafka, no los calculamos aquí
                 if shared_state.connected_clients:
                     message = json.dumps({
                         'type': 'charging_update',
-                        'username': username,  # Incluir username para que el cliente filtre
-                        'energy': round(session['energy'], 2),
-                        'cost': round(session['cost'], 2)
+                        'username': username,
+                        'energy': round(session.get('energy', 0.0), 2),
+                        'cost': round(session.get('cost', 0.0), 2)
                     })
                     
                     disconnected_clients = set()
@@ -1328,6 +1340,46 @@ async def main():
         print(f"\n❌ Error starting server: {e}")
 
 if __name__ == "__main__":
+    # ========================================================================
+    # ARGUMENTOS DE LÍNEA DE COMANDOS
+    # ========================================================================
+    parser = argparse.ArgumentParser(
+        description='EV Driver - Aplicación del Conductor'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=int(os.environ.get('DRIVER_PORT', DRIVER_CONFIG['ws_port'])),
+        help=f'Puerto del servidor WebSocket (default: {DRIVER_CONFIG["ws_port"]} o env DRIVER_PORT)'
+    )
+    parser.add_argument(
+        '--kafka-broker',
+        default=os.environ.get('KAFKA_BROKER', KAFKA_BROKER_DEFAULT),
+        help='Kafka broker address (default: from env KAFKA_BROKER or config)'
+    )
+    parser.add_argument(
+        '--central-ip',
+        default=os.environ.get('CENTRAL_IP', 'localhost'),
+        help='IP de Central (default: localhost o env CENTRAL_IP)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Actualizar configuración global (no necesita 'global' en el scope del módulo)
+    SERVER_PORT = args.port
+    KAFKA_BROKER = args.kafka_broker
+    
+    print(f"""
+================================================================================
+  🚗 EV DRIVER - Aplicación del Conductor
+================================================================================
+  WebSocket Port:  {SERVER_PORT}
+  Kafka Broker:    {KAFKA_BROKER}
+  Central IP:      {args.central_ip}
+  Dashboard:       http://localhost:{SERVER_PORT}
+================================================================================
+""")
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

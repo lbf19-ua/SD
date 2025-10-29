@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import time
+import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 import random
@@ -30,25 +31,60 @@ import database as db
 KAFKA_BROKER = os.environ.get('KAFKA_BROKER', KAFKA_BROKER_DEFAULT)
 KAFKA_TOPICS_CONSUME = [KAFKA_TOPICS['cp_events'], KAFKA_TOPICS['central_events']]
 KAFKA_TOPIC_PRODUCE = KAFKA_TOPICS['monitor_events']
-SERVER_PORT = MONITOR_CONFIG['ws_port']
+
+# ============================================================================
+# ARQUITECTURA CORRECTA: 1 Monitor por 1 Engine (relación 1:1)
+# ============================================================================
+# Estas variables se setean desde argumentos de línea de comandos
+MONITORED_CP_ID = None  # ID del CP que este Monitor supervisa (ej: CP_001)
+ENGINE_HOST = 'localhost'  # Host del Engine
+ENGINE_PORT = 5100  # Puerto TCP del Engine
+SERVER_PORT = 5500  # Puerto del dashboard de este Monitor
 
 # Estado global compartido
 class SharedState:
     def __init__(self):
         self.connected_clients = set()
-        self.cp_metrics = {}  # Métricas simuladas por CP
+        self.cp_metrics = {}  # Métricas del CP monitoreado
         self.alerts = []
+        self.health_status = {  # Estado del health check del Engine
+            'consecutive_failures': 0,
+            'last_check': None,
+            'last_status': 'UNKNOWN'
+        }
+        self.tcp_monitor_task = None  # Task de monitoreo TCP
         self.lock = threading.Lock()
 
 shared_state = SharedState()
 
 class EV_MonitorWS:
-    """Versión del Monitor con soporte WebSocket para la interfaz web"""
+    """
+    Monitor dedicado a supervisar UN ÚNICO Engine.
     
-    def __init__(self, kafka_broker='localhost:9092'):
+    ARQUITECTURA CORRECTA:
+    - 1 Monitor ↔ 1 Engine (relación 1:1)
+    - Cada CP tiene su propio par Engine+Monitor
+    - El Monitor NO supervisa múltiples CPs
+    """
+    
+    def __init__(self, cp_id, engine_host='localhost', engine_port=5100, kafka_broker='localhost:9092'):
+        self.cp_id = cp_id
+        self.engine_host = engine_host
+        self.engine_port = engine_port
         self.kafka_broker = kafka_broker
         self.producer = None
+        
+        print(f"\n{'='*80}")
+        print(f"  🏥 EV MONITOR - Supervising {self.cp_id}")
+        print(f"{'='*80}")
+        print(f"  Monitored CP:    {self.cp_id}")
+        print(f"  Engine Host:     {self.engine_host}")
+        print(f"  Engine Port:     {self.engine_port}")
+        print(f"  Dashboard Port:  {SERVER_PORT}")
+        print(f"{'='*80}\n")
+        
         self.initialize_kafka()
+        self.authenticate_with_central()
         self.initialize_metrics()
 
     def initialize_kafka(self):
@@ -58,76 +94,113 @@ class EV_MonitorWS:
                 bootstrap_servers=self.kafka_broker,
                 value_serializer=lambda v: json.dumps(v).encode('utf-8')
             )
-            print(f"[MONITOR] ✅ Kafka producer initialized")
+            print(f"[MONITOR-{self.cp_id}] ✅ Kafka producer initialized")
         except Exception as e:
-            print(f"[MONITOR] ⚠️  Warning: Kafka not available: {e}")
+            print(f"[MONITOR-{self.cp_id}] ⚠️  Warning: Kafka not available: {e}")
+
+    def authenticate_with_central(self):
+        """
+        Se conecta a EV_Central para autenticarse y validar que el Monitor
+        está operativo y preparado para prestar servicios.
+        
+        Requisito del PDF: Al arrancar, el Monitor debe conectarse a Central
+        para autenticarse y validar que está operativo.
+        """
+        print(f"[MONITOR-{self.cp_id}] 🔐 Authenticating with Central...")
+        
+        try:
+            # Enviar mensaje de autenticación a Central vía Kafka
+            auth_event = {
+                'message_id': generate_message_id(),
+                'event_type': 'MONITOR_AUTH',
+                'action': 'authenticate',
+                'cp_id': self.cp_id,
+                'monitor_id': f'MONITOR-{self.cp_id}',
+                'engine_host': self.engine_host,
+                'engine_port': self.engine_port,
+                'status': 'READY',
+                'timestamp': current_timestamp()
+            }
+            
+            if self.producer:
+                self.producer.send(KAFKA_TOPIC_PRODUCE, auth_event)
+                self.producer.flush()
+                print(f"[MONITOR-{self.cp_id}] ✅ Authentication sent to Central")
+                print(f"[MONITOR-{self.cp_id}] ✅ Monitor validated and ready to monitor {self.cp_id}")
+            else:
+                print(f"[MONITOR-{self.cp_id}] ⚠️  Cannot authenticate: Kafka not available")
+        except Exception as e:
+            print(f"[MONITOR-{self.cp_id}] ❌ Authentication failed: {e}")
 
     def initialize_metrics(self):
-        """Inicializa métricas simuladas para cada CP"""
-        cps = db.get_all_charging_points()
-        for cp in cps:
-            shared_state.cp_metrics[cp['cp_id']] = {
-                'temperature': 25.0,
-                'efficiency': 100.0,
-                'uptime_start': time.time(),
-                'sessions_today': 0,
-                'current_power': 0.0
-            }
+        """Inicializa métricas simuladas para el CP monitoreado"""
+        shared_state.cp_metrics[self.cp_id] = {
+            'temperature': 25.0,
+            'efficiency': 100.0,
+            'uptime_start': time.time(),
+            'sessions_today': 0,
+            'current_power': 0.0
+        }
+        print(f"[MONITOR-{self.cp_id}] 📊 Metrics initialized for {self.cp_id}")
 
     def get_monitor_data(self):
-        """Obtiene todos los datos para el dashboard de monitoreo"""
+        """Obtiene datos del CP monitoreado para el dashboard"""
         try:
-            # Obtener puntos de carga
-            charging_points_raw = db.get_all_charging_points()
-            charging_points = []
+            # ========================================================================
+            # SOLO obtener datos del CP que este Monitor supervisa
+            # ========================================================================
+            cp = db.get_charging_point_by_id(self.cp_id)
+            if not cp:
+                return {
+                    'charging_point': None,
+                    'alerts': shared_state.alerts[-50:],
+                    'health_status': shared_state.health_status
+                }
             
-            for cp in charging_points_raw:
-                # Obtener métricas simuladas
-                metrics = shared_state.cp_metrics.get(cp['cp_id'], {})
-                
-                # Calcular uptime
-                uptime_seconds = time.time() - metrics.get('uptime_start', time.time())
-                hours = int(uptime_seconds // 3600)
-                minutes = int((uptime_seconds % 3600) // 60)
-                uptime = f"{hours}h {minutes}m"
-                
-                # Determinar potencia actual basada en estado
-                current_power = 0.0
-                max_power = cp.get('max_power_kw', 22.0)
-                if cp['status'] == 'charging':
-                    current_power = max_power * random.uniform(0.85, 0.95)
-                
-                charging_points.append({
-                    'cp_id': cp['cp_id'],
-                    'location': cp['location'],
-                    'power_output': max_power,
-                    'tariff': cp.get('tariff_per_kwh', 0.30),
-                    'status': cp['status'],
-                    'temperature': metrics.get('temperature', 25.0),
-                    'efficiency': metrics.get('efficiency', 100.0),
-                    'uptime': uptime,
-                    'sessions_today': metrics.get('sessions_today', 0),
-                    'current_power': round(current_power, 1)
-                })
+            # Obtener métricas simuladas
+            metrics = shared_state.cp_metrics.get(self.cp_id, {})
+            
+            # Calcular uptime
+            uptime_seconds = time.time() - metrics.get('uptime_start', time.time())
+            hours = int(uptime_seconds // 3600)
+            minutes = int((uptime_seconds % 3600) // 60)
+            uptime = f"{hours}h {minutes}m"
+            
+            # Determinar potencia actual basada en estado
+            current_power = 0.0
+            max_power = cp.get('max_power_kw', 22.0)
+            if cp['status'] == 'charging':
+                current_power = max_power * random.uniform(0.85, 0.95)
+            
+            # Construir datos del CP monitoreado
+            charging_point = {
+                'cp_id': cp['cp_id'],
+                'location': cp['location'],
+                'power_output': max_power,
+                'tariff': cp.get('tariff_per_kwh', 0.30),
+                'status': cp['status'],
+                'temperature': metrics.get('temperature', 25.0),
+                'efficiency': metrics.get('efficiency', 100.0),
+                'uptime': uptime,
+                'sessions_today': metrics.get('sessions_today', 0),
+                'current_power': round(current_power, 1)
+            }
             
             # Obtener alertas recientes
-            alerts = shared_state.alerts[-10:]  # Últimas 10 alertas
-            
-            # Generar estadísticas de uso (últimas 24h)
-            usage_stats = self.get_usage_stats()
+            alerts = shared_state.alerts[-50:]  # Últimas 50 alertas
             
             return {
-                'charging_points': charging_points,
+                'charging_point': charging_point,
                 'alerts': alerts,
-                'usage_stats': usage_stats
+                'health_status': shared_state.health_status
             }
             
         except Exception as e:
-            print(f"[MONITOR] ❌ Error getting monitor data: {e}")
+            print(f"[MONITOR-{self.cp_id}] ❌ Error getting monitor data: {e}")
             return {
-                'charging_points': [],
+                'charging_point': None,
                 'alerts': [],
-                'usage_stats': []
+                'health_status': shared_state.health_status
             }
 
     def get_usage_stats(self):
@@ -174,8 +247,8 @@ class EV_MonitorWS:
                 metrics['efficiency'] += random.uniform(-1, 1)
                 metrics['efficiency'] = max(95, min(100, metrics['efficiency']))
 
-# Instancia global del monitor
-monitor_instance = EV_MonitorWS(kafka_broker=KAFKA_BROKER)
+# Instancia global del monitor (se inicializa en main después de parsear argumentos)
+monitor_instance = None
 
 def get_local_ip():
     """Obtiene la IP local del sistema"""
@@ -446,59 +519,225 @@ async def broadcast_monitor_data():
     for client in disconnected_clients:
         shared_state.connected_clients.discard(client)
 
-async def check_cp_health():
-    """Monitorea la salud de los CPs y genera alertas"""
+async def tcp_health_check():
+    """
+    ============================================================================
+    MONITOREO TCP DEL ENGINE (1:1)
+    ============================================================================
+    Monitoreo TCP del Engine según especificación del PDF.
+    Envía "STATUS?" cada segundo y detecta fallos.
+    
+    ARQUITECTURA CORRECTA:
+    - Este Monitor supervisa UN SOLO Engine
+    - Usa monitor_instance.cp_id, .engine_host, .engine_port
+    - Reporta solo fallos de SU Engine asignado
+    
+    Según PDF página 3-4:
+    - Conexión TCP con el Engine
+    - Envío de mensajes cada segundo
+    - Detección de respuestas KO
+    - Reporte a Central tras múltiples fallos
+    ============================================================================
+    """
+    consecutive_failures = 0
+    
+    # Inicializar tracking
+    shared_state.health_status = {
+        'consecutive_failures': 0,
+        'last_check': time.time(),
+        'last_status': 'UNKNOWN'
+    }
+    
+    print(f"[MONITOR-{monitor_instance.cp_id}] 🏥 Starting TCP health monitoring")
+    print(f"[MONITOR-{monitor_instance.cp_id}]    Engine: {monitor_instance.engine_host}:{monitor_instance.engine_port}")
+    print(f"[MONITOR-{monitor_instance.cp_id}]    Frequency: Every 1 second")
+    
     while True:
-        await asyncio.sleep(30)  # Cada 30 segundos
-        
         try:
-            cps = db.get_all_charging_points()
+            await asyncio.sleep(1)  # ✅ CADA 1 SEGUNDO (según PDF)
             
-            for cp in cps:
-                # Detectar CPs offline (sin actividad reciente)
-                if cp['status'] == 'available':
-                    # Simular detección de fallos aleatorios (muy baja probabilidad)
-                    if random.random() < 0.01:  # 1% de probabilidad
+            try:
+                # ✅ Conectar al Engine vía TCP
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(monitor_instance.engine_host, monitor_instance.engine_port),
+                    timeout=2.0
+                )
+                
+                # ✅ Enviar "STATUS?"
+                writer.write(b"STATUS?\n")
+                await writer.drain()
+                
+                # ✅ Recibir respuesta
+                data = await asyncio.wait_for(
+                    reader.read(100),
+                    timeout=1.0
+                )
+                response = data.decode().strip()
+                
+                # Procesar respuesta
+                if response == "OK":
+                    # ✅ Engine responde OK
+                    if consecutive_failures > 0:
+                        print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Recovered (was {consecutive_failures} failures)")
                         alert = monitor_instance.add_alert(
-                            'warning',
-                            f"⚠️ {cp['cp_id']} reporta baja eficiencia"
+                            'success',
+                            f"✅ {monitor_instance.cp_id} recuperado tras {consecutive_failures} fallos"
                         )
                         await broadcast_alert(alert)
+                    
+                    consecutive_failures = 0
+                    
+                    shared_state.health_status = {
+                        'consecutive_failures': 0,
+                        'last_check': time.time(),
+                        'last_status': 'OK'
+                    }
                 
+                elif response == "KO":
+                    # ❌ Engine responde KO
+                    consecutive_failures += 1
+                    print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Health check KO (failure {consecutive_failures}/3)")
+                    
+                    shared_state.health_status = {
+                        'consecutive_failures': consecutive_failures,
+                        'last_check': time.time(),
+                        'last_status': 'KO'
+                    }
+                    
+                    # ✅ Si 3+ fallos consecutivos, reportar a Central
+                    if consecutive_failures >= 3:
+                        print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 3+ consecutive failures, reporting to Central")
+                        
+                        # Añadir alerta crítica
+                        alert = monitor_instance.add_alert(
+                            'critical',
+                            f"🔴 {monitor_instance.cp_id} reporta 3+ fallos consecutivos (ENGINE_FAILURE)"
+                        )
+                        await broadcast_alert(alert)
+                        
+                        # Reportar a Central vía Kafka
+                        if monitor_instance.producer:
+                            event = {
+                                'message_id': generate_message_id(),
+                                'event_type': 'ENGINE_FAILURE',
+                                'action': 'report_engine_failure',
+                                'cp_id': monitor_instance.cp_id,
+                                'failure_type': 'ko',
+                                'consecutive_failures': consecutive_failures,
+                                'timestamp': current_timestamp(),
+                                'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                            }
+                            monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                            monitor_instance.producer.flush()
+                            print(f"[MONITOR-{monitor_instance.cp_id}] 📤 ENGINE_FAILURE reported to Central")
+                        
+                        # Reset contador después de reportar
+                        consecutive_failures = 0
+                
+                writer.close()
+                await writer.wait_closed()
+                
+            except asyncio.TimeoutError:
+                # Timeout - considerar como fallo
+                consecutive_failures += 1
+                print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Timeout (failure {consecutive_failures}/3)")
+                
+                shared_state.health_status = {
+                    'consecutive_failures': consecutive_failures,
+                    'last_check': time.time(),
+                    'last_status': 'TIMEOUT'
+                }
+                
+                if consecutive_failures >= 3:
+                    print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Connection timeouts, reporting to Central")
+                    
+                    alert = monitor_instance.add_alert(
+                        'critical',
+                        f"🔴 {monitor_instance.cp_id} no responde (3+ timeouts)"
+                    )
+                    await broadcast_alert(alert)
+                    
+                    if monitor_instance.producer:
+                        event = {
+                            'message_id': generate_message_id(),
+                            'event_type': 'ENGINE_FAILURE',
+                            'action': 'report_engine_failure',
+                            'cp_id': monitor_instance.cp_id,
+                            'failure_type': 'timeout',
+                            'consecutive_failures': consecutive_failures,
+                            'timestamp': current_timestamp(),
+                            'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                        }
+                        monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                        monitor_instance.producer.flush()
+                    
+                    consecutive_failures = 0
+            
+            except (ConnectionRefusedError, OSError) as e:
+                # Engine no está corriendo
+                consecutive_failures += 1
+                print(f"[MONITOR-{monitor_instance.cp_id}] ❌ Cannot connect to Engine (failure {consecutive_failures}/3)")
+                
+                shared_state.health_status = {
+                    'consecutive_failures': consecutive_failures,
+                    'last_check': time.time(),
+                    'last_status': 'CONNECTION_ERROR'
+                }
+                
+                if consecutive_failures >= 3:
+                    print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Engine offline, reporting to Central")
+                    
+                    alert = monitor_instance.add_alert(
+                        'critical',
+                        f"🔴 {monitor_instance.cp_id} - Engine offline"
+                    )
+                    await broadcast_alert(alert)
+                    
+                    if monitor_instance.producer:
+                        event = {
+                            'message_id': generate_message_id(),
+                            'event_type': 'ENGINE_OFFLINE',
+                            'action': 'report_engine_offline',
+                            'cp_id': monitor_instance.cp_id,
+                            'consecutive_failures': consecutive_failures,
+                            'timestamp': current_timestamp(),
+                            'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                        }
+                        monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                        monitor_instance.producer.flush()
+                    
+                    consecutive_failures = 0
+                    
+                    # Esperar más tiempo si no podemos conectar
+                    await asyncio.sleep(5)
+                    
+        except asyncio.CancelledError:
+            print(f"[MONITOR-{monitor_instance.cp_id}] 🛑 TCP health monitoring stopped")
+            break
         except Exception as e:
-            print(f"[MONITOR] ❌ Error checking CP health: {e}")
+            print(f"[MONITOR-{monitor_instance.cp_id}] ❌ Error in TCP health check: {e}")
+            await asyncio.sleep(1)
+
 
 async def main():
-    """Función principal que inicia todos los servicios"""
+    """
+    ============================================================================
+    ARQUITECTURA CORRECTA: 1 Monitor por 1 Engine (1:1)
+    ============================================================================
+    Esta función principal inicia los servicios para supervisar UN ÚNICO Engine.
+    ============================================================================
+    """
     local_ip = get_local_ip()
-    
-    print("\n" + "=" * 80)
-    print(" " * 18 + "📊 EV CHARGING POINT - Monitor WebSocket Server")
-    print("=" * 80)
-    print(f"  🌐 Local Access:     http://localhost:{SERVER_PORT}")
-    print(f"  🌍 Network Access:   http://{local_ip}:{SERVER_PORT}")
-    print(f"  🔌 WebSocket:        ws://{local_ip}:{SERVER_PORT}/ws")
-    print(f"  💾 Database:         ev_charging.db")
-    print(f"  📡 Kafka Broker:     {KAFKA_BROKER}")
-    print(f"  📨 Consuming:        {', '.join(KAFKA_TOPICS_CONSUME)}")
-    print(f"  📤 Publishing:       {KAFKA_TOPIC_PRODUCE}")
-    print(f"  🏢 Central Server:   {MONITOR_CONFIG['central_ip']}:{MONITOR_CONFIG['central_port']}")
-    print("=" * 80)
-    print(f"\n  ℹ️  Access from other PCs: http://{local_ip}:{SERVER_PORT}")
-    print(f"  ⚠️  Make sure firewall allows port {SERVER_PORT}")
-    print(f"  ⚠️  Kafka broker must be running at: {KAFKA_BROKER}")
-    print("=" * 80 + "\n")
     
     if not WS_AVAILABLE:
         print("❌ ERROR: WebSocket dependencies not installed")
         print("Run: pip install websockets aiohttp")
         return
     
-    # Verificar base de datos
-    db_path = Path(__file__).parent.parent / 'ev_charging.db'
+    # Verificar base de datos (opcional, solo warning si no existe)
+    db_path = Path('/app/ev_charging.db') if Path('/app/ev_charging.db').exists() else Path(__file__).parent.parent / 'ev_charging.db'
     if not db_path.exists():
-        print("⚠️  Database not found. Please run: python init_db.py")
-        return
+        print("⚠️  Database not found. Monitor will start anyway (read-only mode)")
     
     try:
         # Crear aplicación web que maneje tanto HTTP como WebSocket
@@ -506,31 +745,95 @@ async def main():
         app.router.add_get('/', serve_dashboard)
         app.router.add_get('/ws', websocket_handler_http)
         
-        # Iniciar servidor
+        # Iniciar servidor HTTP/WebSocket
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', SERVER_PORT)
         await site.start()
         
-        print(f"[HTTP] Server started on http://0.0.0.0:{SERVER_PORT}")
+        print(f"[HTTP] Dashboard server started on http://0.0.0.0:{SERVER_PORT}")
         print(f"[WS] WebSocket endpoint at ws://0.0.0.0:{SERVER_PORT}/ws")
+        print(f"\n✅ Access dashboard: http://localhost:{SERVER_PORT}")
+        print(f"✅ Access from network: http://{local_ip}:{SERVER_PORT}\n")
+        
+        # ========================================================================
+        # ARQUITECTURA CORRECTA: Iniciar TCP health check para EL Engine asignado
+        # ========================================================================
+        print(f"[MONITOR-{monitor_instance.cp_id}] 🏥 Starting TCP health monitoring...")
+        health_check_task = asyncio.create_task(tcp_health_check())
         
         # Iniciar broadcast de actualizaciones
         broadcast_task = asyncio.create_task(broadcast_updates())
         
-        print("\n All services started successfully!")
-        print(f" Open http://localhost:{SERVER_PORT} in your browser\n")
+        print(f"\n✅ All services started successfully!")
+        print(f"🏥 TCP monitoring active for {monitor_instance.cp_id}")
+        print(f"🌐 Engine at {monitor_instance.engine_host}:{monitor_instance.engine_port}\n")
         
         # Mantener el servidor corriendo
-        await broadcast_task
+        await asyncio.gather(broadcast_task, health_check_task)
         
     except Exception as e:
         print(f"\n❌ Error starting server: {e}")
 
 if __name__ == "__main__":
+    # ========================================================================
+    # ARGUMENTOS DE LÍNEA DE COMANDOS
+    # ========================================================================
+    parser = argparse.ArgumentParser(
+        description='EV Charging Point Monitor - Supervises ONE Engine (1:1)'
+    )
+    parser.add_argument(
+        '--cp-id',
+        required=True,
+        help='ID del CP a monitorear (ej: CP_001)'
+    )
+    parser.add_argument(
+        '--engine-host',
+        default='localhost',
+        help='Host del Engine (default: localhost)'
+    )
+    parser.add_argument(
+        '--engine-port',
+        type=int,
+        required=True,
+        help='Puerto TCP del Engine (ej: 5100)'
+    )
+    parser.add_argument(
+        '--monitor-port',
+        type=int,
+        default=5500,
+        help='Puerto para dashboard de este Monitor (default: 5500)'
+    )
+    parser.add_argument(
+        '--kafka-broker',
+        default=os.environ.get('KAFKA_BROKER', KAFKA_BROKER_DEFAULT),
+        help='Kafka broker address (default: from config)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Actualizar variables globales (no necesita 'global' en el scope del módulo)
+    MONITORED_CP_ID = args.cp_id
+    ENGINE_HOST = args.engine_host
+    ENGINE_PORT = args.engine_port
+    SERVER_PORT = args.monitor_port
+    
+    # ========================================================================
+    # CREAR INSTANCIA DEL MONITOR (1:1 con Engine)
+    # ========================================================================
+    monitor_instance = EV_MonitorWS(
+        cp_id=args.cp_id,
+        engine_host=args.engine_host,
+        engine_port=args.engine_port,
+        kafka_broker=args.kafka_broker
+    )
+    
+    # Iniciar servidor
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n\n[MONITOR] 🛑 Server stopped by user")
+        print(f"\n\n[MONITOR-{args.cp_id}] 🛑 Server stopped by user")
     except Exception as e:
         print(f"\n❌ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()

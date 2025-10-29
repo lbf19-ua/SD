@@ -10,8 +10,8 @@
 #   1. PC2 debe estar ejecutando Kafka y EV_Central
 #   2. Editar network_config.py con las IPs reales
 #   3. Copiar ev_charging.db desde PC2
-#   4. Abrir puerto del firewall:
-#      New-NetFirewallRule -DisplayName "EV Driver WS" -Direction Inbound -LocalPort 8001 -Protocol TCP -Action Allow
+#   4. Abrir puerto del firewall (PowerShell como admin):
+#      New-NetFirewallRule -DisplayName "EV Driver" -Direction Inbound -LocalPort 8001 -Protocol TCP -Action Allow
 #
 # INICIAR:
 #   docker-compose -f docker-compose.pc1.yml up -d
@@ -32,11 +32,10 @@ services:
       context: .
       dockerfile: EV_Driver/Dockerfile
     container_name: ev-driver
-    # network_mode: "host"  # No funciona en Windows - usar mapeo de puertos normal
     ports:
       - "8001:8001"
     environment:
-      # Kafka broker está en PC2
+      # ⚠️ Cambiar por la IP real de PC2
       - KAFKA_BROKER=192.168.1.235:9092
       - CENTRAL_IP=192.168.1.235
       - WS_PORT=8001
@@ -47,24 +46,20 @@ services:
       - ./database.py:/app/database.py
       - ./event_utils.py:/app/event_utils.py
       - ./EV_Driver/dashboard.html:/app/dashboard.html
+      - ./EV_Driver/servicios.txt:/app/servicios.txt
     restart: unless-stopped
-
-# ==============================================================================
-# NOTA: Se usa network_mode: "host" para que el contenedor pueda acceder
-# directamente a los servicios en PC2 (Kafka y EV_Central)
-# ==============================================================================
 
 # ==============================================================================
 # VERIFICACIÓN DE CONECTIVIDAD
 # ==============================================================================
 # Antes de iniciar, verificar conexión con PC2:
-#   ping PLACEHOLDER_PC2_IP
-#   Test-NetConnection PLACEHOLDER_PC2_IP -Port 9092  # Kafka
-#   Test-NetConnection PLACEHOLDER_PC2_IP -Port 5000  # EV_Central
+#   ping 192.168.1.235
+#   Test-NetConnection 192.168.1.235 -Port 9092  # Kafka
+#   Test-NetConnection 192.168.1.235 -Port 9999  # EV_Central
 # ==============================================================================
 
 # ==============================================================================
 # ACCESO AL DASHBOARD
 # ==============================================================================
-# Driver Dashboard:    http://PLACEHOLDER_PC1_IP:8001
+# Driver Dashboard:    http://192.168.1.100:8001 (cambiar por IP real de PC1)
 # ==============================================================================

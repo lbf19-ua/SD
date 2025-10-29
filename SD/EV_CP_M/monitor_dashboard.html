@@ -396,7 +396,7 @@
         };
 
         function connectWebSocket() {
-            const wsUrl = 'ws://localhost:8003/ws';
+            const wsUrl = `ws://${window.location.hostname}:${window.location.port}/ws`;
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
