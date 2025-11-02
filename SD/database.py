@@ -308,6 +308,11 @@ def get_user_by_nombre(nombre: str) -> dict | None:
         return dict(row)
     return None
 
+# Alias para compatibilidad con código que usa 'username'
+def get_user_by_username(username: str) -> dict | None:
+    """Obtiene datos de un usuario por username (alias de get_user_by_nombre)"""
+    return get_user_by_nombre(username)
+
 # Recupera y devuelve el punto de carga por su cp_id
 def get_charging_point(cp_id: str) -> dict | None:
     """Obtiene información de un punto de carga"""
@@ -445,12 +450,11 @@ def set_all_cps_status_offline() -> int:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        # Resetear TODOS los estados excepto fault y out_of_service
+        # Resetear TODOS los estados a offline al reiniciar Central
         cursor.execute("""
             UPDATE charging_points
             SET estado = 'offline'
             WHERE active = 1 
-            AND estado NOT IN ('fault', 'out_of_service')
         """)
         conn.commit()
         print(f"[DB] ✅ Reset {cursor.rowcount} CPs to offline")

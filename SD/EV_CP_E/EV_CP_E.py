@@ -238,15 +238,18 @@ class EV_CP_Engine:
                 
                 self.health_server_running = True
                 print(f"[{self.cp_id}] 🏥 Health check server started on port {self.health_check_port}")
+                print(f"[{self.cp_id}] 🏥 Listening on 0.0.0.0:{self.health_check_port}, waiting for connections...")
                 
                 while self.running:
                     try:
                         client_socket, address = server_socket.accept()
+                        # No imprimir cada conexión - reduce ruido en logs
                         client_socket.settimeout(5.0)
                         
                         try:
                             # Recibir mensaje del Monitor
                             data = client_socket.recv(1024).decode('utf-8').strip()
+                            # No imprimir cada mensaje STATUS? - reduce ruido
                             
                             if data == "STATUS?":
                                 # Responder según el estado actual
@@ -256,18 +259,90 @@ class EV_CP_Engine:
                                     else:
                                         response = self.health_status
                                 
-                                client_socket.send(response.encode('utf-8'))
+                                # No imprimir cada respuesta - reduce ruido
+                                # Enviar respuesta directamente sin verificar el socket primero
+                                # getpeername() puede fallar incluso si el socket es válido
+                                response_bytes = (response + '\n').encode('utf-8')
+                                
+                                try:
+                                    # Intentar enviar directamente - sendall garantiza que todos los bytes se envíen
+                                    # o devuelve error si el socket está cerrado
+                                    client_socket.sendall(response_bytes)
+                                    # No imprimir cada envío exitoso - reduce ruido
+                                except (OSError, socket.error) as send_error:
+                                    # Socket se cerró durante o antes del envío
+                                    errno = getattr(send_error, 'errno', None)
+                                    error_str = str(send_error)
+                                    if errno == 22 or "Invalid argument" in error_str:
+                                        # [Errno 22] Invalid argument - el Monitor probablemente cerró la conexión
+                                        # o el socket está en un estado inválido
+                                        # Intentar enviar con send() si sendall() falló
+                                        try:
+                                            bytes_sent = client_socket.send(response_bytes)
+                                            # Solo imprimir si falló completamente - reduce ruido
+                                            if bytes_sent == 0:
+                                                pass  # Socket cerrado - normal, no imprimir
+                                        except:
+                                            # Socket completamente cerrado - no se puede enviar
+                                            # Esto es normal si el Monitor cerró la conexión - no imprimir
+                                            pass
+                                    else:
+                                        # Otro error de socket - solo imprimir si es grave
+                                        if self.running:  # Solo si seguimos corriendo
+                                            pass  # Errores de socket comunes - no imprimir
+                                        # No lanzar error - el Monitor probablemente ya cerró la conexión
+                                except Exception as send_error:
+                                    # Error inesperado - solo imprimir si es crítico
+                                    if self.running and "Broken pipe" not in str(send_error):
+                                        # Solo errores críticos, no errores normales de socket cerrado
+                                        pass  # Reducir ruido
+                                    # No lanzar - continuar normalmente
+                            else:
+                                # Comando desconocido - solo imprimir si no es vacío
+                                if data:
+                                    print(f"[{self.cp_id}] ⚠️  Unknown health check command: {data}")
                                 
                         except socket.timeout:
+                            # Timeout normal - no imprimir para reducir ruido
                             pass
+                        except Exception as e:
+                            # No contar errores de socket después de enviar la respuesta como errores críticos
+                            # Estos pueden ocurrir si el Monitor cierra la conexión
+                            error_str = str(e)
+                            if "Invalid argument" in error_str or "[Errno 22]" in error_str:
+                                # Error de socket - probablemente el Monitor cerró la conexión
+                                # Esto es normal después de enviar la respuesta
+                                pass  # No imprimir ni lanzar - es comportamiento esperado
+                            else:
+                                print(f"[{self.cp_id}] ⚠️  Error processing health check: {e}")
                         finally:
-                            client_socket.close()
+                            # Cerrar la conexión limpiamente
+                            # Verificar si el socket está todavía abierto antes de cerrar
+                            try:
+                                # Intentar cerrar solo si el socket está abierto
+                                # Si el Monitor ya cerró la conexión, esto puede fallar con [Errno 22]
+                                client_socket.shutdown(socket.SHUT_RDWR)
+                            except (OSError, socket.error):
+                                # Socket ya cerrado o error - continuar
+                                pass
+                            except:
+                                pass
+                            
+                            try:
+                                client_socket.close()
+                            except:
+                                pass
+                            
+                            # No imprimir si todo salió bien - reducir ruido en logs
+                            # print(f"[{self.cp_id}] 🏥 Health check connection closed")
                             
                     except socket.timeout:
                         continue  # Timeout normal, continuar esperando
                     except Exception as e:
                         if self.running:  # Solo mostrar error si seguimos corriendo
                             print(f"[{self.cp_id}] ⚠️  Health check error: {e}")
+                            import traceback
+                            traceback.print_exc()
                 
                 server_socket.close()
                 print(f"[{self.cp_id}] 🏥 Health check server stopped")
@@ -382,9 +457,6 @@ class EV_CP_Engine:
                                 print(f"[{self.cp_id}] ⚠️  Cannot start charging: status is {self.status}")
                                 continue
                             
-                            # Cambiar a charging
-                            self.change_status('charging', f'Charging started for user {username}')
-                            
                             # Crear sesión
                             self.current_session = {
                                 'username': username,
@@ -393,6 +465,9 @@ class EV_CP_Engine:
                                 'energy_kwh': 0.0,
                                 'cost': 0.0
                             }
+                        
+                        # Cambiar a charging (fuera del lock para evitar deadlock)
+                        self.change_status('charging', f'Charging started for user {username}')
                         
                         # Iniciar simulación de carga
                         self.start_charging_simulation(user_id, username)
@@ -422,14 +497,14 @@ class EV_CP_Engine:
                             
                             # Limpiar sesión
                             self.current_session = None
-                            
-                            # Cambiar a available
-                            self.change_status('available', 'Charging completed')
-                            
-                            print(f"[{self.cp_id}] ✅ Charging session completed")
-                            print(f"[{self.cp_id}]    User: {username}")
-                            print(f"[{self.cp_id}]    Energy: {final_energy:.2f} kWh")
-                            print(f"[{self.cp_id}]    Cost: €{final_cost:.2f}")
+                        
+                        # Cambiar a available (fuera del lock para evitar deadlock)
+                        self.change_status('available', 'Charging completed')
+                        
+                        print(f"[{self.cp_id}] ✅ Charging session completed")
+                        print(f"[{self.cp_id}]    User: {username}")
+                        print(f"[{self.cp_id}]    Energy: {final_energy:.2f} kWh")
+                        print(f"[{self.cp_id}]    Cost: €{final_cost:.2f}")
                 
                 # ============================================================
                 # SIMULACIÓN DE ERROR (desde Admin)
@@ -511,6 +586,29 @@ class EV_CP_Engine:
                         self.change_status('available', reason)
                         print(f"[{self.cp_id}] 🟢 CP is now AVAILABLE")
                 
+                # ============================================================
+                # REQUISITO 7: ENCHUFAR VEHÍCULO (desde CLI remoto)
+                # ============================================================
+                elif event_type == 'CP_PLUG_IN' or action == 'plug_in':
+                    target_cp = event.get('cp_id')
+                    if target_cp == self.cp_id:
+                        print(f"[{self.cp_id}] 🔌 PLUG_IN command received (from remote CLI)")
+                        self.simulate_plug_in()
+                
+                # ============================================================
+                # REQUISITO 9: DESENCHUFAR VEHÍCULO (desde CLI remoto)
+                # ============================================================
+                elif event_type == 'CP_UNPLUG' or action == 'unplug':
+                    target_cp = event.get('cp_id')
+                    if target_cp == self.cp_id:
+                        print(f"[{self.cp_id}] 🔌 UNPLUG command received (from remote CLI)")
+                        # Ejecutar simulate_unplug que detiene la carga y envía ticket
+                        result = self.simulate_unplug()
+                        if result:
+                            print(f"[{self.cp_id}] ✅ Desenchufado completado - Ticket enviado al conductor")
+                        else:
+                            print(f"[{self.cp_id}] ⚠️  No había sesión activa para desenchufar")
+                
         except KeyboardInterrupt:
             print(f"\n[{self.cp_id}] ⚠️  Interrupted by user")
         except Exception as e:
@@ -582,9 +680,9 @@ class EV_CP_Engine:
         with self.lock:
             # Limpiar sesión
             self.current_session = None
-            
-            # Volver a estado disponible (REQUISITO 9)
-            self.change_status('available', 'Vehicle unplugged - Ready for next charge')
+        
+        # Volver a estado disponible (fuera del lock para evitar deadlock)
+        self.change_status('available', 'Vehicle unplugged - Ready for next charge')
         
         print(f"[{self.cp_id}] ✅ Session ended - CP is available again\n")
         return True
@@ -631,7 +729,7 @@ class EV_CP_Engine:
                             print(f"\n[{self.cp_id}] 🚨 SIMULATING HARDWARE FAILURE")
                             with self.lock:
                                 self.health_status = 'KO'
-                                self.change_status('fault', 'Hardware failure simulated')
+                            self.change_status('fault', 'Hardware failure simulated')
                             print(f"[{self.cp_id}] ⚠️  Health status set to KO")
                             print(f"[{self.cp_id}] ⚠️  Monitor will detect this and report to Central\n")
                         elif cmd == 'R':
@@ -639,13 +737,16 @@ class EV_CP_Engine:
                             print(f"\n[{self.cp_id}] ✅ RECOVERING FROM FAILURE")
                             with self.lock:
                                 self.health_status = 'OK'
-                                # Si no hay sesión activa, volver a available
-                                if not self.current_session:
-                                    self.change_status('available', 'Recovered from failure')
-                                else:
-                                    # Si hay sesión activa, mantener charging
-                                    if self.status == 'fault':
-                                        self.status = 'charging'
+                                has_session = bool(self.current_session)
+                                is_fault = (self.status == 'fault')
+                            
+                            # Si no hay sesión activa, volver a available
+                            if not has_session:
+                                self.change_status('available', 'Recovered from failure')
+                            elif is_fault:
+                                # Si hay sesión activa en fault, volver a charging
+                                self.change_status('charging', 'Recovered from failure')
+                            
                             print(f"[{self.cp_id}] ✅ Health status set to OK")
                             print(f"[{self.cp_id}] ✅ CP is operational again\n")
                         elif cmd == 'S':
@@ -738,8 +839,10 @@ class EV_CP_Engine:
         print(f"\n[{self.cp_id}] ✅ All systems operational")
         print(f"[{self.cp_id}] 🔋 Ready to charge vehicles\n")
         
-        # 4. Iniciar menú CLI interactivo
-        cli_thread = self.start_cli_menu()
+        # 4. Iniciar menú CLI interactivo (opcional)
+        cli_thread = None
+        if hasattr(self, 'enable_cli') and self.enable_cli:
+            cli_thread = self.start_cli_menu()
         
         # 5. Escuchar comandos (bloqueante)
         try:
@@ -791,6 +894,12 @@ def main():
         default=os.environ.get('KAFKA_BROKER', ENGINE_CONFIG.get('kafka_broker', KAFKA_BROKER_DEFAULT)),
         help='Kafka broker address (default: from env KAFKA_BROKER or config)'
     )
+    parser.add_argument(
+        '--no-cli',
+        action='store_true',
+        default=False,
+        help='Disable interactive CLI menu (default: CLI enabled)'
+    )
     
     args = parser.parse_args()
     
@@ -803,6 +912,9 @@ def main():
         health_check_port=args.health_port,
         kafka_broker=args.kafka_broker
     )
+    
+    # Configurar si el CLI debe estar habilitado
+    engine.enable_cli = not args.no_cli
     
     try:
         engine.run()

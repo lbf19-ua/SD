@@ -648,6 +648,52 @@
                     addEvent('✅ Lote completado');
                     break;
 
+                case 'charging_ticket':
+                    // 🎫 RECIBIR TICKET FINAL DE CARGA
+                    // FILTRAR: Solo procesar si es para el usuario actual
+                    if (data.username && data.username !== currentUser) {
+                        console.log(`[WS] Ignorando charging_ticket de otro usuario: ${data.username}`);
+                        break;
+                    }
+                    
+                    // Mostrar ticket en un alert o modal
+                    const durationSec = data.duration_sec || 0;
+                    const durationMin = Math.floor(durationSec / 60);
+                    const durationSecRem = durationSec % 60;
+                    const durationStr = durationMin > 0 
+                        ? `${durationMin} min ${durationSecRem} s`
+                        : `${durationSecRem} s`;
+                    
+                    const ticketMessage = `🎫 TICKET DE CARGA\n\n` +
+                        `Punto de Carga: ${data.cp_id}\n` +
+                        `Energía: ${Number(data.energy_kwh || 0).toFixed(2)} kWh\n` +
+                        `Duración: ${durationStr}\n` +
+                        `Costo Total: €${Number(data.cost || 0).toFixed(2)}\n` +
+                        `Motivo: ${data.reason === 'manual_stop' ? 'Parada manual' : data.reason === 'completed' ? 'Desenchufe' : data.reason || 'Finalizada'}`;
+                    
+                    alert(ticketMessage);
+                    
+                    // Actualizar balance si viene en el ticket
+                    if (data.new_balance !== undefined) {
+                        document.getElementById('balance').textContent = `€${Number(data.new_balance).toFixed(2)}`;
+                    }
+                    
+                    // Mostrar ticket en el registro de eventos
+                    addEvent(`🎫 Ticket: ${Number(data.energy_kwh || 0).toFixed(2)} kWh - €${Number(data.cost || 0).toFixed(2)}`);
+                    
+                    // Limpiar estado de carga
+                    sessionData.charging = false;
+                    sessionData.cp_id = null;
+                    document.getElementById('chargingStatus').textContent = 'COMPLETADO ✓';
+                    document.getElementById('startBtn').classList.remove('hidden');
+                    document.getElementById('stopBtn').classList.add('hidden');
+                    document.getElementById('progressSection').classList.add('hidden');
+                    
+                    setTimeout(() => {
+                        document.getElementById('chargingStatus').textContent = 'INACTIVO';
+                    }, 3000);
+                    break;
+
                 case 'error':
                     alert('Error: ' + data.message);
                     addEvent('❌ ' + data.message);

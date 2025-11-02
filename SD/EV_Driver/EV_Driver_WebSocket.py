@@ -64,6 +64,10 @@ class EV_DriverWS:
         # Iniciar consumer en thread separado
         kafka_thread = threading.Thread(target=self.kafka_listener, daemon=True)
         kafka_thread.start()
+        
+        # ⏱️ Iniciar thread de timeout para sesiones sin confirmación
+        timeout_thread = threading.Thread(target=self.check_charging_timeouts, daemon=True)
+        timeout_thread.start()
 
     def initialize_kafka(self):
         """Inicializa el productor de Kafka"""
@@ -88,6 +92,24 @@ class EV_DriverWS:
         print(f"[KAFKA] 📡 Consumer started, listening to {KAFKA_TOPICS_CONSUME}")
         while True:
             try:
+                # Verificar que consumer esté inicializado
+                if self.consumer is None:
+                    print(f"[KAFKA] ⚠️ Consumer not initialized, attempting to reconnect...")
+                    # Intentar inicializar consumer
+                    try:
+                        self.consumer = KafkaConsumer(
+                            *KAFKA_TOPICS_CONSUME,
+                            bootstrap_servers=self.kafka_broker,
+                            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                            auto_offset_reset='latest',
+                            group_id=f'ev_driver_group_{self.driver_id}'
+                        )
+                        print(f"[KAFKA] ✅ Consumer reconnected successfully")
+                    except Exception as e:
+                        print(f"[KAFKA] ⚠️ Failed to reconnect consumer: {e}")
+                        time.sleep(5)  # Esperar antes de reintentar
+                        continue
+                
                 for message in self.consumer:
                     event = message.value
                     event_type = event.get('event_type')
@@ -113,11 +135,17 @@ class EV_DriverWS:
                                     # Central ya envió el comando 'charging_started' al CP_E.
                                     # Driver solo crea sesión local para tracking y espera actualizaciones del CP_E.
                                     
+                                    # Obtener session_id del evento si está disponible
+                                    session_id = event.get('session_id', 'unknown')
+                                    
                                     # Almacenar en estado local (sin BD)
                                     shared_state.charging_sessions[username] = {
                                         'username': username,
                                         'cp_id': cp_id,
+                                        'session_id': session_id,
                                         'start_time': time.time(),
+                                        'authorization_time': time.time(),  # ⏱️ Tiempo de autorización para timeout
+                                        'cp_charging_confirmed': False,  # 🔴 Flag: CP confirma que está cargando
                                         'energy': 0.0,
                                         'cost': 0.0,
                                         'tariff': 0.30  # Tariff por defecto
@@ -136,6 +164,9 @@ class EV_DriverWS:
                                     # Lo limpiaremos después de enviar la notificación
                                 else:
                                     print(f"[DRIVER] ❌ Central rechazó autorización: {reason}")
+                                    # Marcar autorización como rechazada
+                                    auth_data['rejected'] = True
+                                    auth_data['reason'] = reason
                                     # Notificar rechazo al websocket
                                     shared_state.notification_queue.put({
                                         'type': 'authorization_rejected',
@@ -195,12 +226,45 @@ class EV_DriverWS:
                             if username in shared_state.charging_sessions:
                                 shared_state.charging_sessions[username]['energy'] = energy_kwh
                                 shared_state.charging_sessions[username]['cost'] = cost
+                                shared_state.charging_sessions[username]['cp_charging_confirmed'] = True  # ✅ CP confirmó que está cargando
                                 print(f"[DRIVER] 📊 Actualización de CP_E: {username} → {energy_kwh:.2f} kWh, €{cost:.2f}")
+                    
+                    # 🎫 RECIBIR TICKET FINAL AL TERMINAR LA CARGA
+                    elif event_type == 'CHARGING_TICKET':
+                        username = event.get('username')
+                        cp_id = event.get('cp_id')
+                        energy_kwh = event.get('energy_kwh', 0.0)
+                        cost = event.get('cost', 0.0)
+                        duration_sec = event.get('duration_sec', 0)
+                        reason = event.get('reason', 'completed')
+                        
+                        print(f"[DRIVER] 🎫 Ticket recibido para {username}: {energy_kwh:.2f} kWh, €{cost:.2f}")
+                        
+                        # Notificar al websocket del usuario
+                        shared_state.notification_queue.put({
+                            'type': 'charging_ticket',
+                            'username': username,
+                            'cp_id': cp_id,
+                            'energy_kwh': energy_kwh,
+                            'cost': cost,
+                            'duration_sec': duration_sec,
+                            'reason': reason
+                        })
                 
             except Exception as e:
                 print(f"[KAFKA] ⚠️ Consumer error: {e}")
-                # Intentar reconectar
+                # Cerrar consumer anterior si existe
+                if self.consumer:
+                    try:
+                        self.consumer.close()
+                    except:
+                        pass
+                self.consumer = None
+                
+                # Intentar reconectar después de un tiempo
                 try:
+                    print(f"[KAFKA] 🔄 Attempting to reconnect to Kafka...")
+                    time.sleep(2)  # Esperar antes de reconectar
                     self.consumer = KafkaConsumer(
                         *KAFKA_TOPICS_CONSUME,
                         bootstrap_servers=self.kafka_broker,
@@ -208,8 +272,73 @@ class EV_DriverWS:
                         auto_offset_reset='latest',
                         group_id=f'ev_driver_group_{self.driver_id}'
                     )
-                except:
-                    pass
+                    print(f"[KAFKA] ✅ Consumer reconnected successfully")
+                except Exception as reconnect_error:
+                    print(f"[KAFKA] ⚠️ Failed to reconnect: {reconnect_error}")
+                    self.consumer = None
+                    time.sleep(5)  # Esperar más tiempo antes de reintentar
+
+    def check_charging_timeouts(self):
+        """
+        ⏱️ Verifica periódicamente si hay sesiones autorizadas sin confirmación del CP.
+        Si han pasado más de 15 segundos sin confirmación, cancela la sesión.
+        """
+        TIMEOUT_SECONDS = 15  # Tiempo máximo de espera para confirmación del CP
+        
+        while True:
+            try:
+                time.sleep(3)  # Verificar cada 3 segundos
+                
+                current_time = time.time()
+                sessions_to_cancel = []
+                
+                with shared_state.lock:
+                    for username, session in list(shared_state.charging_sessions.items()):
+                        authorization_time = session.get('authorization_time')
+                        cp_confirmed = session.get('cp_charging_confirmed', False)
+                        
+                        # Si la sesión fue autorizada pero el CP no confirma
+                        if authorization_time and not cp_confirmed:
+                            elapsed = current_time - authorization_time
+                            if elapsed > TIMEOUT_SECONDS:
+                                cp_id = session.get('cp_id')
+                                sessions_to_cancel.append((username, cp_id))
+                                print(f"[TIMEOUT] ⏱️ CP {cp_id} no respondió después de {elapsed:.1f}s. Cancelando sesión de {username}")
+                
+                # Cancelar sesiones fuera del lock para evitar deadlocks
+                for username, cp_id in sessions_to_cancel:
+                    with shared_state.lock:
+                        if username in shared_state.charging_sessions:
+                            del shared_state.charging_sessions[username]
+                    
+                    # Notificar al usuario que el CP no respondió
+                    shared_state.notification_queue.put({
+                        'type': 'charging_timeout',
+                        'username': username,
+                        'cp_id': cp_id,
+                        'message': f'El punto de carga {cp_id} no respondió. La carga no pudo iniciarse.'
+                    })
+                    
+                    # Notificar a Central vía Kafka para liberar el CP
+                    if self.producer:
+                        try:
+                            self.producer.send(KAFKA_TOPIC_PRODUCE, {
+                                'message_id': generate_message_id(),
+                                'event_type': 'CHARGING_TIMEOUT',
+                                'action': 'charging_timeout',
+                                'cp_id': cp_id,
+                                'username': username,
+                                'reason': 'CP no respondió después de autorización',
+                                'timestamp': current_timestamp()
+                            })
+                            self.producer.flush()
+                            print(f"[TIMEOUT] 📤 Evento CHARGING_TIMEOUT enviado a Central para CP {cp_id}")
+                        except Exception as e:
+                            print(f"[TIMEOUT] ⚠️ Error enviando evento a Central: {e}")
+                    
+            except Exception as e:
+                print(f"[TIMEOUT] ⚠️ Error en check_charging_timeouts: {e}")
+                time.sleep(5)  # Esperar más tiempo si hay error
 
     def authenticate_user(self, username, password):
         """Autentica un usuario (SIMULADO - Central valida en BD)"""
@@ -528,240 +657,346 @@ async def websocket_handler(websocket, path):
     
     try:
         async for message in websocket:
-            data = json.loads(message)
-            msg_type = data.get('type')
+            try:
+                data = json.loads(message)
+                msg_type = data.get('type')
+                print(f"[WS] 📨 [DEBUG] Mensaje recibido: type={msg_type}")
+            except json.JSONDecodeError as e:
+                print(f"[WS] ⚠️ Error decodificando JSON: {e}")
+                continue
+            except Exception as e:
+                print(f"[WS] ⚠️ Error procesando mensaje: {e}")
+                continue
             
-            if msg_type == 'login':
-                # Autenticar usuario
-                result = driver_instance.authenticate_user(
-                    data.get('username'),
-                    data.get('password')
-                )
-                
-                if result['success']:
-                    username = result['user']['username']
+            try:
+                if msg_type == 'login':
+                    # Autenticar usuario
+                    result = driver_instance.authenticate_user(
+                        data.get('username'),
+                        data.get('password')
+                    )
                     
-                    # Si hay sesión activa, restaurarla en el shared_state
-                    if result.get('active_session'):
-                        session = result['active_session']
-                        # Usar tariff por defecto (no tenemos acceso a BD)
-                        with shared_state.lock:
-                            shared_state.charging_sessions[username] = {
-                                'username': username,
-                                'session_id': session['session_id'],
-                                'cp_id': session['cp_id'],
-                                'start_time': session['start_time'],
-                                'energy': 0.0,
-                                'cost': 0.0,
-                                'tariff': 0.30  # Tariff por defecto
-                            }
-                    
-                    response = {
-                        'type': 'login_response',
-                        'success': True,
-                        'user': result['user']
-                    }
-                    
-                    # Incluir sesión activa si existe
-                    if result.get('active_session'):
-                        response['active_session'] = result['active_session']
-                    
-                    await websocket.send(json.dumps(response))
-                else:
-                    await websocket.send(json.dumps({
-                        'type': 'login_response',
-                        'success': False,
-                        'message': result.get('message', 'Authentication failed')
-                    }))
-            
-            elif msg_type == 'request_charging':
-                # Solicitar carga
-                username = data.get('username')
-                result = driver_instance.request_charging(username)
-                
-                if result.get('success'):
-                    if result.get('pending'):
-                        # Guardar el websocket para la respuesta
-                        client_id = result['client_id']
-                        with shared_state.lock:
-                            if client_id in shared_state.pending_authorizations:
-                                shared_state.pending_authorizations[client_id]['websocket'] = websocket
+                    if result['success']:
+                        username = result['user']['username']
                         
-                        await websocket.send(json.dumps({
-                            'type': 'charging_pending',
-                            'message': 'Esperando autorización de Central...'
-                        }))
+                        # Si hay sesión activa, restaurarla en el shared_state
+                        if result.get('active_session'):
+                            session = result['active_session']
+                            # Usar tariff por defecto (no tenemos acceso a BD)
+                            with shared_state.lock:
+                                shared_state.charging_sessions[username] = {
+                                    'username': username,
+                                    'session_id': session.get('session_id', 'unknown'),
+                                    'cp_id': session.get('cp_id', 'unknown'),
+                                    'start_time': session.get('start_time', time.time()),
+                                    'energy': 0.0,
+                                    'cost': 0.0,
+                                    'tariff': 0.30  # Tariff por defecto
+                                }
+                        
+                        response = {
+                            'type': 'login_response',
+                            'success': True,
+                            'user': result['user']
+                        }
+                        
+                        # Incluir sesión activa si existe
+                        if result.get('active_session'):
+                            response['active_session'] = result['active_session']
+                        
+                        await websocket.send(json.dumps(response))
                     else:
-                        # Respuesta directa (no debería pasar con el nuevo flujo)
+                        await websocket.send(json.dumps({
+                            'type': 'login_response',
+                            'success': False,
+                            'message': result.get('message', 'Authentication failed')
+                        }))
+                
+                elif msg_type == 'request_charging':
+                    # Solicitar carga
+                    username = data.get('username')
+                    result = driver_instance.request_charging(username)
+                    
+                    if result.get('success'):
+                        if result.get('pending'):
+                            # Guardar el websocket para la respuesta
+                            client_id = result['client_id']
+                            with shared_state.lock:
+                                if client_id in shared_state.pending_authorizations:
+                                    shared_state.pending_authorizations[client_id]['websocket'] = websocket
+                            
+                            await websocket.send(json.dumps({
+                                'type': 'charging_pending',
+                                'message': 'Esperando autorización de Central...'
+                            }))
+                        else:
+                            # Respuesta directa (no debería pasar con el nuevo flujo)
+                            await websocket.send(json.dumps({
+                                'type': 'error',
+                                'message': result.get('message', 'Error en el flujo de autorización')
+                            }))
+                    else:
                         await websocket.send(json.dumps({
                             'type': 'error',
-                            'message': result.get('message', 'Error en el flujo de autorización')
+                            'message': result.get('message', 'Failed to start charging')
                         }))
-                else:
-                    await websocket.send(json.dumps({
-                        'type': 'error',
-                        'message': result.get('message', 'Failed to start charging')
-                    }))
-            
-            elif msg_type == 'stop_charging':
-                # Detener carga
-                username = data.get('username')
-                result = driver_instance.stop_charging(username)
                 
-                if result['success']:
-                    with shared_state.lock:
-                        # Eliminar la sesión del usuario específico
-                        if username in shared_state.charging_sessions:
-                            del shared_state.charging_sessions[username]
+                elif msg_type == 'stop_charging':
+                    # Detener carga
+                    username = data.get('username')
+                    result = driver_instance.stop_charging(username)
                     
-                    await websocket.send(json.dumps({
-                        'type': 'charging_stopped',
-                        'energy': result['energy'],
-                        'total_cost': result['total_cost'],
-                        'new_balance': result['new_balance']
-                    }))
-                else:
-                    await websocket.send(json.dumps({
-                        'type': 'error',
-                        'message': result.get('message', 'Failed to stop charging')
-                    }))
-
-            elif msg_type == 'request_charging_at_cp':
-                username = data.get('username')
-                cp_id = data.get('cp_id')
-                result = driver_instance.request_charging_at_cp(username, cp_id)
-
-                if result.get('success'):
-                    if result.get('pending'):
-                        # Guardar el websocket para la respuesta
-                        client_id = result['client_id']
+                    if result['success']:
                         with shared_state.lock:
-                            if client_id in shared_state.pending_authorizations:
-                                shared_state.pending_authorizations[client_id]['websocket'] = websocket
+                            # Eliminar la sesión del usuario específico
+                            if username in shared_state.charging_sessions:
+                                del shared_state.charging_sessions[username]
                         
                         await websocket.send(json.dumps({
-                            'type': 'charging_pending',
-                            'message': 'Esperando autorización de Central...'
+                            'type': 'charging_stopped',
+                            'energy': result['energy'],
+                            'total_cost': result['total_cost'],
+                            'new_balance': result['new_balance']
                         }))
+                    else:
+                        await websocket.send(json.dumps({
+                            'type': 'error',
+                            'message': result.get('message', 'Failed to stop charging')
+                        }))
+                
+                elif msg_type == 'request_charging_at_cp':
+                    username = data.get('username')
+                    cp_id = data.get('cp_id')
+                    result = driver_instance.request_charging_at_cp(username, cp_id)
+                    
+                    if result.get('success'):
+                        if result.get('pending'):
+                            # Guardar el websocket para la respuesta
+                            client_id = result['client_id']
+                            with shared_state.lock:
+                                if client_id in shared_state.pending_authorizations:
+                                    shared_state.pending_authorizations[client_id]['websocket'] = websocket
+                            
+                            await websocket.send(json.dumps({
+                                'type': 'charging_pending',
+                                'message': 'Esperando autorización de Central...'
+                            }))
                     else:
                         # Respuesta directa (error de validación local)
                         await websocket.send(json.dumps({
                             'type': 'error',
                             'message': result.get('message', 'Error en validación local')
                         }))
-                else:
-                    await websocket.send(json.dumps({
-                        'type': 'error',
-                        'message': result.get('message', 'Failed to start charging at CP')
-                    }))
-
-            elif msg_type == 'batch_charging':
-                # Procesa una lista de CPs secuencialmente
-                username = data.get('username')
-                cp_ids = data.get('cp_ids') or []
-                duration_sec = int(data.get('duration_sec') or 2)
-                print(f"[DRIVER] 📄 Batch charging request: user={username}, CPs={cp_ids}, duration={duration_sec}s")
-                await websocket.send(json.dumps({'type': 'batch_started', 'total': len(cp_ids)}))
-
-                idx = 0
-                for cp_id in cp_ids:
-                    idx += 1
-                    # Intentar iniciar
-                    start_res = driver_instance.request_charging_at_cp(username, cp_id)
-                    if not start_res.get('success'):
-                        await websocket.send(json.dumps({
-                            'type': 'batch_progress',
-                            'index': idx,
-                            'cp_id': cp_id,
-                            'status': 'skipped',
-                            'reason': start_res.get('message', 'unknown')
-                        }))
-                        continue
-
-                    await websocket.send(json.dumps({
-                        'type': 'batch_progress',
-                        'index': idx,
-                        'cp_id': cp_id,
-                        'status': 'started',
-                        'session_id': start_res['session_id']
-                    }))
-                    # Esperar duración
+                
+                elif msg_type == 'batch_charging':
+                    # MÓDULO SIMPLE DE BATCH CHARGING
+                    # Lee cada línea del txt → Inicia carga → Espera tiempo → Desenchufa → Siguiente CP
+                    username = data.get('username')
+                    cp_ids = data.get('cp_ids') or []
+                    duration_sec = int(data.get('duration_sec') or 2)
+                    
+                    print(f"[DRIVER] 📄 [BATCH] === INICIANDO BATCH CHARGING ===")
+                    print(f"[DRIVER] 📄 [BATCH] Usuario: {username}, CPs: {len(cp_ids)}, Duración: {duration_sec}s")
+                    print(f"[DRIVER] 📄 [BATCH] Lista de CPs: {cp_ids}")
+                    
                     try:
-                        await asyncio.sleep(max(0, duration_sec))
-                    except Exception:
+                        await websocket.send(json.dumps({'type': 'batch_started', 'total': len(cp_ids)}))
+                    except:
                         pass
-
-                    stop_res = driver_instance.stop_charging(username)
-                    if stop_res.get('success'):
+                    
+                    # Procesar cada CP del archivo txt
+                    for idx, cp_id in enumerate(cp_ids, 1):
+                        print(f"[DRIVER] =========================================")
+                        print(f"[DRIVER] 📦 [BATCH] CP {idx}/{len(cp_ids)}: {cp_id}")
+                        print(f"[DRIVER] =========================================")
+                        
+                        try:
+                            # 1. Limpiar sesión anterior si existe
+                            with shared_state.lock:
+                                if username in shared_state.charging_sessions:
+                                    old_cp = shared_state.charging_sessions[username].get('cp_id')
+                                    print(f"[DRIVER] 🧹 [BATCH] Limpiando sesión anterior: {old_cp}")
+                                    del shared_state.charging_sessions[username]
+                            
+                            # 2. Iniciar carga en este CP (enchufar)
+                            print(f"[DRIVER] 🔌 [BATCH] Iniciando carga en {cp_id}...")
+                            start_res = driver_instance.request_charging_at_cp(username, cp_id)
+                            
+                            if not start_res or not start_res.get('success'):
+                                print(f"[DRIVER] ❌ [BATCH] Error iniciando {cp_id}, saltando...")
+                                try:
+                                    await websocket.send(json.dumps({
+                                        'type': 'batch_progress',
+                                        'index': idx,
+                                        'cp_id': cp_id,
+                                        'status': 'skipped'
+                                    }))
+                                except:
+                                    pass
+                                continue
+                            
+                            # 3. Esperar 2 segundos por autorización (no bloquea)
+                            print(f"[DRIVER] ⏳ [BATCH] Esperando autorización para {cp_id} (2s máximo)...")
+                            for _ in range(10):  # 10 x 0.2s = 2 segundos
+                                await asyncio.sleep(0.2)
+                                with shared_state.lock:
+                                    if username in shared_state.charging_sessions:
+                                        session = shared_state.charging_sessions[username]
+                                        if session.get('cp_id') == cp_id:
+                                            session['cp_charging_confirmed'] = True  # Evitar timeout
+                                            print(f"[DRIVER] ✅ [BATCH] Autorización recibida para {cp_id}")
+                                            break
+                            
+                            # Enviar evento started
+                            try:
+                                await websocket.send(json.dumps({
+                                    'type': 'batch_progress',
+                                    'index': idx,
+                                    'cp_id': cp_id,
+                                    'status': 'started'
+                                }))
+                            except:
+                                pass
+                            
+                            # 4. Esperar el tiempo configurado (tiempo de carga)
+                            print(f"[DRIVER] ⏱️ [BATCH] Carga iniciada en {cp_id}, esperando {duration_sec}s...")
+                            
+                            # Esperar en intervalos de 1 segundo con logs
+                            waited = 0
+                            while waited < duration_sec:
+                                await asyncio.sleep(1.0)
+                                waited += 1.0
+                                if waited % 2 == 0 or waited >= duration_sec:
+                                    print(f"[DRIVER] ⏱️ [BATCH] {cp_id}: {waited:.0f}s/{duration_sec}s")
+                            
+                            print(f"[DRIVER] ⏱️ [BATCH] Duración completada ({duration_sec}s) en {cp_id}")
+                            
+                            # 5. Desenchufar (stop_charging como en CLI)
+                            print(f"[DRIVER] 🔌 [BATCH] Desenchufando {cp_id} (stop_charging)...")
+                            
+                            try:
+                                import concurrent.futures
+                                loop = asyncio.get_event_loop()
+                                with concurrent.futures.ThreadPoolExecutor() as executor:
+                                    future = loop.run_in_executor(executor, driver_instance.stop_charging, username)
+                                    stop_res = await asyncio.wait_for(future, timeout=5.0)
+                                print(f"[DRIVER] ✅ [BATCH] stop_charging ejecutado para {cp_id}")
+                            except Exception as e:
+                                print(f"[DRIVER] ⚠️ [BATCH] Error en stop_charging para {cp_id}: {e}")
+                            
+                            # 6. Limpiar sesión
+                            with shared_state.lock:
+                                if username in shared_state.charging_sessions:
+                                    del shared_state.charging_sessions[username]
+                            
+                            # Enviar evento stopped
+                            try:
+                                await websocket.send(json.dumps({
+                                    'type': 'batch_progress',
+                                    'index': idx,
+                                    'cp_id': cp_id,
+                                    'status': 'stopped'
+                                }))
+                            except:
+                                pass
+                            
+                            print(f"[DRIVER] ✅ [BATCH] {cp_id} completado - Pasando al siguiente CP")
+                            await asyncio.sleep(0.5)  # Pausa breve entre CPs
+                            
+                        except Exception as e:
+                            print(f"[DRIVER] ❌ [BATCH] Error procesando {cp_id}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            
+                            # Limpiar y continuar
+                            with shared_state.lock:
+                                if username in shared_state.charging_sessions:
+                                    del shared_state.charging_sessions[username]
+                            
+                            try:
+                                await websocket.send(json.dumps({
+                                    'type': 'batch_progress',
+                                    'index': idx,
+                                    'cp_id': cp_id,
+                                    'status': 'stopped',
+                                    'error': str(e)
+                                }))
+                            except:
+                                pass
+                            
+                            await asyncio.sleep(0.5)
+                    
+                    # Batch completado
+                    print(f"[DRIVER] 🎉 [BATCH] === BATCH COMPLETADO: {len(cp_ids)} CPs procesados ===")
+                    try:
+                        await websocket.send(json.dumps({'type': 'batch_complete'}))
+                    except:
+                        pass
+                
+                elif msg_type == 'simulate_error':
+                    # Simular error en CP (solo admin)
+                    cp_id = data.get('cp_id')
+                    error_type = data.get('error_type', 'malfunction')
+                    result = driver_instance.simulate_cp_error(cp_id, error_type)
+                    
+                    if result['success']:
                         await websocket.send(json.dumps({
-                            'type': 'batch_progress',
-                            'index': idx,
-                            'cp_id': cp_id,
-                            'status': 'stopped',
-                            'energy': stop_res.get('energy'),
-                            'total_cost': stop_res.get('total_cost')
+                            'type': 'error_simulated',
+                            'cp_id': result['cp_id'],
+                            'error_type': result['error_type'],
+                            'new_status': result['new_status']
                         }))
                     else:
                         await websocket.send(json.dumps({
-                            'type': 'batch_progress',
-                            'index': idx,
-                            'cp_id': cp_id,
-                            'status': 'stopped',
-                            'error': stop_res.get('message')
+                            'type': 'error',
+                            'message': result.get('message', 'Failed to simulate error')
                         }))
-
-                await websocket.send(json.dumps({'type': 'batch_complete'}))
-            
-            elif msg_type == 'simulate_error':
-                # Simular error en CP (solo admin)
-                cp_id = data.get('cp_id')
-                error_type = data.get('error_type', 'malfunction')
-                result = driver_instance.simulate_cp_error(cp_id, error_type)
                 
-                if result['success']:
-                    await websocket.send(json.dumps({
-                        'type': 'error_simulated',
-                        'cp_id': result['cp_id'],
-                        'error_type': result['error_type'],
-                        'new_status': result['new_status']
-                    }))
-                else:
+                elif msg_type == 'fix_error':
+                    # Corregir error en CP (solo admin)
+                    cp_id = data.get('cp_id')
+                    result = driver_instance.fix_cp_error(cp_id)
+                    
+                    if result['success']:
+                        await websocket.send(json.dumps({
+                            'type': 'error_fixed',
+                            'cp_id': result['cp_id'],
+                            'new_status': result['new_status']
+                        }))
+                    else:
+                        await websocket.send(json.dumps({
+                            'type': 'error',
+                            'message': result.get('message', 'Failed to fix error')
+                        }))
+                
+                elif msg_type == 'get_all_cps':
+                    # Obtener todos los CPs (solo admin)
+                    result = driver_instance.get_all_charging_points_status()
+                    
+                    if result['success']:
+                        await websocket.send(json.dumps({
+                            'type': 'all_cps_status',
+                            'charging_points': result['charging_points']
+                        }))
+                    else:
+                        await websocket.send(json.dumps({
+                            'type': 'error',
+                            'message': result.get('message', 'Failed to get CPs')
+                        }))
+                        
+            except Exception as e:
+                print(f"[WS] ❌ Error procesando mensaje tipo '{msg_type}': {e}")
+                import traceback
+                traceback.print_exc()
+                # Intentar notificar el error al cliente sin desconectar
+                try:
                     await websocket.send(json.dumps({
                         'type': 'error',
-                        'message': result.get('message', 'Failed to simulate error')
+                        'message': f'Error procesando {msg_type}: {str(e)}'
                     }))
-            
-            elif msg_type == 'fix_error':
-                # Corregir error en CP (solo admin)
-                cp_id = data.get('cp_id')
-                result = driver_instance.fix_cp_error(cp_id)
-                
-                if result['success']:
-                    await websocket.send(json.dumps({
-                        'type': 'error_fixed',
-                        'cp_id': result['cp_id'],
-                        'new_status': result['new_status']
-                    }))
-                else:
-                    await websocket.send(json.dumps({
-                        'type': 'error',
-                        'message': result.get('message', 'Failed to fix error')
-                    }))
-            
-            elif msg_type == 'get_all_cps':
-                # Obtener todos los CPs (solo admin)
-                result = driver_instance.get_all_charging_points_status()
-                
-                if result['success']:
-                    await websocket.send(json.dumps({
-                        'type': 'all_cps_status',
-                        'charging_points': result['charging_points']
-                    }))
-                else:
-                    await websocket.send(json.dumps({
-                        'type': 'error',
-                        'message': result.get('message', 'Failed to get CPs')
-                    }))
+                except:
+                    # Si no se puede enviar, continuar de todos modos
+                    pass
                     
     except websockets.exceptions.ConnectionClosed:
         pass
@@ -916,65 +1151,190 @@ async def websocket_handler_http(request):
                             }))
 
                     elif msg_type == 'batch_charging':
+                        # MÓDULO SIMPLE DE BATCH CHARGING
+                        # Lee cada línea del txt → Inicia carga → Espera tiempo → Desenchufa → Siguiente CP
                         username = data.get('username')
                         cp_ids = data.get('cp_ids') or []
                         duration_sec = int(data.get('duration_sec') or 2)
-                        await ws.send_str(json.dumps({'type': 'batch_started', 'total': len(cp_ids)}))
-
-                        idx = 0
-                        for cp_id in cp_ids:
-                            idx += 1
-                            start_res = driver_instance.request_charging_at_cp(username, cp_id)
-                            if not start_res.get('success'):
-                                await ws.send_str(json.dumps({
-                                    'type': 'batch_progress',
-                                    'index': idx,
-                                    'cp_id': cp_id,
-                                    'status': 'skipped',
-                                    'reason': start_res.get('message', 'unknown')
-                                }))
+                        
+                        print(f"[DRIVER] 📄 [BATCH] === INICIANDO BATCH CHARGING ===")
+                        print(f"[DRIVER] 📄 [BATCH] Usuario: {username}, CPs: {len(cp_ids)}, Duración: {duration_sec}s")
+                        print(f"[DRIVER] 📄 [BATCH] Lista de CPs: {cp_ids}")
+                        
+                        try:
+                            await ws.send_str(json.dumps({'type': 'batch_started', 'total': len(cp_ids)}))
+                        except:
+                            pass
+                        
+                        # Procesar cada CP del archivo txt
+                        for idx, cp_id in enumerate(cp_ids, 1):
+                            print(f"[DRIVER] =========================================")
+                            print(f"[DRIVER] 📦 [BATCH] CP {idx}/{len(cp_ids)}: {cp_id}")
+                            print(f"[DRIVER] =========================================")
+                            
+                            try:
+                                # 1. Limpiar sesión anterior si existe
+                                with shared_state.lock:
+                                    if username in shared_state.charging_sessions:
+                                        old_cp = shared_state.charging_sessions[username].get('cp_id')
+                                        print(f"[DRIVER] 🧹 [BATCH] Limpiando sesión anterior: {old_cp}")
+                                        del shared_state.charging_sessions[username]
+                                
+                                # 2. Iniciar carga en este CP (enchufar)
+                                print(f"[DRIVER] 🔌 [BATCH] Iniciando carga en {cp_id}...")
+                                start_res = driver_instance.request_charging_at_cp(username, cp_id)
+                                
+                                if not start_res or not start_res.get('success'):
+                                    print(f"[DRIVER] ❌ [BATCH] Error iniciando {cp_id}, saltando...")
+                                    try:
+                                        await ws.send_str(json.dumps({
+                                            'type': 'batch_progress',
+                                            'index': idx,
+                                            'cp_id': cp_id,
+                                            'status': 'skipped',
+                                            'reason': start_res.get('message', 'unknown') if start_res else 'unknown'
+                                        }))
+                                    except:
+                                        pass
+                                    # REQUISITO 12: Esperar 4 segundos antes del siguiente servicio
+                                    if idx < len(cp_ids):
+                                        await asyncio.sleep(4)
+                                    continue
+                                
+                                # 3. Esperar 2 segundos por autorización (no bloquea)
+                                print(f"[DRIVER] ⏳ [BATCH] Esperando autorización para {cp_id} (2s máximo)...")
+                                authorized = False
+                                for _ in range(10):  # 10 x 0.2s = 2 segundos
+                                    await asyncio.sleep(0.2)
+                                    with shared_state.lock:
+                                        if username in shared_state.charging_sessions:
+                                            session = shared_state.charging_sessions[username]
+                                            if session.get('cp_id') == cp_id:
+                                                session['cp_charging_confirmed'] = True  # Evitar timeout
+                                                authorized = True
+                                                print(f"[DRIVER] ✅ [BATCH] Autorización recibida para {cp_id}")
+                                                break
+                                
+                                if not authorized:
+                                    print(f"[DRIVER] ⚠️ [BATCH] Autorización no recibida para {cp_id}, saltando...")
+                                    try:
+                                        await ws.send_str(json.dumps({
+                                            'type': 'batch_progress',
+                                            'index': idx,
+                                            'cp_id': cp_id,
+                                            'status': 'skipped',
+                                            'reason': 'Autorización no recibida'
+                                        }))
+                                    except:
+                                        pass
+                                    # REQUISITO 12: Esperar 4 segundos antes del siguiente servicio
+                                    if idx < len(cp_ids):
+                                        await asyncio.sleep(4)
+                                    continue
+                                
+                                # Enviar evento started
+                                try:
+                                    await ws.send_str(json.dumps({
+                                        'type': 'batch_progress',
+                                        'index': idx,
+                                        'cp_id': cp_id,
+                                        'status': 'started'
+                                    }))
+                                except:
+                                    pass
+                                
+                                # 4. Esperar el tiempo configurado (tiempo de carga)
+                                print(f"[DRIVER] ⏱️ [BATCH] Carga iniciada en {cp_id}, esperando {duration_sec}s...")
+                                
+                                # Esperar en intervalos de 1 segundo con logs
+                                waited = 0
+                                while waited < duration_sec:
+                                    await asyncio.sleep(1.0)
+                                    waited += 1.0
+                                    if waited % 2 == 0 or waited >= duration_sec:
+                                        print(f"[DRIVER] ⏱️ [BATCH] {cp_id}: {waited:.0f}s/{duration_sec}s")
+                                
+                                print(f"[DRIVER] ⏱️ [BATCH] Duración completada ({duration_sec}s) en {cp_id}")
+                                
+                                # 5. Desenchufar (stop_charging como en CLI)
+                                print(f"[DRIVER] 🔌 [BATCH] Desenchufando {cp_id} (stop_charging)...")
+                                
+                                try:
+                                    import concurrent.futures
+                                    loop = asyncio.get_event_loop()
+                                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                                        future = loop.run_in_executor(executor, driver_instance.stop_charging, username)
+                                        stop_res = await asyncio.wait_for(future, timeout=5.0)
+                                    print(f"[DRIVER] ✅ [BATCH] stop_charging ejecutado para {cp_id}")
+                                except Exception as e:
+                                    print(f"[DRIVER] ⚠️ [BATCH] Error en stop_charging para {cp_id}: {e}")
+                                    stop_res = {'success': False, 'message': str(e)}
+                                
+                                # 6. Limpiar sesión
+                                with shared_state.lock:
+                                    if username in shared_state.charging_sessions:
+                                        del shared_state.charging_sessions[username]
+                                
+                                # Enviar evento stopped
+                                try:
+                                    if stop_res.get('success'):
+                                        await ws.send_str(json.dumps({
+                                            'type': 'batch_progress',
+                                            'index': idx,
+                                            'cp_id': cp_id,
+                                            'status': 'stopped',
+                                            'energy': stop_res.get('energy', 0),
+                                            'total_cost': stop_res.get('total_cost', 0)
+                                        }))
+                                    else:
+                                        await ws.send_str(json.dumps({
+                                            'type': 'batch_progress',
+                                            'index': idx,
+                                            'cp_id': cp_id,
+                                            'status': 'stopped',
+                                            'error': stop_res.get('message', 'unknown')
+                                        }))
+                                except:
+                                    pass
+                                
+                                print(f"[DRIVER] ✅ [BATCH] {cp_id} completado - Pasando al siguiente CP")
+                                
+                                # REQUISITO 12: Esperar 4 segundos antes del siguiente servicio
+                                if idx < len(cp_ids):
+                                    print(f"[DRIVER] ⏳ [BATCH] Esperando 4 segundos antes del siguiente servicio...")
+                                    await asyncio.sleep(4)
+                                
+                            except Exception as e:
+                                print(f"[DRIVER] ❌ [BATCH] Error procesando {cp_id}: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                
+                                # Limpiar y continuar
+                                with shared_state.lock:
+                                    if username in shared_state.charging_sessions:
+                                        del shared_state.charging_sessions[username]
+                                
+                                try:
+                                    await ws.send_str(json.dumps({
+                                        'type': 'batch_progress',
+                                        'index': idx,
+                                        'cp_id': cp_id,
+                                        'status': 'stopped',
+                                        'error': str(e)
+                                    }))
+                                except:
+                                    pass
+                                
                                 # REQUISITO 12: Esperar 4 segundos antes del siguiente servicio
                                 if idx < len(cp_ids):
                                     await asyncio.sleep(4)
-                                continue
-
-                            await ws.send_str(json.dumps({
-                                'type': 'batch_progress',
-                                'index': idx,
-                                'cp_id': cp_id,
-                                'status': 'started',
-                                'session_id': start_res['session_id']
-                            }))
-                            try:
-                                await asyncio.sleep(max(0, duration_sec))
-                            except Exception:
-                                pass
-
-                            stop_res = driver_instance.stop_charging(username)
-                            if stop_res.get('success'):
-                                await ws.send_str(json.dumps({
-                                    'type': 'batch_progress',
-                                    'index': idx,
-                                    'cp_id': cp_id,
-                                    'status': 'stopped',
-                                    'energy': stop_res.get('energy'),
-                                    'total_cost': stop_res.get('total_cost')
-                                }))
-                            else:
-                                await ws.send_str(json.dumps({
-                                    'type': 'batch_progress',
-                                    'index': idx,
-                                    'cp_id': cp_id,
-                                    'status': 'stopped',
-                                    'error': stop_res.get('message')
-                                }))
-                            
-                            # REQUISITO 12: Esperar 4 segundos antes del siguiente servicio
-                            if idx < len(cp_ids):
-                                print(f"[DRIVER] ⏳ Esperando 4 segundos antes del siguiente servicio...")
-                                await asyncio.sleep(4)
-
-                        await ws.send_str(json.dumps({'type': 'batch_complete'}))
+                        
+                        # Batch completado
+                        print(f"[DRIVER] 🎉 [BATCH] === BATCH COMPLETADO: {len(cp_ids)} CPs procesados ===")
+                        try:
+                            await ws.send_str(json.dumps({'type': 'batch_complete'}))
+                        except:
+                            pass
                     
                     elif msg_type == 'simulate_error':
                         # Simular error en CP (solo admin)
@@ -1088,32 +1448,42 @@ async def process_notifications():
                 
                 # Buscar el websocket usando client_id
                 sent = False
+                ws_to_send = None
+                
                 with shared_state.lock:
                     print(f"[NOTIF] 🔍 Buscando websocket para client_id={client_id}")
                     print(f"[NOTIF] 📋 pending_authorizations keys: {list(shared_state.pending_authorizations.keys())}")
                     
                     if client_id and client_id in shared_state.pending_authorizations:
-                        ws = shared_state.pending_authorizations[client_id].get('websocket')
+                        auth_data = shared_state.pending_authorizations[client_id]
+                        ws = auth_data.get('websocket')
                         print(f"[NOTIF] 🎯 Websocket encontrado: {ws is not None}")
                         
-                        # Limpiar pending_authorizations
-                        shared_state.pending_authorizations.pop(client_id, None)
-                        
-                        # Enviar al websocket específico
+                        # Verificar si websocket es válido ANTES de limpiar
                         if ws:
-                            try:
-                                if hasattr(ws, 'send_str'):
-                                    await ws.send_str(message)
-                                else:
-                                    await ws.send(message)
-                                print(f"[NOTIF] ✅ Notificación enviada a {username} en {cp_id}")
-                                sent = True
-                            except Exception as e:
-                                print(f"[NOTIF] Error enviando a {username}: {e}")
+                            # Limpiar pending_authorizations solo si websocket es válido
+                            shared_state.pending_authorizations.pop(client_id, None)
+                            
+                            # Guardar referencia al websocket para enviar fuera del lock
+                            ws_to_send = ws
                         else:
-                            print(f"[NOTIF] ⚠️ Websocket no encontrado para client_id {client_id}")
+                            # Websocket es None, limpiar de todas formas
+                            shared_state.pending_authorizations.pop(client_id, None)
+                            print(f"[NOTIF] ⚠️ Websocket es None para client_id {client_id}")
                     else:
                         print(f"[NOTIF] ⚠️ client_id {client_id} NO está en pending_authorizations")
+                
+                # Enviar al websocket específico (fuera del lock para evitar deadlock)
+                if ws_to_send:
+                    try:
+                        if hasattr(ws_to_send, 'send_str'):
+                            await ws_to_send.send_str(message)
+                        else:
+                            await ws_to_send.send(message)
+                        print(f"[NOTIF] ✅ Notificación enviada a {username} en {cp_id}")
+                        sent = True
+                    except Exception as e:
+                        print(f"[NOTIF] ⚠️ Error enviando a {username}: {e}")
                 
                 # Fallback: enviar a todos los clientes si no se envió
                 if not sent:
@@ -1130,6 +1500,45 @@ async def process_notifications():
                             pass
                     print(f"[NOTIF] 📢 Broadcast enviado a {len(clients_to_notify)} clientes")
                         
+            elif notification['type'] == 'authorization_rejected':
+                username = notification['username']
+                reason = notification['reason']
+                client_id = notification.get('client_id')
+                
+                message = json.dumps({
+                    'type': 'error',
+                    'message': f'Autorización rechazada: {reason}'
+                })
+            
+            # ⏱️ NOTIFICACIÓN DE TIMEOUT: CP no respondió después de autorización
+            elif notification['type'] == 'charging_timeout':
+                username = notification['username']
+                cp_id = notification['cp_id']
+                message_text = notification.get('message', f'El punto de carga {cp_id} no respondió. La carga no pudo iniciarse.')
+                
+                message = json.dumps({
+                    'type': 'error',
+                    'message': message_text,
+                    'cp_id': cp_id,
+                    'username': username
+                })
+                
+                print(f"[NOTIF] ⏱️ Enviando notificación de timeout a {username} para CP {cp_id}")
+                
+                # Broadcast a todos los clientes (el frontend filtrará por username)
+                with shared_state.lock:
+                    clients = list(shared_state.connected_clients)
+                for client in clients:
+                    try:
+                        if hasattr(client, 'send_str'):
+                            await client.send_str(message)
+                        else:
+                            await client.send(message)
+                    except Exception as e:
+                        print(f"[NOTIF] Error enviando timeout: {e}")
+                
+                print(f"[NOTIF] 📢 Timeout broadcast enviado a {len(clients)} clientes")
+            
             elif notification['type'] == 'authorization_rejected':
                 username = notification['username']
                 reason = notification['reason']
@@ -1224,6 +1633,46 @@ async def process_notifications():
                         print(f"[NOTIF] ✅ Reparación de CP notificada a cliente")
                     except:
                         pass
+            
+            # 🎫 NOTIFICACIÓN DE TICKET FINAL DE CARGA
+            elif notification['type'] == 'charging_ticket':
+                username = notification['username']
+                cp_id = notification['cp_id']
+                energy_kwh = notification['energy_kwh']
+                cost = notification['cost']
+                duration_sec = notification['duration_sec']
+                reason = notification['reason']
+                
+                # Formatear duración
+                duration_min = int(duration_sec / 60)
+                duration_display = f"{duration_min} minutos" if duration_min > 0 else f"{duration_sec} segundos"
+                
+                message = json.dumps({
+                    'type': 'charging_ticket',
+                    'username': username,
+                    'cp_id': cp_id,
+                    'energy_kwh': round(energy_kwh, 2),
+                    'cost': round(cost, 2),
+                    'duration': duration_display,
+                    'reason': reason,
+                    'message': f'🎫 Ticket de carga: {energy_kwh:.2f} kWh por €{cost:.2f}'
+                })
+                
+                print(f"[NOTIF] 🎫 Enviando ticket a {username}: {energy_kwh:.2f} kWh, €{cost:.2f}")
+                
+                # Broadcast a todos los clientes (el frontend filtrará por username)
+                with shared_state.lock:
+                    clients = list(shared_state.connected_clients)
+                for client in clients:
+                    try:
+                        if hasattr(client, 'send_str'):
+                            await client.send_str(message)
+                        else:
+                            await client.send(message)
+                    except Exception as e:
+                        print(f"[NOTIF] Error enviando ticket: {e}")
+                
+                print(f"[NOTIF] 📢 Ticket broadcast enviado a {len(clients)} clientes")
                         
         except Exception as e:
             print(f"[NOTIF] Error processing notification: {e}")

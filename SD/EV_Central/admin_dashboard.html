@@ -492,7 +492,11 @@
 
             switch(data.type) {
                 case 'dashboard_data':
+                case 'initial_data':  // Manejar también el mensaje inicial
                     dashboardData = data.data;
+                    console.log('[FRONTEND] 📊 Dashboard data recibido:', dashboardData);
+                    console.log('[FRONTEND] 📊 Sesiones activas:', dashboardData.active_sessions);
+                    console.log('[FRONTEND] 📊 Número de sesiones:', dashboardData.active_sessions?.length || 0);
                     updateDashboard();
                     // Actualizar lista de CPs en panel de simulación
                     if (dashboardData.charging_points) {
@@ -674,11 +678,16 @@
             const tbody = document.getElementById('sessionsBody');
             tbody.innerHTML = '';
 
-            if (dashboardData.active_sessions.length === 0) {
+            console.log('[FRONTEND] 🔍 updateSessionsTable - dashboardData:', dashboardData);
+            console.log('[FRONTEND] 🔍 updateSessionsTable - active_sessions:', dashboardData?.active_sessions);
+
+            if (!dashboardData || !dashboardData.active_sessions || dashboardData.active_sessions.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No hay sesiones activas</td></tr>';
+                console.log('[FRONTEND] ⚠️ No hay sesiones activas para mostrar');
                 return;
             }
 
+            console.log(`[FRONTEND] ✅ Mostrando ${dashboardData.active_sessions.length} sesión(es) activa(s)`);
             dashboardData.active_sessions.forEach(session => {
                 const row = document.createElement('tr');
                 row.innerHTML = `

@@ -35,10 +35,11 @@ services:
     ports:
       - "8001:8001"
     environment:
-      # ⚠️ Cambiar por la IP real de PC2
-      - KAFKA_BROKER=192.168.1.235:9092
-      - CENTRAL_IP=192.168.1.235
-      - WS_PORT=8001
+      # ⚠️ Para localhost: usar nombre del servicio Kafka (broker:29092)
+      # ⚠️ Para red local: usar IP real de PC2 (ej: 192.168.1.235:9092)
+      - KAFKA_BROKER=broker:29092  # Para localhost (misma red Docker)
+      - CENTRAL_IP=localhost
+      - DRIVER_PORT=8001
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db
@@ -47,7 +48,17 @@ services:
       - ./event_utils.py:/app/event_utils.py
       - ./EV_Driver/dashboard.html:/app/dashboard.html
       - ./EV_Driver/servicios.txt:/app/servicios.txt
+    networks:
+      - ev-network
     restart: unless-stopped
+
+# ==============================================================================
+# Redes
+# ==============================================================================
+networks:
+  ev-network:
+    external: true
+    name: ev-network
 
 # ==============================================================================
 # VERIFICACIÓN DE CONECTIVIDAD

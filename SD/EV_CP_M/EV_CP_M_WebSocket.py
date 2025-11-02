@@ -25,7 +25,8 @@ from kafka import KafkaProducer, KafkaConsumer
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from network_config import MONITOR_CONFIG, KAFKA_BROKER as KAFKA_BROKER_DEFAULT, KAFKA_TOPICS
 from event_utils import generate_message_id, current_timestamp
-import database as db
+# ⚠️ ARQUITECTURA: El Monitor NO accede directamente a la BD
+# Toda la información del CP se obtiene de Central vía Kafka/eventos
 
 # Configuración desde network_config o variables de entorno (Docker)
 KAFKA_BROKER = os.environ.get('KAFKA_BROKER', KAFKA_BROKER_DEFAULT)
@@ -46,6 +47,7 @@ class SharedState:
     def __init__(self):
         self.connected_clients = set()
         self.cp_metrics = {}  # Métricas del CP monitoreado
+        self.cp_info = {}  # ⚠️ Información del CP recibida de Central vía Kafka (no de BD)
         self.alerts = []
         self.health_status = {  # Estado del health check del Engine
             'consecutive_failures': 0,
@@ -144,17 +146,31 @@ class EV_MonitorWS:
         print(f"[MONITOR-{self.cp_id}] 📊 Metrics initialized for {self.cp_id}")
 
     def get_monitor_data(self):
-        """Obtiene datos del CP monitoreado para el dashboard"""
+        """
+        Obtiene datos del CP monitoreado para el dashboard
+        
+        ⚠️ ARQUITECTURA: El Monitor NO accede directamente a la BD
+        Toda la información del CP se obtiene de Central vía Kafka/eventos
+        y se almacena en shared_state.cp_info
+        """
         try:
             # ========================================================================
-            # SOLO obtener datos del CP que este Monitor supervisa
+            # Obtener información del CP desde estado local (recibida de Central)
+            # NO acceder a la BD directamente
             # ========================================================================
-            cp = db.get_charging_point_by_id(self.cp_id)
+            with shared_state.lock:
+                cp = shared_state.cp_info.get(self.cp_id, {})
+            
+            # Si no hay información del CP, usar valores por defecto
             if not cp:
-                return {
-                    'charging_point': None,
-                    'alerts': shared_state.alerts[-50:],
-                    'health_status': shared_state.health_status
+                # Información por defecto hasta que Central envíe datos reales
+                cp = {
+                    'cp_id': self.cp_id,
+                    'location': 'Unknown',
+                    'max_power_kw': 22.0,
+                    'tariff_per_kwh': 0.30,
+                    'status': 'offline',
+                    'estado': 'offline'
                 }
             
             # Obtener métricas simuladas
@@ -168,17 +184,33 @@ class EV_MonitorWS:
             
             # Determinar potencia actual basada en estado
             current_power = 0.0
-            max_power = cp.get('max_power_kw', 22.0)
-            if cp['status'] == 'charging':
+            max_power = cp.get('max_power_kw') or cp.get('max_kw', 22.0)
+            # Manejar tanto 'status' como 'estado'
+            # ⚠️ Normalizar estado para asegurar que sea un estado válido del CP
+            raw_status = cp.get('status') or cp.get('estado', 'offline')
+            valid_statuses = ['available', 'charging', 'offline', 'fault', 'out_of_service']
+            if raw_status.lower() not in valid_statuses:
+                # Si el estado no es válido, usar 'offline' por defecto
+                cp_status = 'offline'
+            else:
+                cp_status = raw_status.lower()
+            if cp_status == 'charging':
                 current_power = max_power * random.uniform(0.85, 0.95)
             
-            # Construir datos del CP monitoreado
+            # Extraer datos del cp (que viene de shared_state.cp_info)
+            location = cp.get('location') or cp.get('localizacion') or 'Unknown'
+            if not location or location.strip() == '':
+                location = 'Unknown'
+            
+            tariff = cp.get('tariff_per_kwh') or cp.get('tarifa_kwh') or 0.30
+            
+            # Construir datos del CP monitoreado para el frontend
             charging_point = {
-                'cp_id': cp['cp_id'],
-                'location': cp['location'],
+                'cp_id': cp.get('cp_id', self.cp_id),
+                'location': location,
                 'power_output': max_power,
-                'tariff': cp.get('tariff_per_kwh', 0.30),
-                'status': cp['status'],
+                'tariff': tariff,
+                'status': cp_status,
                 'temperature': metrics.get('temperature', 25.0),
                 'efficiency': metrics.get('efficiency', 100.0),
                 'uptime': uptime,
@@ -197,6 +229,8 @@ class EV_MonitorWS:
             
         except Exception as e:
             print(f"[MONITOR-{self.cp_id}] ❌ Error getting monitor data: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 'charging_point': None,
                 'alerts': [],
@@ -409,64 +443,176 @@ async def kafka_listener():
     kafka_thread.start()
 
 async def process_kafka_event(event):
-    """Procesa eventos de Kafka y genera alertas"""
-    action = event.get('action', '')
+    """
+    Procesa eventos de Kafka y genera alertas
     
+    ⚠️ ARQUITECTURA: El Monitor recibe información del CP desde Central vía Kafka
+    y la almacena en shared_state.cp_info (NO accede a BD directamente)
+    """
+    action = event.get('action', '')
+    event_type = event.get('event_type', '')
+    cp_id = event.get('cp_id') or event.get('engine_id')
+    
+    # ⚠️ IGNORAR eventos MONITOR_AUTH (no contienen información del CP)
+    if event_type == 'MONITOR_AUTH':
+        # Este evento es solo para autenticación, Central enviará CP_INFO después
+        return
+    
+    # Actualizar información del CP recibida de Central
+    # Solo procesar eventos para el CP que este Monitor supervisa
+    if cp_id and cp_id == monitor_instance.cp_id:
+        # Este evento es para el CP que este Monitor supervisa
+        with shared_state.lock:
+            if cp_id not in shared_state.cp_info:
+                shared_state.cp_info[cp_id] = {}
+            
+            # Actualizar información del CP desde el evento
+            if event_type == 'CP_INFO' or event_type == 'CP_REGISTRATION' or action == 'connect' or action == 'cp_info_update':
+                # Registro o actualización del CP desde Central (único con acceso a BD)
+                cp_data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
+                
+                # Extraer datos del evento CP_INFO
+                # Los datos están en event.data según la estructura que envía Central
+                cp_location = cp_data.get('location') or cp_data.get('localizacion') or ''
+                if not cp_location or cp_location.strip() == '':
+                    # Fallback: buscar en el nivel raíz del evento
+                    cp_location = event.get('location') or event.get('localizacion') or ''
+                if not cp_location or cp_location.strip() == '':
+                    cp_location = 'Unknown'
+                
+                cp_status = cp_data.get('status') or cp_data.get('estado') or ''
+                if not cp_status:
+                    # Fallback: buscar en el nivel raíz del evento
+                    cp_status = event.get('status') or event.get('estado') or 'offline'
+                
+                # Normalizar estado (filtrar estados inválidos)
+                valid_statuses = ['available', 'charging', 'offline', 'fault', 'out_of_service']
+                if cp_status and cp_status.lower() not in valid_statuses:
+                    cp_status = 'available'  # Estado por defecto si no es válido
+                
+                max_power = cp_data.get('max_power_kw') or cp_data.get('max_kw') or 22.0
+                tariff = cp_data.get('tariff_per_kwh') or cp_data.get('tarifa_kwh') or 0.30
+                
+                # Guardar en shared_state.cp_info
+                shared_state.cp_info[cp_id].update({
+                    'cp_id': cp_id,
+                    'location': cp_location,
+                    'localizacion': cp_location,
+                    'max_power_kw': max_power,
+                    'max_kw': max_power,
+                    'tariff_per_kwh': tariff,
+                    'tarifa_kwh': tariff,
+                    'status': cp_status,
+                    'estado': cp_status
+                })
+                # Actualizar dashboard inmediatamente
+                await broadcast_monitor_data()
+            elif ('status' in event or 'estado' in event) and event_type != 'MONITOR_AUTH':
+                # Actualizar estado del CP (solo si no es MONITOR_AUTH)
+                new_status = event.get('status') or event.get('estado')
+                
+                # ⚠️ FILTRAR estados inválidos (solo aceptar estados válidos del CP)
+                valid_statuses = ['available', 'charging', 'offline', 'fault', 'out_of_service']
+                if new_status and new_status.lower() not in valid_statuses:
+                    # Ignorar estados inválidos, mantener el actual
+                    return
+                
+                if new_status:
+                    shared_state.cp_info[cp_id]['status'] = new_status
+                    shared_state.cp_info[cp_id]['estado'] = new_status
+                    print(f"[MONITOR-{cp_id}] 📥 Estado actualizado desde Central: {new_status}")
+                    # Actualizar dashboard inmediatamente
+                    await broadcast_monitor_data()
+    
+    # Procesar eventos de carga y errores
     if action == 'charging_started':
-        cp_id = event.get('cp_id')
-        username = event.get('username')
-        alert = monitor_instance.add_alert(
-            'info',
-            f"✅ Carga iniciada en {cp_id} por {username}"
-        )
-        await broadcast_alert(alert)
+        if cp_id == monitor_instance.cp_id:
+            username = event.get('username')
+            alert = monitor_instance.add_alert(
+                'info',
+                f"✅ Carga iniciada en {cp_id} por {username}"
+            )
+            await broadcast_alert(alert)
+            # Actualizar estado a 'charging'
+            with shared_state.lock:
+                if cp_id in shared_state.cp_info:
+                    shared_state.cp_info[cp_id]['status'] = 'charging'
+                    shared_state.cp_info[cp_id]['estado'] = 'charging'
         
     elif action == 'charging_stopped':
-        cp_id = event.get('cp_id')
-        username = event.get('username')
-        energy = event.get('energy_kwh', 0)
-        alert = monitor_instance.add_alert(
-            'success',
-            f"⛔ Carga completada en {cp_id}: {energy:.2f} kWh"
-        )
-        await broadcast_alert(alert)
+        if cp_id == monitor_instance.cp_id:
+            username = event.get('username')
+            energy = event.get('energy_kwh', 0)
+            alert = monitor_instance.add_alert(
+                'success',
+                f"⛔ Carga completada en {cp_id}: {energy:.2f} kWh"
+            )
+            await broadcast_alert(alert)
+            # Actualizar estado a 'available'
+            with shared_state.lock:
+                if cp_id in shared_state.cp_info:
+                    shared_state.cp_info[cp_id]['status'] = 'available'
+                    shared_state.cp_info[cp_id]['estado'] = 'available'
         
     elif action == 'fault_detected':
-        cp_id = event.get('cp_id')
-        alert = monitor_instance.add_alert(
-            'critical',
-            f"🔴 Fallo detectado en {cp_id}"
-        )
-        await broadcast_alert(alert)
+        if cp_id == monitor_instance.cp_id:
+            alert = monitor_instance.add_alert(
+                'critical',
+                f"🔴 Fallo detectado en {cp_id}"
+            )
+            await broadcast_alert(alert)
+            # Actualizar estado a 'fault'
+            with shared_state.lock:
+                if cp_id in shared_state.cp_info:
+                    shared_state.cp_info[cp_id]['status'] = 'fault'
+                    shared_state.cp_info[cp_id]['estado'] = 'fault'
         
     elif action == 'cp_offline':
-        cp_id = event.get('cp_id')
-        alert = monitor_instance.add_alert(
-            'warning',
-            f"⚠️ {cp_id} fuera de línea"
-        )
-        await broadcast_alert(alert)
+        if cp_id == monitor_instance.cp_id:
+            alert = monitor_instance.add_alert(
+                'warning',
+                f"⚠️ {cp_id} fuera de línea"
+            )
+            await broadcast_alert(alert)
+            # Actualizar estado a 'offline'
+            with shared_state.lock:
+                if cp_id in shared_state.cp_info:
+                    shared_state.cp_info[cp_id]['status'] = 'offline'
+                    shared_state.cp_info[cp_id]['estado'] = 'offline'
         
     elif action == 'cp_error_simulated':
-        cp_id = event.get('cp_id')
-        error_type = event.get('error_type', 'error')
-        alert = monitor_instance.add_alert(
-            'critical',
-            f"🚨 Admin simuló {error_type} en {cp_id}"
-        )
-        await broadcast_alert(alert)
-        # Actualizar dashboard inmediatamente
-        await broadcast_monitor_data()
+        if cp_id == monitor_instance.cp_id:
+            error_type = event.get('error_type', 'error')
+            alert = monitor_instance.add_alert(
+                'critical',
+                f"🚨 Admin simuló {error_type} en {cp_id}"
+            )
+            await broadcast_alert(alert)
+            # Actualizar estado según tipo de error
+            with shared_state.lock:
+                if cp_id in shared_state.cp_info:
+                    if error_type == 'fault':
+                        shared_state.cp_info[cp_id]['status'] = 'fault'
+                    elif error_type == 'out_of_service':
+                        shared_state.cp_info[cp_id]['status'] = 'out_of_service'
+                    shared_state.cp_info[cp_id]['estado'] = shared_state.cp_info[cp_id]['status']
+            # Actualizar dashboard inmediatamente
+            await broadcast_monitor_data()
         
-    elif action == 'cp_error_fixed':
-        cp_id = event.get('cp_id')
-        alert = monitor_instance.add_alert(
-            'success',
-            f"✅ Admin reparó {cp_id}, ahora disponible"
-        )
-        await broadcast_alert(alert)
-        # Actualizar dashboard inmediatamente
-        await broadcast_monitor_data()
+    elif action == 'cp_error_fixed' or action == 'resume':
+        if cp_id == monitor_instance.cp_id:
+            alert = monitor_instance.add_alert(
+                'success',
+                f"✅ Admin reparó {cp_id}, ahora disponible"
+            )
+            await broadcast_alert(alert)
+            # Actualizar estado a 'available'
+            with shared_state.lock:
+                if cp_id in shared_state.cp_info:
+                    shared_state.cp_info[cp_id]['status'] = 'available'
+                    shared_state.cp_info[cp_id]['estado'] = 'available'
+            # Actualizar dashboard inmediatamente
+            await broadcast_monitor_data()
 
 async def broadcast_alert(alert):
     """Broadcast una alerta a todos los clientes WebSocket"""
@@ -558,21 +704,123 @@ async def tcp_health_check():
             
             try:
                 # ✅ Conectar al Engine vía TCP
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(monitor_instance.engine_host, monitor_instance.engine_port),
-                    timeout=2.0
-                )
+                # Aumentar timeout para dar más tiempo a la conexión
+                print(f"[MONITOR-{monitor_instance.cp_id}] 🔍 Attempting to connect to {monitor_instance.engine_host}:{monitor_instance.engine_port}")
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(monitor_instance.engine_host, monitor_instance.engine_port),
+                        timeout=5.0  # Aumentado de 2.0 a 5.0 segundos
+                    )
+                    print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Connected to Engine")
+                except asyncio.TimeoutError:
+                    # Timeout en la conexión - esto SÍ es un timeout real
+                    consecutive_failures += 1
+                    print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Connection timeout (failure {consecutive_failures}/3)")
+                    shared_state.health_status = {
+                        'consecutive_failures': consecutive_failures,
+                        'last_check': time.time(),
+                        'last_status': 'TIMEOUT'
+                    }
+                    if consecutive_failures >= 3:
+                        print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Connection timeouts, reporting to Central")
+                        if monitor_instance.producer:
+                            event = {
+                                'message_id': generate_message_id(),
+                                'event_type': 'ENGINE_FAILURE',
+                                'action': 'report_engine_failure',
+                                'cp_id': monitor_instance.cp_id,
+                                'failure_type': 'timeout',
+                                'consecutive_failures': consecutive_failures,
+                                'timestamp': current_timestamp(),
+                                'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                            }
+                            monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                            monitor_instance.producer.flush()
+                        consecutive_failures = 0
+                    await asyncio.sleep(1)  # Esperar antes de reintentar
+                    continue  # Volver al inicio del loop
                 
                 # ✅ Enviar "STATUS?"
+                print(f"[MONITOR-{monitor_instance.cp_id}] 📤 Sending: STATUS?")
                 writer.write(b"STATUS?\n")
                 await writer.drain()
+                # NO cerrar el writer aquí - mantenerlo abierto para recibir la respuesta
+                # El writer se cerrará después de leer la respuesta
+                print(f"[MONITOR-{monitor_instance.cp_id}] ✅ STATUS? sent (writer still open for reading)")
                 
-                # ✅ Recibir respuesta
-                data = await asyncio.wait_for(
-                    reader.read(100),
-                    timeout=1.0
-                )
-                response = data.decode().strip()
+                # ✅ Recibir respuesta - leer hasta encontrar newline o timeout
+                print(f"[MONITOR-{monitor_instance.cp_id}] 👂 Waiting for response...")
+                try:
+                    # Aumentar timeout para dar más tiempo - el Engine puede tardar en responder
+                    data = await asyncio.wait_for(
+                        reader.readuntil(b'\n'),  # Leer hasta encontrar newline
+                        timeout=5.0  # Aumentado de 3.0 a 5.0 segundos para más robustez
+                    )
+                    response = data.decode().strip()
+                    print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Received: {response}")
+                except asyncio.IncompleteReadError as e:
+                    # Si hay datos parciales, leerlos
+                    partial = e.partial
+                    if partial:
+                        response = partial.decode().strip()
+                        print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Received (partial): {response}")
+                    else:
+                        # Intentar leer más datos
+                        try:
+                            data = await asyncio.wait_for(
+                                reader.read(100),
+                                timeout=1.0
+                            )
+                            response = data.decode().strip()
+                            print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Received (after partial): {response}")
+                        except Exception as e2:
+                            print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Error reading after partial: {e2}")
+                            raise asyncio.TimeoutError("Failed to read response")
+                except Exception as e:
+                    error_msg = str(e) if e else type(e).__name__
+                    error_type = type(e).__name__
+                    print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Error reading response: {error_msg} (type: {error_type})")
+                    
+                    # Intentar recuperar datos parciales antes de contar como timeout
+                    partial_data = None
+                    try:
+                        # Si es IncompleteReadError, tiene atributo partial
+                        if hasattr(e, 'partial'):
+                            partial_data = e.partial
+                        elif isinstance(e, (ConnectionResetError, OSError, BrokenPipeError)):
+                            # Conexión cerrada - podría haber datos en el buffer
+                            # Intentar leer cualquier dato pendiente
+                            try:
+                                # Intentar leer con timeout corto
+                                partial_data = await asyncio.wait_for(
+                                    reader.read(100),
+                                    timeout=0.1
+                                )
+                            except:
+                                pass
+                    except:
+                        pass
+                    
+                    # Si tenemos datos parciales que parecen válidos, usarlos
+                    if partial_data:
+                        try:
+                            response = partial_data.decode().strip()
+                            print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Received (partial/error): '{response}'")
+                            # Si la respuesta parcial es "OK" o "KO", es válida
+                            if response in ['OK', 'KO']:
+                                # Continuar procesando con esta respuesta
+                                # NO lanzar TimeoutError - es un error de lectura pero tenemos la respuesta
+                                print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Recovered partial response: {response}")
+                                # Continuar con el procesamiento normal de la respuesta
+                            else:
+                                # Datos parciales no válidos - timeout real
+                                raise asyncio.TimeoutError(f"Failed to read response: {error_msg}")
+                        except Exception as decode_error:
+                            print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Error decoding partial data: {decode_error}")
+                            raise asyncio.TimeoutError(f"Failed to read response: {error_msg}")
+                    else:
+                        # No hay datos parciales - timeout real
+                        raise asyncio.TimeoutError(f"Failed to read response: {error_msg}")
                 
                 # Procesar respuesta
                 if response == "OK":
@@ -634,8 +882,13 @@ async def tcp_health_check():
                         # Reset contador después de reportar
                         consecutive_failures = 0
                 
-                writer.close()
-                await writer.wait_closed()
+                # Cerrar conexión de forma segura
+                try:
+                    writer.close()
+                    await asyncio.wait_for(writer.wait_closed(), timeout=0.5)
+                except Exception as close_error:
+                    # Ignorar errores de cierre - el Engine ya puede haber cerrado la conexión
+                    pass
                 
             except asyncio.TimeoutError:
                 # Timeout - considerar como fallo
@@ -765,12 +1018,16 @@ async def main():
         # Iniciar broadcast de actualizaciones
         broadcast_task = asyncio.create_task(broadcast_updates())
         
+        # Iniciar listener de Kafka para recibir actualizaciones en tiempo real
+        kafka_task = asyncio.create_task(kafka_listener())
+        
         print(f"\n✅ All services started successfully!")
         print(f"🏥 TCP monitoring active for {monitor_instance.cp_id}")
-        print(f"🌐 Engine at {monitor_instance.engine_host}:{monitor_instance.engine_port}\n")
+        print(f"🌐 Engine at {monitor_instance.engine_host}:{monitor_instance.engine_port}")
+        print(f"📡 Kafka listener active for real-time updates\n")
         
         # Mantener el servidor corriendo
-        await asyncio.gather(broadcast_task, health_check_task)
+        await asyncio.gather(broadcast_task, health_check_task, kafka_task)
         
     except Exception as e:
         print(f"\n❌ Error starting server: {e}")

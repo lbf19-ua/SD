@@ -41,7 +41,7 @@ services:
       - CP_ID=CP_001
       - LOCATION=Parking Norte
       - HEALTH_PORT=5100
-      - KAFKA_BROKER=192.168.1.235:9092  # ⚠️ Cambiar por IP real de PC2
+      - KAFKA_BROKER=broker:29092  # Para localhost, usar nombre del servicio Kafka
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db
@@ -53,6 +53,7 @@ services:
     restart: unless-stopped
     stdin_open: true
     tty: true
+    command: ["python", "-u", "EV_CP_E.py", "--no-cli"]
 
   # ==========================================================================
   # CP_001 - MONITOR (supervisa Engine CP_001)
@@ -71,7 +72,7 @@ services:
       - ENGINE_HOST=ev-cp-engine-001
       - ENGINE_PORT=5100
       - MONITOR_PORT=5500
-      - KAFKA_BROKER=192.168.1.235:9092  # ⚠️ Cambiar por IP real de PC2
+      - KAFKA_BROKER=broker:29092  # Para localhost, usar nombre del servicio Kafka
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db:ro
@@ -82,7 +83,7 @@ services:
     networks:
       - ev-network
     restart: unless-stopped
-    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_001", "--engine-host", "ev-cp-engine-001", "--engine-port", "5100", "--monitor-port", "5500", "--kafka-broker", "192.168.1.235:9092"]
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_001", "--engine-host", "ev-cp-engine-001", "--engine-port", "5100", "--monitor-port", "5500", "--kafka-broker", "broker:29092"]
 
   # ==========================================================================
   # CP_002 - ENGINE
@@ -98,7 +99,7 @@ services:
       - CP_ID=CP_002
       - LOCATION=Parking Sur
       - HEALTH_PORT=5101
-      - KAFKA_BROKER=192.168.1.235:9092  # ⚠️ Cambiar por IP real de PC2
+      - KAFKA_BROKER=broker:29092  # Para localhost, usar nombre del servicio Kafka
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db
@@ -110,6 +111,7 @@ services:
     restart: unless-stopped
     stdin_open: true
     tty: true
+    command: ["python", "-u", "EV_CP_E.py", "--no-cli"]
 
   # ==========================================================================
   # CP_002 - MONITOR (supervisa Engine CP_002)
@@ -128,7 +130,7 @@ services:
       - ENGINE_HOST=ev-cp-engine-002
       - ENGINE_PORT=5101
       - MONITOR_PORT=5501
-      - KAFKA_BROKER=192.168.1.235:9092  # ⚠️ Cambiar por IP real de PC2
+      - KAFKA_BROKER=broker:29092  # Para localhost, usar nombre del servicio Kafka
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db:ro
@@ -139,7 +141,7 @@ services:
     networks:
       - ev-network
     restart: unless-stopped
-    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_002", "--engine-host", "ev-cp-engine-002", "--engine-port", "5101", "--monitor-port", "5501", "--kafka-broker", "192.168.1.235:9092"]
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_002", "--engine-host", "ev-cp-engine-002", "--engine-port", "5101", "--monitor-port", "5501", "--kafka-broker", "broker:29092"]
 
   # ==========================================================================
   # CP_003 - ENGINE
@@ -155,7 +157,7 @@ services:
       - CP_ID=CP_003
       - LOCATION=Parking Este
       - HEALTH_PORT=5102
-      - KAFKA_BROKER=192.168.1.235:9092  # ⚠️ Cambiar por IP real de PC2
+      - KAFKA_BROKER=broker:29092  # Para localhost, usar nombre del servicio Kafka
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db
@@ -167,6 +169,7 @@ services:
     restart: unless-stopped
     stdin_open: true
     tty: true
+    command: ["python", "-u", "EV_CP_E.py", "--no-cli"]
 
   # ==========================================================================
   # CP_003 - MONITOR (supervisa Engine CP_003)
@@ -185,7 +188,7 @@ services:
       - ENGINE_HOST=ev-cp-engine-003
       - ENGINE_PORT=5102
       - MONITOR_PORT=5502
-      - KAFKA_BROKER=192.168.1.235:9092  # ⚠️ Cambiar por IP real de PC2
+      - KAFKA_BROKER=broker:29092  # Para localhost, usar nombre del servicio Kafka
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db:ro
@@ -196,7 +199,7 @@ services:
     networks:
       - ev-network
     restart: unless-stopped
-    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_003", "--engine-host", "ev-cp-engine-003", "--engine-port", "5102", "--monitor-port", "5502", "--kafka-broker", "192.168.1.235:9092"]
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_003", "--engine-host", "ev-cp-engine-003", "--engine-port", "5102", "--monitor-port", "5502", "--kafka-broker", "broker:29092"]
 
   # ==========================================================================
   # CP_004 - ENGINE (añadido dinámicamente)
@@ -214,7 +217,7 @@ services:
       - MAX_POWER=50.0
       - TARIFF=0.35
       - HEALTH_PORT=5103
-      - KAFKA_BROKER=192.168.1.235:9092  # ⚠️ Cambiar por IP real de PC2
+      - KAFKA_BROKER=broker:29092  # Para localhost, usar nombre del servicio Kafka
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db
@@ -226,6 +229,7 @@ services:
     restart: unless-stopped
     stdin_open: true
     tty: true
+    command: ["python", "-u", "EV_CP_E.py", "--no-cli"]
 
   # ==========================================================================
   # CP_004 - MONITOR (supervisa Engine CP_004)
@@ -244,7 +248,7 @@ services:
       - ENGINE_HOST=ev-cp-engine-004
       - ENGINE_PORT=5103
       - MONITOR_PORT=5503
-      - KAFKA_BROKER=192.168.1.235:9092  # ⚠️ Cambiar por IP real de PC2
+      - KAFKA_BROKER=broker:29092  # Para localhost, usar nombre del servicio Kafka
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db:ro
@@ -255,15 +259,15 @@ services:
     networks:
       - ev-network
     restart: unless-stopped
-    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_004", "--engine-host", "ev-cp-engine-004", "--engine-port", "5103", "--monitor-port", "5503", "--kafka-broker", "192.168.1.235:9092"]
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_004", "--engine-host", "ev-cp-engine-004", "--engine-port", "5103", "--monitor-port", "5503", "--kafka-broker", "broker:29092"]
 
 # ==============================================================================
 # Redes
 # ==============================================================================
 networks:
   ev-network:
-    driver: bridge
-    name: ev-network-pc3
+    external: true
+    name: ev-network
 
 # ==============================================================================
 # ACCESO A SERVICIOS (desde cualquier PC en la red)
@@ -273,11 +277,13 @@ networks:
 # Monitor CP_003:   http://192.168.1.150:5502
 # Monitor CP_004:   http://192.168.1.150:5503
 #
-# CLI Engines:
-#   docker attach ev-cp-engine-001  (luego [P] para plug, [U] para unplug, [F] fallo, [R] recuperar)
-#   docker attach ev-cp-engine-002
-#   docker attach ev-cp-engine-003
-#   docker attach ev-cp-engine-004
+# CLI Engines (desde host):
+#   Usar script cp_control.py para controlar los CPs:
+#   
+#   cd SD
+#   python cp_control.py CP_001 unplug          # Desenchufar
+#   python cp_control.py CP_001 --interactive   # Menú interactivo
+#   python cp_control.py CP_002 fault           # Simular fallo
 #
-# Para salir del CLI sin detener: Ctrl+P, Ctrl+Q
+#   El script envía comandos vía Kafka a los CPs.
 # ==============================================================================

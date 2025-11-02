@@ -1,0 +1,4 @@
+Nueva instancia de driver:
+docker run -d --name ev-driver-2 -p 8003:8003
+Nueva instancia de cp:
+docker run -d --name ev-cp-engine-10 --network ev-network-pc3 -p 5109:5109 -e CP_ID=CP_010 -e LOCATION="Parking Extra" -e MAX_POWER=50.0 -e TARIFF=0.35 -e HEALTH_PORT=5109 -e KAFKA_BROKER=192.168.1.235:9092 -e PYTHONUNBUFFERED=1 -v "${PWD}/ev_charging.db:/app/ev_charging.db" -v "${PWD}/network_config.py:/app/network_config.py" -v "${PWD}/database.py:/app/database.py" -v "${PWD}/event_utils.py:/app/event_utils.py" --restart unless-stopped --stdin-open --tty ev-charging-ev-cp-engine-001

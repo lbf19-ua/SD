@@ -352,8 +352,8 @@
 </head>
 <body>
     <div class="container">
-        <h1>📊 Monitor de Puntos de Carga</h1>
-        <p class="subtitle">Sistema de Monitoreo en Tiempo Real</p>
+        <h1>📊 Monitor de Punto de Carga</h1>
+        <p class="subtitle" id="monitorSubtitle">Sistema de Monitoreo en Tiempo Real</p>
 
         <!-- Connection Status -->
         <div id="connectionStatus" class="connection-status disconnected">
@@ -369,17 +369,15 @@
             </div>
         </div>
 
-        <!-- Charging Points Grid -->
+        <!-- Charging Point Card -->
         <div class="cp-grid" id="cpGrid">
-            <div class="empty-state">Esperando datos de puntos de carga...</div>
+            <div class="empty-state">Esperando datos del punto de carga...</div>
         </div>
 
-        <!-- Usage Chart -->
+        <!-- Health Status -->
         <div class="chart-container">
-            <h2>📈 Uso de Puntos de Carga (Últimas 24h)</h2>
-            <div class="bar-chart" id="usageChart">
-                <div class="empty-state">Cargando estadísticas...</div>
-            </div>
+            <h2>🏥 Estado del Sistema</h2>
+            <div id="healthStatus" class="empty-state">Cargando estado del sistema...</div>
         </div>
 
         <div class="last-update" id="lastUpdate">
@@ -390,9 +388,9 @@
     <script>
         let ws = null;
         let monitorData = {
-            charging_points: [],
+            charging_point: null,
             alerts: [],
-            usage_stats: []
+            health_status: {}
         };
 
         function connectWebSocket() {
@@ -474,29 +472,42 @@
         }
 
         function updateMonitorDisplay() {
-            updateChargingPointsGrid();
+            updateChargingPointCard();
             updateAlertsSection();
-            updateUsageChart();
+            updateHealthStatus();
         }
 
-        function updateChargingPointsGrid() {
+        function updateChargingPointCard() {
             const grid = document.getElementById('cpGrid');
             grid.innerHTML = '';
 
-            if (monitorData.charging_points.length === 0) {
-                grid.innerHTML = '<div class="empty-state">No hay puntos de carga registrados</div>';
+            if (!monitorData.charging_point) {
+                grid.innerHTML = '<div class="empty-state">Esperando datos del punto de carga...</div>';
                 return;
             }
 
-            monitorData.charging_points.forEach(cp => {
-                const card = createCPCard(cp);
-                grid.appendChild(card);
-            });
+            const card = createCPCard(monitorData.charging_point);
+            grid.appendChild(card);
+            
+            // Actualizar subtítulo con el CP monitoreado
+            const subtitle = document.getElementById('monitorSubtitle');
+            subtitle.textContent = `Monitoreando: ${monitorData.charging_point.cp_id}`;
         }
 
         // Normaliza estados legacy a los 4 oficiales
         function normalizeStatus(status) {
-            switch ((status || '').toLowerCase()) {
+            if (!status) return 'offline';
+            
+            const statusLower = status.toLowerCase();
+            
+            // ⚠️ FILTRAR estados que no son estados del CP (ej: 'READY', 'AUTHENTICATED', etc.)
+            const validStatuses = ['available', 'charging', 'offline', 'fault', 'out_of_service'];
+            if (validStatuses.includes(statusLower)) {
+                return statusLower;
+            }
+            
+            // Normalizar estados legacy
+            switch (statusLower) {
                 case 'unavailable':
                     return 'offline';
                 case 'error':
@@ -504,14 +515,14 @@
                 case 'maintenance':
                 case 'out_of_order':
                     return 'out_of_service';
-                case 'charging':
-                case 'available':
-                case 'fault':
-                case 'out_of_service':
-                case 'offline':
-                    return status;
+                case 'ready':
+                case 'authenticated':
+                case 'connected':
+                    // Estados de conexión, no estados del CP - usar 'offline' por defecto
+                    return 'offline';
                 default:
-                    return status || 'offline';
+                    // Estado desconocido, usar 'offline' por defecto
+                    return 'offline';
             }
         }
 
@@ -653,28 +664,56 @@
             updateAlertsSection();
         }
 
-        function updateUsageChart() {
-            const chartDiv = document.getElementById('usageChart');
-            chartDiv.innerHTML = '';
-
-            if (!monitorData.usage_stats || monitorData.usage_stats.length === 0) {
-                chartDiv.innerHTML = '<div class="empty-state">No hay datos de uso disponibles</div>';
+        function updateHealthStatus() {
+            const healthDiv = document.getElementById('healthStatus');
+            
+            if (!monitorData.health_status) {
+                healthDiv.innerHTML = '<div class="empty-state">No hay información de estado disponible</div>';
                 return;
             }
 
-            const maxValue = Math.max(...monitorData.usage_stats.map(s => s.value));
+            const health = monitorData.health_status;
+            const lastCheck = health.last_check ? new Date(health.last_check * 1000).toLocaleString() : 'Nunca';
+            const status = health.last_status || 'UNKNOWN';
+            const failures = health.consecutive_failures || 0;
 
-            monitorData.usage_stats.forEach(stat => {
-                const bar = document.createElement('div');
-                const height = (stat.value / maxValue) * 100;
-                bar.className = 'bar';
-                bar.style.height = `${Math.max(height, 5)}%`;
-                bar.innerHTML = `
-                    <div class="bar-value">${stat.value}</div>
-                    <div class="bar-label">${stat.label}</div>
-                `;
-                chartDiv.appendChild(bar);
-            });
+            let statusColor = '#28a745'; // Verde por defecto
+            let statusText = '✅ Operativo';
+            if (status === 'KO' || status === 'TIMEOUT' || status === 'CONNECTION_ERROR') {
+                statusColor = failures >= 3 ? '#dc3545' : '#ffc107'; // Rojo si >= 3 fallos, amarillo si < 3
+                if (status === 'KO') {
+                    statusText = failures >= 3 ? '🔴 Fallos consecutivos (3+)' : `⚠️ Fallos: ${failures}/3`;
+                } else if (status === 'TIMEOUT') {
+                    statusText = failures >= 3 ? '🔴 Timeouts consecutivos (3+)' : `⚠️ Timeouts: ${failures}/3`;
+                } else {
+                    statusText = failures >= 3 ? '🔴 Error de conexión (3+)' : `⚠️ Errores: ${failures}/3`;
+                }
+            } else if (status === 'OK') {
+                statusText = '✅ Saludable';
+            }
+
+            healthDiv.innerHTML = `
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div style="background: #f8f9fa; padding: 20px; border-radius: 10px;">
+                        <div style="font-size: 0.9em; color: #666; margin-bottom: 10px;">Estado del Engine</div>
+                        <div style="font-size: 1.5em; font-weight: bold; color: ${statusColor};">
+                            ${statusText}
+                        </div>
+                    </div>
+                    <div style="background: #f8f9fa; padding: 20px; border-radius: 10px;">
+                        <div style="font-size: 0.9em; color: #666; margin-bottom: 10px;">Última Verificación</div>
+                        <div style="font-size: 1.2em; font-weight: bold; color: #333;">
+                            ${lastCheck}
+                        </div>
+                    </div>
+                </div>
+                ${failures > 0 ? `
+                    <div style="margin-top: 15px; padding: 15px; background: #fff3cd; border-radius: 10px; border-left: 4px solid #ffc107;">
+                        <strong>⚠️ Advertencia:</strong> ${failures} fallo(s) consecutivo(s) detectado(s). 
+                        ${failures >= 3 ? 'Se ha reportado a Central.' : `Se reportará a Central tras 3 fallos consecutivos.`}
+                    </div>
+                ` : ''}
+            `;
         }
 
         function updateLastUpdateTime() {
