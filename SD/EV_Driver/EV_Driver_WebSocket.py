@@ -72,20 +72,33 @@ class EV_DriverWS:
     def initialize_kafka(self):
         """Inicializa el productor de Kafka"""
         try:
+            # Producer sin api_version explícito (auto-detección)
             self.producer = KafkaProducer(
                 bootstrap_servers=self.kafka_broker,
-                value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                request_timeout_ms=30000,
+                retries=3,
+                acks='all'  # Esperar confirmación de todos los replicas
             )
+            # Consumer sin api_version explícito (auto-detección)
             self.consumer = KafkaConsumer(
                 *KAFKA_TOPICS_CONSUME,
                 bootstrap_servers=self.kafka_broker,
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                 auto_offset_reset='latest',
-                group_id=f'ev_driver_group_{self.driver_id}'
+                group_id=f'ev_driver_group_{self.driver_id}',
+                request_timeout_ms=30000,
+                session_timeout_ms=10000,
+                consumer_timeout_ms=5000
             )
             print(f"[DRIVER] ✅ Kafka producer and consumer initialized")
+            print(f"[DRIVER] 📡 Kafka broker: {self.kafka_broker}")
+            print(f"[DRIVER] 📥 Consuming topics: {KAFKA_TOPICS_CONSUME}")
+            print(f"[DRIVER] 📤 Publishing to: {KAFKA_TOPIC_PRODUCE}")
         except Exception as e:
             print(f"[DRIVER] ⚠️  Warning: Kafka not available: {e}")
+            import traceback
+            traceback.print_exc()
             
     def kafka_listener(self):
         """Escucha mensajes de Kafka, especialmente las respuestas de autorización"""
@@ -97,12 +110,16 @@ class EV_DriverWS:
                     print(f"[KAFKA] ⚠️ Consumer not initialized, attempting to reconnect...")
                     # Intentar inicializar consumer
                     try:
+                        # Sin api_version explícito (auto-detección)
                         self.consumer = KafkaConsumer(
                             *KAFKA_TOPICS_CONSUME,
                             bootstrap_servers=self.kafka_broker,
                             value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                             auto_offset_reset='latest',
-                            group_id=f'ev_driver_group_{self.driver_id}'
+                            group_id=f'ev_driver_group_{self.driver_id}',
+                            request_timeout_ms=30000,
+                            session_timeout_ms=10000,
+                            consumer_timeout_ms=5000
                         )
                         print(f"[KAFKA] ✅ Consumer reconnected successfully")
                     except Exception as e:
@@ -265,12 +282,16 @@ class EV_DriverWS:
                 try:
                     print(f"[KAFKA] 🔄 Attempting to reconnect to Kafka...")
                     time.sleep(2)  # Esperar antes de reconectar
+                    # Sin api_version explícito (auto-detección)
                     self.consumer = KafkaConsumer(
                         *KAFKA_TOPICS_CONSUME,
                         bootstrap_servers=self.kafka_broker,
                         value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                         auto_offset_reset='latest',
-                        group_id=f'ev_driver_group_{self.driver_id}'
+                        group_id=f'ev_driver_group_{self.driver_id}',
+                        request_timeout_ms=30000,
+                        session_timeout_ms=10000,
+                        consumer_timeout_ms=5000
                     )
                     print(f"[KAFKA] ✅ Consumer reconnected successfully")
                 except Exception as reconnect_error:
