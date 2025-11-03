@@ -440,9 +440,19 @@ class EV_CentralWS:
                 """)
                 active_sessions_raw = [dict(r) for r in cur.fetchall()]
                 conn.close()
-                print(f"[CENTRAL] 📊 DEBUG: Sesiones activas encontradas en BD: {len(active_sessions_raw)}")
-                for sess in active_sessions_raw:
-                    print(f"[CENTRAL] 📊 DEBUG: Sesión activa - Usuario: {sess.get('username')}, CP: {sess.get('cp_id')}, Energía: {sess.get('energia_kwh')}")
+                
+                # ⚠️ Throttling para mensajes DEBUG: solo imprimir cada 30 segundos
+                if not hasattr(shared_state, '_last_dashboard_debug'):
+                    shared_state._last_dashboard_debug = 0
+                
+                current_time = time.time()
+                time_since_last_debug = current_time - shared_state._last_dashboard_debug
+                
+                if time_since_last_debug >= 30.0:  # Solo imprimir cada 30 segundos
+                    print(f"[CENTRAL] 📊 DEBUG: Sesiones activas encontradas en BD: {len(active_sessions_raw)}")
+                    for sess in active_sessions_raw:
+                        print(f"[CENTRAL] 📊 DEBUG: Sesión activa - Usuario: {sess.get('username')}, CP: {sess.get('cp_id')}, Energía: {sess.get('energia_kwh')}")
+                    shared_state._last_dashboard_debug = current_time
             except Exception as e:
                 print(f"[CENTRAL] ⚠️ Error obteniendo sesiones activas: {e}")
                 import traceback
@@ -472,7 +482,17 @@ class EV_CentralWS:
                 std_session['energy'] = round(energy, 2)
                 std_session['cost'] = round(cost, 2)
                 active_sessions.append(std_session)
-                print(f"[CENTRAL] 📊 DEBUG: Sesión procesada - Usuario: {std_session.get('username')}, CP: {std_session.get('cp_id')}, Energía: {std_session.get('energy')} kWh")
+                
+                # ⚠️ Throttling para mensajes DEBUG: solo imprimir cada 30 segundos
+                # Este mensaje solo se imprime si el anterior también se imprimió (mismo throttling)
+                if not hasattr(shared_state, '_last_dashboard_debug'):
+                    shared_state._last_dashboard_debug = 0
+                
+                current_time = time.time()
+                time_since_last_debug = current_time - shared_state._last_dashboard_debug
+                
+                if time_since_last_debug >= 30.0:  # Solo imprimir cada 30 segundos
+                    print(f"[CENTRAL] 📊 DEBUG: Sesión procesada - Usuario: {std_session.get('username')}, CP: {std_session.get('cp_id')}, Energía: {std_session.get('energy')} kWh")
             
             # Calcular estadísticas
             today = datetime.now().date()
@@ -506,7 +526,18 @@ class EV_CentralWS:
                 'active_sessions': active_sessions,
                 'stats': stats
             }
-            print(f"[CENTRAL] 📊 DEBUG: Dashboard data - Sesiones activas: {len(active_sessions)}, Stats: {stats}")
+            
+            # ⚠️ Throttling para el mensaje DEBUG: solo imprimir cada 30 segundos
+            if not hasattr(shared_state, '_last_dashboard_debug'):
+                shared_state._last_dashboard_debug = 0
+            
+            current_time = time.time()
+            time_since_last_debug = current_time - shared_state._last_dashboard_debug
+            
+            if time_since_last_debug >= 30.0:  # Solo imprimir cada 30 segundos
+                print(f"[CENTRAL] 📊 DEBUG: Dashboard data - Sesiones activas: {len(active_sessions)}, Stats: {stats}")
+                shared_state._last_dashboard_debug = current_time
+            
             return result
             
         except Exception as e:

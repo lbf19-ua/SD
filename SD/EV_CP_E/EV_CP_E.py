@@ -22,7 +22,7 @@ ARQUITECTURA:
 ESTADOS POSIBLES (según especificación):
 - offline: Desconectado (gris)
 - available: Disponible para cargar (verde)
-- charging: Cargando actualmente (verde con ⚡)
+- charging: Cargando actualmente (verde con )
 - fault: Averiado - error de hardware (rojo)
 - out_of_service: Fuera de servicio - mantenimiento (naranja)
 
@@ -97,24 +97,24 @@ class EV_CP_Engine:
         self.lock = threading.Lock()
         
         print(f"\n{'='*80}")
-        print(f"  ⚡ EV CHARGING POINT ENGINE - {self.cp_id}")
+        print(f"   EV CHARGING POINT ENGINE - {self.cp_id}")
         print(f"{'='*80}")
-        print(f"  📍 Location:        {self.location}")
-        print(f"  ⚡ Max Power:        {self.max_power_kw} kW")
-        print(f"  💶 Tariff:          €{self.tariff_per_kwh}/kWh")
-        print(f"  🏥 Health Port:     {self.health_check_port}")
-        print(f"  📡 Kafka Broker:    {self.kafka_broker}")
+        print(f"   Location:        {self.location}")
+        print(f"   Max Power:        {self.max_power_kw} kW")
+        print(f"   Tariff:          €{self.tariff_per_kwh}/kWh")
+        print(f"   Health Port:     {self.health_check_port}")
+        print(f"   Kafka Broker:    {self.kafka_broker}")
         print(f"{'='*80}\n")
     
     def initialize_kafka(self, max_retries=10):
         """Inicializa productor y consumidor de Kafka con reintentos"""
-        print(f"[{self.cp_id}] 🔄 Connecting to Kafka at {self.kafka_broker}...")
-        print(f"[{self.cp_id}] 📍 Broker address: {self.kafka_broker}")
+        print(f"[{self.cp_id}]  Connecting to Kafka at {self.kafka_broker}...")
+        print(f"[{self.cp_id}]  Broker address: {self.kafka_broker}")
         
         for attempt in range(max_retries):
             try:
                 # Productor para enviar eventos
-                print(f"[{self.cp_id}] 📤 Initializing producer...")
+                print(f"[{self.cp_id}]  Initializing producer...")
                 # Producer sin api_version explícito (auto-detección)
                 self.producer = KafkaProducer(
                     bootstrap_servers=self.kafka_broker,
@@ -125,7 +125,7 @@ class EV_CP_Engine:
                 )
                 
                 # Consumidor para recibir comandos de Central
-                print(f"[{self.cp_id}] 📥 Initializing consumer...")
+                print(f"[{self.cp_id}]  Initializing consumer...")
                 # Consumer sin api_version explícito (auto-detección)
                 # Usar group_id único para evitar leer mensajes antiguos al reiniciar
                 import time as time_module
@@ -153,14 +153,14 @@ class EV_CP_Engine:
                 
             except Exception as e:
                 import traceback
-                print(f"[{self.cp_id}] ⚠️  Attempt {attempt+1}/{max_retries} failed: {e}")
-                print(f"[{self.cp_id}] 📋 Error details: {traceback.format_exc()}")
+                print(f"[{self.cp_id}]   Attempt {attempt+1}/{max_retries} failed: {e}")
+                print(f"[{self.cp_id}]  Error details: {traceback.format_exc()}")
                 if attempt < max_retries - 1:
-                    print(f"[{self.cp_id}] ⏳ Retrying in 2 seconds...")
+                    print(f"[{self.cp_id}]  Retrying in 2 seconds...")
                     time.sleep(2)
                 else:
-                    print(f"[{self.cp_id}] ❌ Failed to connect to Kafka after {max_retries} attempts")
-                    print(f"[{self.cp_id}] 💡 Verificar:")
+                    print(f"[{self.cp_id}]  Failed to connect to Kafka after {max_retries} attempts")
+                    print(f"[{self.cp_id}]  Verificar:")
                     print(f"[{self.cp_id}]    1. Kafka está corriendo en {self.kafka_broker}")
                     print(f"[{self.cp_id}]    2. Desde PC3, probar: telnet <IP_PC2> 9092")
                     print(f"[{self.cp_id}]    3. Firewall permite tráfico en puerto 9092 de PC2")
@@ -175,13 +175,13 @@ class EV_CP_Engine:
             event_type: Tipo de evento
             data: Datos adicionales del evento
         
-        ⚠️ PROTECCIÓN: Limita la frecuencia de publicación de cp_status_change para evitar bucles.
+         PROTECCIÓN: Limita la frecuencia de publicación de cp_status_change para evitar bucles.
         """
         if not self.producer:
-            print(f"[{self.cp_id}] ⚠️  Cannot publish event: Kafka producer not initialized")
+            print(f"[{self.cp_id}]   Cannot publish event: Kafka producer not initialized")
             return
         
-        # ⚠️ PROTECCIÓN: Throttling para cp_status_change - no publicar más de una vez por segundo
+        #  PROTECCIÓN: Throttling para cp_status_change - no publicar más de una vez por segundo
         if event_type == 'cp_status_change':
             if not hasattr(self, '_last_status_change_publish'):
                 self._last_status_change_publish = 0
@@ -191,45 +191,30 @@ class EV_CP_Engine:
             
             if time_since_last < 1.0:  # Mínimo 1 segundo entre cambios de estado
                 status = data.get('status') if data else 'unknown'
-                print(f"[{self.cp_id}] ⚠️ Throttling: cp_status_change a '{status}' ya se publicó hace {time_since_last:.2f}s, omitiendo para evitar bucle")
+                print(f"[{self.cp_id}]  Throttling: cp_status_change a '{status}' ya se publicó hace {time_since_last:.2f}s, omitiendo para evitar bucle")
                 return
             
             self._last_status_change_publish = current_time
         
         try:
-            # ⚠️ CRÍTICO: Asegurar que SIEMPRE incluimos cp_id y engine_id en TODOS los eventos
-            # Esto permite que el Monitor filtre correctamente eventos de otros CPs
             event = {
                 'message_id': generate_message_id(),
                 'event_type': event_type,
-                'cp_id': self.cp_id,  # ⚠️ SIEMPRE incluir cp_id para filtrado en Monitor
-                'engine_id': self.cp_id,  # ⚠️ También incluir engine_id como fallback
+                'cp_id': self.cp_id,
+                'engine_id': self.cp_id,
                 'timestamp': current_timestamp()
             }
             
             if data:
-                # Si data ya tiene cp_id o engine_id, asegurar que coinciden con self.cp_id
-                # Esto previene errores donde se envía un evento con cp_id incorrecto
-                if 'cp_id' in data and data['cp_id'] != self.cp_id:
-                    print(f"[{self.cp_id}] ⚠️  Warning: data contains cp_id={data['cp_id']} but self.cp_id={self.cp_id}, using self.cp_id")
-                    data['cp_id'] = self.cp_id
-                if 'engine_id' in data and data['engine_id'] != self.cp_id:
-                    data['engine_id'] = self.cp_id
                 event.update(data)
-            
-            # ⚠️ VERIFICACIÓN FINAL: Asegurar que cp_id y engine_id están correctos
-            if event.get('cp_id') != self.cp_id or event.get('engine_id') != self.cp_id:
-                print(f"[{self.cp_id}] ❌ ERROR: Event cp_id mismatch! event.cp_id={event.get('cp_id')}, self.cp_id={self.cp_id}")
-                event['cp_id'] = self.cp_id
-                event['engine_id'] = self.cp_id
             
             self.producer.send(KAFKA_TOPICS['cp_events'], event)
             self.producer.flush()
             
-            print(f"[{self.cp_id}] 📤 Published event: {event_type} (cp_id: {event.get('cp_id')})")
+            print(f"[{self.cp_id}]  Published event: {event_type}")
             
         except Exception as e:
-            print(f"[{self.cp_id}] ❌ Error publishing event: {e}")
+            print(f"[{self.cp_id}]  Error publishing event: {e}")
     
     def change_status(self, new_status, reason=None):
         """
@@ -246,7 +231,7 @@ class EV_CP_Engine:
             self.previous_status = self.status
             self.status = new_status
             
-            print(f"[{self.cp_id}] 🔄 Status change: {self.previous_status} → {new_status}")
+            print(f"[{self.cp_id}]  Status change: {self.previous_status} → {new_status}")
             if reason:
                 print(f"[{self.cp_id}]    Reason: {reason}")
         
@@ -259,7 +244,7 @@ class EV_CP_Engine:
             import time
             time_since_reg = time.time() - self._registration_time
             if time_since_reg < 5.0:
-                print(f"[{self.cp_id}] ℹ Ignorando cp_status_change a 'available' - ya incluido en CP_REGISTRATION ({time_since_reg:.1f}s)")
+                print(f"[{self.cp_id}]  Ignorando cp_status_change a 'available' - ya incluido en CP_REGISTRATION ({time_since_reg:.1f}s)")
                 return
         
         # Publicar cambio de estado
@@ -278,10 +263,10 @@ class EV_CP_Engine:
         """
         # Flag para asegurar que solo nos registramos una vez
         if hasattr(self, '_registered') and self._registered:
-            print(f"[{self.cp_id}] ⚠️ Already registered, skipping auto-registration")
+            print(f"[{self.cp_id}]  Already registered, skipping auto-registration")
             return
         
-        print(f"[{self.cp_id}] 📝 Auto-registering with Central...")
+        print(f"[{self.cp_id}]  Auto-registering with Central...")
         
         # Marcar que ya nos registramos para evitar re-registros
         self._registered = True
@@ -316,7 +301,7 @@ class EV_CP_Engine:
             }
         })
         
-        print(f"[{self.cp_id}] ✅ Registration request sent to Central (status: available)")
+        print(f"[{self.cp_id}]  Registration request sent to Central (status: available)")
     
     def start_health_check_server(self):
         """
@@ -332,8 +317,8 @@ class EV_CP_Engine:
                 server_socket.settimeout(1.0)  # Timeout para poder chequear self.running
                 
                 self.health_server_running = True
-                print(f"[{self.cp_id}] 🏥 Health check server started on port {self.health_check_port}")
-                print(f"[{self.cp_id}] 🏥 Listening on 0.0.0.0:{self.health_check_port}, waiting for connections...")
+                print(f"[{self.cp_id}]  Health check server started on port {self.health_check_port}")
+                print(f"[{self.cp_id}]  Listening on 0.0.0.0:{self.health_check_port}, waiting for connections...")
                 
                 while self.running:
                     try:
@@ -395,7 +380,7 @@ class EV_CP_Engine:
                             else:
                                 # Comando desconocido - solo imprimir si no es vacío
                                 if data:
-                                    print(f"[{self.cp_id}] ⚠️  Unknown health check command: {data}")
+                                    print(f"[{self.cp_id}]   Unknown health check command: {data}")
                                 
                         except socket.timeout:
                             # Timeout normal - no imprimir para reducir ruido
@@ -409,7 +394,7 @@ class EV_CP_Engine:
                                 # Esto es normal después de enviar la respuesta
                                 pass  # No imprimir ni lanzar - es comportamiento esperado
                             else:
-                                print(f"[{self.cp_id}] ⚠️  Error processing health check: {e}")
+                                print(f"[{self.cp_id}]   Error processing health check: {e}")
                         finally:
                             # Cerrar la conexión limpiamente
                             # Verificar si el socket está todavía abierto antes de cerrar
@@ -429,33 +414,25 @@ class EV_CP_Engine:
                                 pass
                             
                             # No imprimir si todo salió bien - reducir ruido en logs
-                            # print(f"[{self.cp_id}] 🏥 Health check connection closed")
+                            # print(f"[{self.cp_id}]  Health check connection closed")
                             
                     except socket.timeout:
                         continue  # Timeout normal, continuar esperando
                     except Exception as e:
                         if self.running:  # Solo mostrar error si seguimos corriendo
-                            print(f"[{self.cp_id}] ⚠️  Health check error: {e}")
+                            print(f"[{self.cp_id}]   Health check error: {e}")
                             import traceback
                             traceback.print_exc()
                 
                 server_socket.close()
-                print(f"[{self.cp_id}] 🏥 Health check server stopped")
+                print(f"[{self.cp_id}]  Health check server stopped")
                 
             except Exception as e:
-                print(f"[{self.cp_id}] ❌ Health server error: {e}")
+                print(f"[{self.cp_id}]  Health server error: {e}")
                 self.health_server_running = False
         
         self.health_server_thread = threading.Thread(target=health_server, daemon=True)
         self.health_server_thread.start()
-        
-        # Esperar un poco a que el thread arranque
-        time.sleep(0.5)
-        
-        # Verificar que el thread está corriendo
-        if not self.health_server_thread.is_alive():
-            print(f"[{self.cp_id}] ❌ ERROR: Health server thread failed to start!")
-            raise RuntimeError("Health server thread failed to start")
     
     def start_charging_simulation(self, user_id, username):
         """
@@ -499,7 +476,7 @@ class EV_CP_Engine:
                 })
             
             # Carga detenida
-            print(f"[{self.cp_id}] ⛔ Charging stopped for {username}")
+            print(f"[{self.cp_id}]  Charging stopped for {username}")
             print(f"[{self.cp_id}]    Energy: {energy_kwh:.2f} kWh | Cost: €{cost:.2f}")
         
         self.stop_charging_flag.clear()
@@ -512,17 +489,17 @@ class EV_CP_Engine:
         Thread principal que procesa eventos
         """
         if not self.consumer:
-            print(f"[{self.cp_id}] ❌ Cannot listen: Kafka consumer not initialized")
+            print(f"[{self.cp_id}]  Cannot listen: Kafka consumer not initialized")
             return
         
-        print(f"[{self.cp_id}] 👂 Listening for commands from Central...")
-        print(f"[{self.cp_id}] 📡 Topic: {KAFKA_TOPICS['central_events']}")
-        print(f"[{self.cp_id}] 🔌 Kafka broker: {self.kafka_broker}")
-        print(f"[{self.cp_id}] ⏳ Waiting for messages...")
+        print(f"[{self.cp_id}]  Listening for commands from Central...")
+        print(f"[{self.cp_id}]  Topic: {KAFKA_TOPICS['central_events']}")
+        print(f"[{self.cp_id}]  Kafka broker: {self.kafka_broker}")
+        print(f"[{self.cp_id}]  Waiting for messages...")
         
         try:
             # Verificar que el consumer está funcionando
-            print(f"[{self.cp_id}] ✅ Kafka consumer ready, entering message loop...")
+            print(f"[{self.cp_id}]  Kafka consumer ready, entering message loop...")
             for message in self.consumer:
                 if not self.running:
                     break
@@ -535,14 +512,14 @@ class EV_CP_Engine:
                 event_cp_id = event.get('cp_id')
                 
                 # Debug: Log todos los eventos recibidos
-                print(f"[{self.cp_id}] 📨 Evento recibido: type={event_type}, action={action}, cp_id={event_cp_id}")
+                print(f"[{self.cp_id}]  Evento recibido: type={event_type}, action={action}, cp_id={event_cp_id}")
                 
                 # Procesar eventos globales o específicos para este CP
                 if event_cp_id and event_cp_id != self.cp_id:
-                    print(f"[{self.cp_id}] ⏭️  Ignorando evento para otro CP: {event_cp_id}")
+                    print(f"[{self.cp_id}]   Ignorando evento para otro CP: {event_cp_id}")
                     continue  # No es para nosotros
                 
-                print(f"[{self.cp_id}] ✅ Procesando evento: {event_type or action}")
+                print(f"[{self.cp_id}]  Procesando evento: {event_type or action}")
                 
                 # ============================================================
                 # RESPUESTA DE AUTORIZACIÓN
@@ -552,7 +529,7 @@ class EV_CP_Engine:
                     response_cp_id = event.get('cp_id')
                     
                     if response_cp_id == self.cp_id and authorized:
-                        print(f"[{self.cp_id}] ✅ Authorization granted by Central")
+                        print(f"[{self.cp_id}]  Authorization granted by Central")
                         # El estado cambiará a 'charging' cuando Central publique charging_started
                 
                 # ============================================================
@@ -566,7 +543,7 @@ class EV_CP_Engine:
                         
                         with self.lock:
                             if self.status not in ['available', 'reserved']:
-                                print(f"[{self.cp_id}] ⚠️  Cannot start charging: status is {self.status}")
+                                print(f"[{self.cp_id}]   Cannot start charging: status is {self.status}")
                                 continue
                             
                             # Crear sesión
@@ -592,7 +569,7 @@ class EV_CP_Engine:
                     if target_cp == self.cp_id:
                         with self.lock:
                             if self.status != 'charging' or not self.current_session:
-                                print(f"[{self.cp_id}] ⚠️  Not charging, ignoring stop command")
+                                print(f"[{self.cp_id}]   Not charging, ignoring stop command")
                                 continue
                             
                             # Detener simulación
@@ -613,7 +590,7 @@ class EV_CP_Engine:
                         # Cambiar a available (fuera del lock para evitar deadlock)
                         self.change_status('available', 'Charging completed')
                         
-                        print(f"[{self.cp_id}] ✅ Charging session completed")
+                        print(f"[{self.cp_id}]  Charging session completed")
                         print(f"[{self.cp_id}]    User: {username}")
                         print(f"[{self.cp_id}]    Energy: {final_energy:.2f} kWh")
                         print(f"[{self.cp_id}]    Cost: €{final_cost:.2f}")
@@ -627,7 +604,7 @@ class EV_CP_Engine:
                         error_type = event.get('error_type', 'fault')
                         new_status = event.get('new_status', 'fault')
                         
-                        print(f"[{self.cp_id}] 🚨 Simulating error: {error_type}")
+                        print(f"[{self.cp_id}]  Simulating error: {error_type}")
                         
                         # Si hay carga activa, detenerla
                         with self.lock:
@@ -650,7 +627,7 @@ class EV_CP_Engine:
                 elif event_type == 'CP_ERROR_FIXED' or action == 'cp_error_fixed':
                     target_cp = event.get('cp_id')
                     if target_cp == self.cp_id:
-                        print(f"[{self.cp_id}] 🔧 Error fixed by Admin")
+                        print(f"[{self.cp_id}]  Error fixed by Admin")
                         
                         # Restaurar health status
                         self.health_status = 'OK'
@@ -665,13 +642,13 @@ class EV_CP_Engine:
                     target_cp = event.get('cp_id')
                     if target_cp == self.cp_id:
                         reason = event.get('reason', 'Stopped by admin')
-                        print(f"[{self.cp_id}] 🛑 STOP command received from Central")
+                        print(f"[{self.cp_id}]  STOP command received from Central")
                         print(f"[{self.cp_id}]    Reason: {reason}")
                         
                         # Si hay carga activa, detenerla
                         with self.lock:
                             if self.status == 'charging' and self.current_session:
-                                print(f"[{self.cp_id}] ⚠️  Interrupting active charging session")
+                                print(f"[{self.cp_id}]   Interrupting active charging session")
                                 self.stop_charging_flag.set()
                                 
                                 # Esperar a que termine
@@ -682,7 +659,7 @@ class EV_CP_Engine:
                         
                         # Cambiar a out_of_service (FUERA DE SERVICIO - ROJO)
                         self.change_status('out_of_service', reason)
-                        print(f"[{self.cp_id}] 🔴 CP is now OUT OF SERVICE")
+                        print(f"[{self.cp_id}]  CP is now OUT OF SERVICE")
                 
                 # ============================================================
                 # REQUISITO 13b: REANUDAR CP (desde Admin)
@@ -691,12 +668,12 @@ class EV_CP_Engine:
                     target_cp = event.get('cp_id')
                     if target_cp == self.cp_id:
                         reason = event.get('reason', 'Resumed by admin')
-                        print(f"[{self.cp_id}] ▶️  RESUME command received from Central")
+                        print(f"[{self.cp_id}]   RESUME command received from Central")
                         print(f"[{self.cp_id}]    Reason: {reason}")
                         
                         # Cambiar a available (ACTIVADO - VERDE)
                         self.change_status('available', reason)
-                        print(f"[{self.cp_id}] 🟢 CP is now AVAILABLE")
+                        print(f"[{self.cp_id}]  CP is now AVAILABLE")
                 
                 # ============================================================
                 # REQUISITO 7: ENCHUFAR VEHÍCULO (desde CLI remoto)
@@ -704,7 +681,7 @@ class EV_CP_Engine:
                 elif event_type == 'CP_PLUG_IN' or action == 'plug_in':
                     target_cp = event.get('cp_id')
                     if target_cp == self.cp_id:
-                        print(f"[{self.cp_id}] 🔌 PLUG_IN command received (from remote CLI)")
+                        print(f"[{self.cp_id}]  PLUG_IN command received (from remote CLI)")
                         self.simulate_plug_in()
                 
                 # ============================================================
@@ -713,18 +690,18 @@ class EV_CP_Engine:
                 elif event_type == 'CP_UNPLUG' or action == 'unplug':
                     target_cp = event.get('cp_id')
                     if target_cp == self.cp_id:
-                        print(f"[{self.cp_id}] 🔌 UNPLUG command received (from remote CLI)")
+                        print(f"[{self.cp_id}] UNPLUG command received (from remote CLI)")
                         # Ejecutar simulate_unplug que detiene la carga y envía ticket
                         result = self.simulate_unplug()
                         if result:
-                            print(f"[{self.cp_id}] ✅ Desenchufado completado - Ticket enviado al conductor")
+                            print(f"[{self.cp_id}]  Desenchufado completado - Ticket enviado al conductor")
                         else:
-                            print(f"[{self.cp_id}] ⚠️  No había sesión activa para desenchufar")
+                            print(f"[{self.cp_id}]   No había sesión activa para desenchufar")
                 
         except KeyboardInterrupt:
-            print(f"\n[{self.cp_id}] ⚠️  Interrupted by user")
+            print(f"\n[{self.cp_id}]   Interrupted by user")
         except Exception as e:
-            print(f"[{self.cp_id}] ❌ Error in command listener: {e}")
+            print(f"[{self.cp_id}]  Error in command listener: {e}")
             import traceback
             traceback.print_exc()
     
@@ -734,17 +711,17 @@ class EV_CP_Engine:
         """
         with self.lock:
             if self.status != 'reserved':
-                print(f"\n[{self.cp_id}] ⚠️  Cannot plug in: CP not reserved (status: {self.status})")
+                print(f"\n[{self.cp_id}]   Cannot plug in: CP not reserved (status: {self.status})")
                 print(f"[{self.cp_id}]    Wait for authorization from Central first")
                 return False
             
             if self.current_session:
-                print(f"\n[{self.cp_id}] ✅ Vehicle plugged in successfully")
+                print(f"\n[{self.cp_id}]  Vehicle plugged in successfully")
                 print(f"[{self.cp_id}]    User: {self.current_session.get('username')}")
                 print(f"[{self.cp_id}]    Charging will begin automatically\n")
                 return True
             else:
-                print(f"\n[{self.cp_id}] ⚠️  No active session to plug in\n")
+                print(f"\n[{self.cp_id}]   No active session to plug in\n")
                 return False
     
     def simulate_unplug(self):
@@ -754,7 +731,7 @@ class EV_CP_Engine:
         """
         with self.lock:
             if self.status != 'charging' or not self.current_session:
-                print(f"\n[{self.cp_id}] ⚠️  No active charging session to unplug\n")
+                print(f"\n[{self.cp_id}]   No active charging session to unplug\n")
                 return False
             
             # Obtener datos de la sesión antes de detenerla
@@ -796,7 +773,7 @@ class EV_CP_Engine:
         # Volver a estado disponible (fuera del lock para evitar deadlock)
         self.change_status('available', 'Vehicle unplugged - Ready for next charge')
         
-        print(f"[{self.cp_id}] ✅ Session ended - CP is available again\n")
+        print(f"[{self.cp_id}]  Session ended - CP is available again\n")
         return True
     
     def start_cli_menu(self):
@@ -838,15 +815,15 @@ class EV_CP_Engine:
                             self.simulate_unplug()
                         elif cmd == 'F':
                             # Simular fallo - reportar KO al Monitor
-                            print(f"\n[{self.cp_id}] 🚨 SIMULATING HARDWARE FAILURE")
+                            print(f"\n[{self.cp_id}]  SIMULATING HARDWARE FAILURE")
                             with self.lock:
                                 self.health_status = 'KO'
                             self.change_status('fault', 'Hardware failure simulated')
-                            print(f"[{self.cp_id}] ⚠️  Health status set to KO")
-                            print(f"[{self.cp_id}] ⚠️  Monitor will detect this and report to Central\n")
+                            print(f"[{self.cp_id}]   Health status set to KO")
+                            print(f"[{self.cp_id}]   Monitor will detect this and report to Central\n")
                         elif cmd == 'R':
                             # Recuperarse del fallo - volver a OK
-                            print(f"\n[{self.cp_id}] ✅ RECOVERING FROM FAILURE")
+                            print(f"\n[{self.cp_id}]  RECOVERING FROM FAILURE")
                             with self.lock:
                                 self.health_status = 'OK'
                                 has_session = bool(self.current_session)
@@ -859,12 +836,12 @@ class EV_CP_Engine:
                                 # Si hay sesión activa en fault, volver a charging
                                 self.change_status('charging', 'Recovered from failure')
                             
-                            print(f"[{self.cp_id}] ✅ Health status set to OK")
-                            print(f"[{self.cp_id}] ✅ CP is operational again\n")
+                            print(f"[{self.cp_id}]  Health status set to OK")
+                            print(f"[{self.cp_id}]  CP is operational again\n")
                         elif cmd == 'S':
                             with self.lock:
                                 print(f"\n{'='*60}")
-                                print(f"  📊 STATUS REPORT - {self.cp_id}")
+                                print(f"   STATUS REPORT - {self.cp_id}")
                                 print(f"{'='*60}")
                                 print(f"  Status:       {self.status}")
                                 print(f"  Health:       {self.health_status}")
@@ -909,7 +886,7 @@ class EV_CP_Engine:
     
     def shutdown(self):
         """Apaga el Engine limpiamente"""
-        print(f"\n[{self.cp_id}] 🛑 Shutting down...")
+        print(f"\n[{self.cp_id}]  Shutting down...")
         
         self.running = False
         
@@ -928,7 +905,7 @@ class EV_CP_Engine:
         if self.consumer:
             self.consumer.close()
         
-        print(f"[{self.cp_id}] ✅ Shutdown complete")
+        print(f"[{self.cp_id}]  Shutdown complete")
     
     def run(self):
         """
@@ -936,7 +913,7 @@ class EV_CP_Engine:
         """
         # 1. Conectar a Kafka
         if not self.initialize_kafka():
-            print(f"[{self.cp_id}] ❌ Cannot continue without Kafka")
+            print(f"[{self.cp_id}]  Cannot continue without Kafka")
             return
         
         # 2. Auto-registrarse en Central
@@ -945,21 +922,11 @@ class EV_CP_Engine:
         # 3. Iniciar servidor de health checks
         self.start_health_check_server()
         
-        # Esperar a que el health server arranque y verificar que está escuchando
-        max_wait = 5  # Esperar hasta 5 segundos
-        wait_interval = 0.5  # Verificar cada 0.5 segundos
-        waited = 0
-        while not self.health_server_running and waited < max_wait:
-            time.sleep(wait_interval)
-            waited += wait_interval
+        # Esperar un poco a que el health server arranque
+        time.sleep(1)
         
-        if not self.health_server_running:
-            print(f"[{self.cp_id}] ⚠️  Warning: Health server may not be ready after {waited}s")
-        else:
-            print(f"[{self.cp_id}] ✅ Health server verified running after {waited:.1f}s")
-        
-        print(f"\n[{self.cp_id}] ✅ All systems operational")
-        print(f"[{self.cp_id}] 🔋 Ready to charge vehicles\n")
+        print(f"\n[{self.cp_id}]  All systems operational")
+        print(f"[{self.cp_id}]  Ready to charge vehicles\n")
         
         # 4. Iniciar menú CLI interactivo (opcional)
         cli_thread = None
