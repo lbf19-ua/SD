@@ -652,8 +652,15 @@ async def process_kafka_event(event):
                 # Extraer ubicación: primero del data, luego del nivel raíz del evento
                 cp_location = (cp_data.get('location') or cp_data.get('localizacion') or 
                              event.get('location') or event.get('localizacion') or '')
-                if not cp_location or cp_location.strip() == '':
-                    cp_location = 'Unknown'
+                # Normalizar location - eliminar espacios y verificar que no esté vacío
+                if cp_location:
+                    cp_location = str(cp_location).strip()
+                if not cp_location or cp_location == '':
+                    # Si aún no hay location, mantener la anterior si existe, sino 'Unknown'
+                    existing_location = shared_state.cp_info.get(cp_id, {}).get('location') or shared_state.cp_info.get(cp_id, {}).get('localizacion')
+                    cp_location = existing_location if existing_location and existing_location != 'Unknown' else 'Unknown'
+                    if cp_location == 'Unknown':
+                        print(f"[MONITOR-{cp_id}] ⚠️ No se pudo extraer location del CP_INFO, usando 'Unknown'")
                 
                 # Extraer estado: primero del data, luego del nivel raíz del evento
                 cp_status = (cp_data.get('status') or cp_data.get('estado') or 
@@ -698,10 +705,15 @@ async def process_kafka_event(event):
                 
                 # ⚠️ CRÍTICO: Verificar si el estado realmente cambió antes de actualizar
                 # Esto previene bucles infinitos de actualizaciones innecesarias
+                # PERO: Si es la primera vez o los datos están vacíos/incorrectos, siempre actualizar
+                is_empty = len(shared_state.cp_info[cp_id]) == 0
                 current_stored_status = shared_state.cp_info[cp_id].get('status') or shared_state.cp_info[cp_id].get('estado')
                 current_stored_location = shared_state.cp_info[cp_id].get('location') or shared_state.cp_info[cp_id].get('localizacion')
                 current_stored_max_power = shared_state.cp_info[cp_id].get('max_power_kw') or shared_state.cp_info[cp_id].get('max_kw')
                 current_stored_tariff = shared_state.cp_info[cp_id].get('tariff_per_kwh') or shared_state.cp_info[cp_id].get('tarifa_kwh')
+                
+                # Si es la primera vez o location es 'Unknown', siempre actualizar
+                is_initial_update = is_empty or not current_stored_location or current_stored_location == 'Unknown' or current_stored_location == ''
                 
                 # Verificar si realmente hay cambios
                 status_changed = current_stored_status != cp_status
@@ -709,12 +721,14 @@ async def process_kafka_event(event):
                 max_power_changed = abs((current_stored_max_power or 0) - max_power) > 0.01
                 tariff_changed = abs((current_stored_tariff or 0) - tariff) > 0.01
                 
-                if not (status_changed or location_changed or max_power_changed or tariff_changed):
-                    # No hay cambios reales, ignorar este evento para evitar bucles
-                    print(f"[MONITOR-{cp_id}] ℹ️ CP_INFO sin cambios (status={cp_status}), omitiendo actualización para evitar bucle")
+                # Si es actualización inicial o hay cambios reales, procesar
+                if not is_initial_update and not (status_changed or location_changed or max_power_changed or tariff_changed):
+                    # No hay cambios reales y no es inicial, ignorar este evento para evitar bucles
+                    print(f"[MONITOR-{cp_id}] ℹ️ CP_INFO sin cambios (status={cp_status}, location={cp_location}), omitiendo actualización para evitar bucle")
                     return
                 
                 print(f"[MONITOR-{cp_id}] ✅ Procesando CP_INFO: status={cp_status} (cambió: {status_changed}), location={cp_location}, max_power={max_power}, tariff={tariff}")
+                print(f"[MONITOR-{cp_id}] 📍 Datos extraídos del evento - cp_data.location: {cp_data.get('location')}, cp_data.localizacion: {cp_data.get('localizacion')}, event.location: {event.get('location')}, event.localizacion: {event.get('localizacion')}")
                 
                 # Guardar en shared_state.cp_info solo si hay cambios
                 shared_state.cp_info[cp_id].update({
@@ -728,7 +742,7 @@ async def process_kafka_event(event):
                     'status': cp_status,
                     'estado': cp_status
                 })
-                print(f"[MONITOR-{cp_id}] 💾 CP_INFO actualizado - status: {cp_status}")
+                print(f"[MONITOR-{cp_id}] 💾 CP_INFO actualizado en shared_state - location: '{cp_location}', status: {cp_status}")
                 # No es necesario broadcast inmediato - el broadcast periódico lo hará cada 3 segundos
                 # await broadcast_monitor_data()  # Comentado para evitar saturación
             elif ('status' in event or 'estado' in event) and event_type != 'MONITOR_AUTH' and event_type != 'CP_REGISTRATION':

@@ -1531,7 +1531,19 @@ async def broadcast_kafka_event(event):
             try:
                 cp = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
                 data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
-                localizacion = data.get('localizacion') or data.get('location') or 'Desconocido'
+                # Extraer localización con múltiples fallbacks para asegurar que se obtiene correctamente
+                localizacion = (data.get('localizacion') or data.get('location') or 
+                              event.get('localizacion') or event.get('location') or 'Desconocido')
+                # Normalizar location - eliminar espacios
+                if localizacion:
+                    localizacion = str(localizacion).strip()
+                if not localizacion or localizacion == '':
+                    # Si aún no hay location, intentar obtenerla de la BD si el CP ya existe
+                    if cp:
+                        localizacion = cp.get('localizacion') or cp.get('location') or 'Desconocido'
+                    if not localizacion or localizacion.strip() == '':
+                        localizacion = 'Desconocido'
+                
                 max_kw = data.get('max_kw') or data.get('max_power_kw') or 22.0
                 tarifa_kwh = data.get('tarifa_kwh') or data.get('tariff_per_kwh') or data.get('price_eur_kwh') or 0.30
                 estado = 'available'
@@ -1555,7 +1567,9 @@ async def broadcast_kafka_event(event):
                 # Confirmar existencia y enviar CP_INFO solo una vez
                 cp_after = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
                 if cp_after:
-                    print(f"[CENTRAL] ✅ CP registrado/actualizado: {cp_after['cp_id']} en {cp_after.get('location','')} estado={cp_after.get('estado','')}" )
+                    stored_location = cp_after.get('localizacion') or cp_after.get('location') or 'Desconocido'
+                    stored_status = cp_after.get('estado') or cp_after.get('status') or 'offline'
+                    print(f"[CENTRAL] ✅ CP registrado/actualizado: {cp_after['cp_id']} en '{stored_location}' estado={stored_status}" )
                     # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR solo si es nuevo registro o cambió realmente
                     # ⚠️ IMPORTANTE: Evitar publicar CP_INFO innecesariamente para prevenir bucles
                     previous_status = cp_existing.get('estado') if cp_existing else None
