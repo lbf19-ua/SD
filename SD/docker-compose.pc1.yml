@@ -1,0 +1,84 @@
+# ============================================================================
+# Docker Compose para PC1 - Driver Interface
+# ============================================================================
+# EJECUTAR SOLO EN PC1 (Driver)
+#
+# Este PC ejecuta:
+#   - EV_Driver WebSocket Dashboard (puerto 8001)
+#
+# REQUISITOS PREVIOS (DESPLIEGUE EN 3 PCs):
+#   1. PC2 debe estar ejecutando Kafka y EV_Central
+#   2. Obtener la IP real de PC2 (ejecutar en PC2):
+#      Windows: ipconfig | findstr IPv4
+#      Linux:   hostname -I
+#      Ejemplo: 192.168.1.100
+#   3. Editar network_config.py con la IP real:
+#      PC2_IP = "192.168.1.100"  # IP real de PC2
+#   4. OBLIGATORIO: Crear archivo .env en PC1 con:
+#      PC2_IP=192.168.1.100          # IP real de PC2
+#      KAFKA_BROKER=192.168.1.100:9092  # IP real de PC2:9092
+#      KAFKA_PORT=9092
+#   5. Copiar ev_charging.db desde PC2
+#   6. Abrir puerto del firewall (PowerShell como admin):
+#      New-NetFirewallRule -DisplayName "EV Driver" -Direction Inbound -LocalPort 8001 -Protocol TCP -Action Allow
+#
+# INICIAR:
+#   docker-compose -f docker-compose.pc1.yml up -d
+#
+# VER LOGS:
+#   docker-compose -f docker-compose.pc1.yml logs -f
+#
+# DETENER:
+#   docker-compose -f docker-compose.pc1.yml down
+# ============================================================================
+
+services:
+  # ==========================================================================
+  # EV Driver (WebSocket + Kafka)
+  # ==========================================================================
+  ev-driver:
+    build:
+      context: .
+      dockerfile: EV_Driver/Dockerfile
+    container_name: ev-driver
+    ports:
+      - "8001:8001"
+    environment:
+  # ATENCION: Lee desde .env (OBLIGATORIO para despliegue en 3 PCs)
+      - KAFKA_BROKER=${KAFKA_BROKER}  # Debe estar en .env: IP_PC2:9092
+      - CENTRAL_IP=${PC2_IP}  # Debe estar en .env: IP real de PC2
+      - DRIVER_PORT=8001
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+      - ./EV_Driver/dashboard.html:/app/dashboard.html
+      - ./EV_Driver/servicios.txt:/app/servicios.txt
+    networks:
+      - ev-network
+    restart: unless-stopped
+
+# ==============================================================================
+# Redes
+# ==============================================================================
+networks:
+  ev-network:
+    driver: bridge
+    name: ev-network
+
+# ==============================================================================
+# VERIFICACIÓN DE CONECTIVIDAD
+# ==============================================================================
+# Antes de iniciar, verificar conexión con PC2:
+#   ping 192.168.1.235
+#   Test-NetConnection 192.168.1.235 -Port 9092  # Kafka
+#   Test-NetConnection 192.168.1.235 -Port 9999  # EV_Central
+# ==============================================================================
+
+# ==============================================================================
+# ACCESO AL DASHBOARD
+# ==============================================================================
+# Driver Dashboard:    http://192.168.1.100:8001 (cambiar por IP real de PC1)
+# ==============================================================================

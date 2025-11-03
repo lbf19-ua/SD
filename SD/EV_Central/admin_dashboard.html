@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EV Central - Admin Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: rgba(255,255,255,0.8);
+            margin-bottom: 30px;
+        }
+
+        .connection-status {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .connection-status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .connection-status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .stat-card .icon {
+            font-size: 3em;
+            margin-bottom: 10px;
+        }
+
+        .stat-card .label {
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 5px;
+        }
+
+        .stat-card .value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #1e3c72;
+        }
+
+        .data-table {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .data-table h2 {
+            color: #1e3c72;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        table thead {
+            background: #f8f9fa;
+        }
+
+        table th {
+            padding: 15px;
+            text-align: left;
+            color: #666;
+            font-weight: 600;
+            border-bottom: 2px solid #dee2e6;
+        }
+
+        table td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        table tbody tr:hover {
+            background: #f8f9fa;
+        }
+
+        .status-badge {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }
+
+        .status-available {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-charging {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .status-offline {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .status-active {
+            background: #cce5ff;
+            color: #004085;
+        }
+
+        .grid-2col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 968px) {
+            .grid-2col {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.green {
+            background: #28a745;
+        }
+
+        .status-dot.red {
+            background: #dc3545;
+        }
+
+        .status-dot.yellow {
+            background: #ffc107;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .event-stream {
+            background: #1e1e1e;
+            color: #00ff00;
+            border-radius: 10px;
+            padding: 20px;
+            font-family: 'Courier New', monospace;
+            max-height: 300px;
+            overflow-y: auto;
+            font-size: 0.9em;
+        }
+
+        .event-stream .event-line {
+            margin-bottom: 8px;
+        }
+
+        .event-stream .timestamp {
+            color: #888;
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+        }
+
+        .refresh-indicator {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: white;
+            padding: 10px 20px;
+            border-radius: 25px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            display: none;
+        }
+
+        .refresh-indicator.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="refresh-indicator" id="refreshIndicator">
+        <span class="status-dot green"></span> Actualizando...
+    </div>
+
+    <div class="container">
+        <h1>EV Central - Admin Dashboard</h1>
+        <p class="subtitle">Panel de Control del Sistema de Carga</p>
+
+        <!-- Connection Status -->
+        <div id="connectionStatus" class="connection-status disconnected">
+            <span class="status-dot red"></span>
+            <span>Desconectado del servidor</span>
+        </div>
+
+        <!-- Statistics Cards -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="label">Usuarios Registrados</div>
+                <div class="value" id="totalUsers">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Puntos de Carga</div>
+                <div class="value" id="totalCPs">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Sesiones Activas</div>
+                <div class="value" id="activeSessions">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Ingresos Hoy</div>
+                <div class="value" id="todayRevenue">€0</div>
+            </div>
+        </div>
+
+        <!-- Two Column Layout -->
+        <div class="grid-2col">
+            <!-- Active Sessions Table -->
+            <div class="data-table">
+                <h2>Sesiones Activas</h2>
+                <table id="sessionsTable">
+                    <thead>
+                        <tr>
+                            <th>Usuario</th>
+                            <th>Punto de Carga</th>
+                            <th>Energía (kWh)</th>
+                            <th>Costo</th>
+                            <th>Estado</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sessionsBody">
+                        <tr>
+                            <td colspan="5" class="empty-state">No hay sesiones activas</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Charging Points Status -->
+            <div class="data-table">
+                <h2>Estado de Puntos de Carga</h2>
+                <table id="cpTable">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Ubicación</th>
+                            <th>Potencia</th>
+                            <th>Estado</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cpBody">
+                        <tr>
+                            <td colspan="4" class="empty-state">Cargando datos...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recent Users -->
+        <div class="data-table">
+            <h2>Usuarios Conectados Recientemente</h2>
+            <table id="usersTable">
+                <thead>
+                    <tr>
+                        <th>Usuario</th>
+                        <th>Email</th>
+                        <th>Balance</th>
+                        <th>Rol</th>
+                        <th>Estado</th>
+                    </tr>
+                </thead>
+                <tbody id="usersBody">
+                    <tr>
+                        <td colspan="5" class="empty-state">No hay datos de usuarios</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Event Stream -->
+        <div class="data-table">
+            <h2>Stream de Eventos en Tiempo Real</h2>
+            <div class="event-stream" id="eventStream">
+                <div class="event-line">Sistema iniciado. Esperando eventos...</div>
+            </div>
+        </div>
+
+        <!-- Admin Error Simulation Panel -->
+        <div class="data-table" style="background: #fff3cd; border: 2px solid #ffc107;">
+            <h2 style="color: #856404;">Panel de Simulación de Errores</h2>
+            <p style="color: #856404; margin-bottom: 15px;">Simular errores en puntos de carga para pruebas</p>
+            
+            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                <select id="cpSelect" style="flex: 1; padding: 10px; border: 1px solid #ffc107; border-radius: 5px; font-size: 14px;">
+                    <option value="">Seleccionar punto de carga...</option>
+                </select>
+                <select id="errorTypeSelect" style="flex: 1; padding: 10px; border: 1px solid #ffc107; border-radius: 5px; font-size: 14px;">
+                    <option value="fault">Averiado</option>
+                    <option value="out_of_service">Parado (Out of Order)</option>
+                    <option value="offline">Desconectado</option>
+                </select>
+            </div>
+            
+            <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+                <button onclick="simulateError()" style="flex: 1; padding: 12px; background: #dc3545; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
+                    Simular Error
+                </button>
+                <button onclick="fixError()" style="flex: 1; padding: 12px; background: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
+                    Corregir Error
+                </button>
+                <button onclick="refreshCPs()" style="padding: 12px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
+                    🔄 Actualizar
+                </button>
+            </div>
+            
+            <div id="cpStatusList" style="max-height: 400px; overflow-y: auto;"></div>
+        </div>
+
+        <!-- Panel de Registro de Punto de Carga -->
+        <div class="data-table" style="background: #d1ecf1; border: 2px solid #17a2b8;">
+            <h2 style="color: #0c5460;">➕ Registrar Nuevo Punto de Carga</h2>
+            <p style="color: #0c5460; margin-bottom: 15px;">Dar de alta un nuevo punto de carga en el sistema</p>
+            
+            <form id="registerCpForm" onsubmit="registerNewCP(event)" style="display: grid; gap: 15px;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                    <div>
+                        <label for="newCpId" style="display: block; margin-bottom: 5px; color: #0c5460; font-weight: bold;">ID del Punto de Carga *</label>
+                        <input type="text" id="newCpId" required placeholder="Ej: CP_011" 
+                            style="width: 100%; padding: 10px; border: 1px solid #17a2b8; border-radius: 5px; font-size: 14px;">
+                    </div>
+                    <div>
+                        <label for="newCpLocation" style="display: block; margin-bottom: 5px; color: #0c5460; font-weight: bold;">Localización *</label>
+                        <input type="text" id="newCpLocation" required placeholder="Ej: Parking Principal Edificio A" 
+                            style="width: 100%; padding: 10px; border: 1px solid #17a2b8; border-radius: 5px; font-size: 14px;">
+                    </div>
+                </div>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                    <div>
+                        <label for="newCpPower" style="display: block; margin-bottom: 5px; color: #0c5460; font-weight: bold;">Potencia Máxima (kW)</label>
+                        <input type="number" id="newCpPower" step="0.1" min="0" value="22.0" 
+                            style="width: 100%; padding: 10px; border: 1px solid #17a2b8; border-radius: 5px; font-size: 14px;">
+                    </div>
+                    <div>
+                        <label for="newCpTariff" style="display: block; margin-bottom: 5px; color: #0c5460; font-weight: bold;">Tarifa (€/kWh)</label>
+                        <input type="number" id="newCpTariff" step="0.01" min="0" value="0.30" 
+                            style="width: 100%; padding: 10px; border: 1px solid #17a2b8; border-radius: 5px; font-size: 14px;">
+                    </div>
+                </div>
+                
+                <div style="display: flex; gap: 10px;">
+                    <button type="submit" style="flex: 1; padding: 12px; background: #17a2b8; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
+                        Registrar Punto de Carga
+                    </button>
+                    <button type="button" onclick="clearRegisterForm()" style="padding: 12px 20px; background: #6c757d; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
+                        Limpiar
+                    </button>
+                </div>
+                
+                <div id="registerMessage" style="padding: 10px; border-radius: 5px; display: none; font-weight: bold;"></div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let dashboardData = {
+            users: [],
+            charging_points: [],
+            active_sessions: [],
+            stats: {
+                total_users: 0,
+                total_cps: 0,
+                active_sessions: 0,
+                today_revenue: 0
+            }
+        };
+
+        function connectWebSocket() {
+            // Usar hostname actual (funciona tanto en local como desde otros PCs)
+            const hostname = window.location.hostname;
+            const wsUrl = `ws://${hostname}:8002/ws`;
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                updateConnectionStatus(true);
+                // Request initial data
+                ws.send(JSON.stringify({ type: 'get_dashboard_data' }));
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleServerMessage(data);
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                updateConnectionStatus(false);
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        function updateConnectionStatus(connected) {
+            const statusDiv = document.getElementById('connectionStatus');
+            const dot = statusDiv.querySelector('.status-dot');
+            const text = statusDiv.querySelector('span:last-child');
+
+            if (connected) {
+                statusDiv.className = 'connection-status connected';
+                dot.className = 'status-dot green';
+                text.textContent = 'Conectado al servidor central';
+            } else {
+                statusDiv.className = 'connection-status disconnected';
+                dot.className = 'status-dot red';
+                text.textContent = 'Desconectado del servidor';
+            }
+        }
+
+        function handleServerMessage(data) {
+            console.log('Received:', data);
+
+            switch(data.type) {
+                case 'dashboard_data':
+                case 'initial_data':  // Manejar también el mensaje inicial
+                    dashboardData = data.data;
+                    console.log('[FRONTEND] Dashboard data recibido:', dashboardData);
+                    console.log('[FRONTEND] Sesiones activas:', dashboardData.active_sessions);
+                    console.log('[FRONTEND] Numero de sesiones:', dashboardData.active_sessions?.length || 0);
+                    updateDashboard();
+                    // Actualizar lista de CPs en panel de simulación
+                    if (dashboardData.charging_points) {
+                        updateCPList(dashboardData.charging_points);
+                    }
+                    break;
+
+                case 'all_cps':
+                    // Respuesta de get_all_cps
+                    if (data.charging_points) {
+                        updateCPList(data.charging_points);
+                    }
+                    break;
+
+                case 'error_simulated':
+                    addEventLog(`ADVERTENCIA: Error simulado: ${data.message}`);
+                    showRefreshIndicator();
+                    break;
+
+                case 'error_fixed':
+                    addEventLog(`OK: Error corregido: ${data.message}`);
+                    showRefreshIndicator();
+                    break;
+
+                case 'session_update':
+                    addEventLog(`Actualizacion de sesion: ${data.username} - ${data.energy.toFixed(2)} kWh`);
+                    showRefreshIndicator();
+                    break;
+
+                case 'session_started':
+                    addEventLog(`Nueva sesion iniciada: ${data.username} en ${data.cp_id}`);
+                    showRefreshIndicator();
+                    break;
+
+                case 'session_ended':
+                    addEventLog(`Sesion finalizada: ${data.username} - Total: €${data.cost.toFixed(2)}`);
+                    showRefreshIndicator();
+                    break;
+
+                case 'cp_status_change':
+                    addEventLog(`Estado CP ${data.cp_id}: ${data.status}`);
+                    showRefreshIndicator();
+                    break;
+
+                case 'cp_error':
+                    addEventLog(`ADVERTENCIA: ${data.message}`);
+                    showRefreshIndicator();
+                    break;
+
+                case 'cp_fixed':
+                    addEventLog(`OK: ${data.message}`);
+                    showRefreshIndicator();
+                    break;
+
+                case 'register_cp_success':
+                    addEventLog(`OK: ${data.message}`);
+                    showRegisterMessage(data.message, 'success');
+                    clearRegisterForm();
+                    showRefreshIndicator();
+                    break;
+
+                case 'register_cp_error':
+                    addEventLog(`ERROR al registrar CP: ${data.message}`);
+                    showRegisterMessage(data.message, 'error');
+                    break;
+
+                case 'user_login':
+                    addEventLog(`Usuario conectado: ${data.username}`);
+                    break;
+
+                case 'kafka_event':
+                    // Evento genérico de Kafka - mostrar en el stream
+                    const icon = {
+                        'DRIVER_LOGIN': '👤',
+                        'CHARGING_REQUEST': 'SOLIC',
+                        'CHARGING_STARTED': 'CARGA',
+                        'CHARGING_STOPPED': 'PARADA',
+                        'CP_STATUS_UPDATE': 'ESTADO'
+                    }[data.event_type];
+                    addEventLog(`${icon} ${data.message}`);
+                    break;
+
+                case 'system_event':
+                    addEventLog(`${data.message}`);
+                    break;
+            }
+        }
+
+        function updateDashboard() {
+            // Update statistics
+            document.getElementById('totalUsers').textContent = dashboardData.stats.total_users;
+            document.getElementById('totalCPs').textContent = dashboardData.stats.total_cps;
+            document.getElementById('activeSessions').textContent = dashboardData.stats.active_sessions;
+            document.getElementById('todayRevenue').textContent = `€${dashboardData.stats.today_revenue.toFixed(2)}`;
+
+            // Update charging points table
+            updateCPTable();
+
+            // Update active sessions table
+            updateSessionsTable();
+
+            // Update users table
+            updateUsersTable();
+        }
+
+        function normalizeStatus(status) {
+            switch ((status || '').toLowerCase()) {
+                case 'unavailable':
+                    return 'offline';
+                case 'error':
+                    return 'fault';
+                case 'maintenance':
+                case 'out_of_order':
+                    return 'out_of_service';
+                default:
+                    return status;
+            }
+        }
+
+        function updateCPTable() {
+            const tbody = document.getElementById('cpBody');
+            tbody.innerHTML = '';
+
+            if (dashboardData.charging_points.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No hay puntos de carga registrados</td></tr>';
+                return;
+            }
+
+            dashboardData.charging_points.forEach(cp => {
+                const row = document.createElement('tr');
+                
+                // Estados según especificación página 4:
+                // Verde: disponible/suministrando
+                // Gris: desconectado
+                // Rojo: averiado
+                // Naranja: fuera de servicio
+                
+                let statusClass = 'status-available';
+                let statusText = 'Disponible';
+                let dotColor = 'green';
+
+                const normStatus = normalizeStatus(cp.status);
+                if (normStatus === 'available' || normStatus === 'charging') {
+                    statusClass = normStatus === 'charging' ? 'status-charging' : 'status-available';
+                    statusText = normStatus === 'charging' ? 'Suministrando' : 'Disponible';
+                    dotColor = 'green';
+                } else if (normStatus === 'offline') {
+                    statusClass = 'status-offline';
+                    statusText = 'Desconectado';
+                    dotColor = 'gray';
+                } else if (normStatus === 'fault') {
+                    statusClass = 'status-fault';
+                    statusText = 'Averiado';
+                    dotColor = 'red';
+                } else if (normStatus === 'out_of_service') {
+                    statusClass = 'status-out_of_service';
+                    statusText = 'Fuera de Servicio';
+                    dotColor = 'orange';
+                } else {
+                    // Estado desconocido
+                    statusClass = 'status-offline';
+                    statusText = normStatus || 'Desconocido';
+                    dotColor = 'gray';
+                }
+
+                row.innerHTML = `
+                    <td><strong>${cp.cp_id}</strong></td>
+                    <td>${cp.location}</td>
+                    <td>${cp.power_output} kW</td>
+                    <td><span class="status-badge ${statusClass}">
+                        <span class="status-dot ${dotColor}"></span>${statusText}
+                    </span></td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        function updateSessionsTable() {
+            const tbody = document.getElementById('sessionsBody');
+            tbody.innerHTML = '';
+
+            console.log('[FRONTEND]  updateSessionsTable - dashboardData:', dashboardData);
+            console.log('[FRONTEND]  updateSessionsTable - active_sessions:', dashboardData?.active_sessions);
+
+            if (!dashboardData || !dashboardData.active_sessions || dashboardData.active_sessions.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No hay sesiones activas</td></tr>';
+                console.log('[FRONTEND] No hay sesiones activas para mostrar');
+                return;
+            }
+
+            console.log(`[FRONTEND] Mostrando ${dashboardData.active_sessions.length} sesion(es) activa(s)`);
+            dashboardData.active_sessions.forEach(session => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td><strong>${session.username}</strong></td>
+                    <td>${session.cp_id}</td>
+                    <td>${session.energy.toFixed(2)} kWh</td>
+                    <td>€${session.cost.toFixed(2)}</td>
+                    <td><span class="status-badge status-active">
+                        <span class="status-dot green"></span>Activa
+                    </span></td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        function updateUsersTable() {
+            const tbody = document.getElementById('usersBody');
+            tbody.innerHTML = '';
+
+            if (dashboardData.users.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No hay datos de usuarios</td></tr>';
+                return;
+            }
+
+            dashboardData.users.slice(0, 10).forEach(user => {
+                const row = document.createElement('tr');
+                const statusClass = user.is_active ? 'status-active' : 'status-available';
+                const statusText = user.is_active ? 'Activo' : 'Inactivo';
+
+                row.innerHTML = `
+                    <td><strong>${user.username}</strong></td>
+                    <td>${user.email}</td>
+                    <td>€${user.balance.toFixed(2)}</td>
+                    <td>${user.role}</td>
+                    <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        function addEventLog(message) {
+            const streamDiv = document.getElementById('eventStream');
+            const now = new Date().toLocaleTimeString();
+            const eventLine = document.createElement('div');
+            eventLine.className = 'event-line';
+            eventLine.innerHTML = `<span class="timestamp">[${now}]</span> ${message}`;
+            streamDiv.insertBefore(eventLine, streamDiv.firstChild);
+
+            // Keep only last 50 events
+            while (streamDiv.children.length > 50) {
+                streamDiv.removeChild(streamDiv.lastChild);
+            }
+        }
+
+        function showRefreshIndicator() {
+            const indicator = document.getElementById('refreshIndicator');
+            indicator.classList.add('active');
+            setTimeout(() => {
+                indicator.classList.remove('active');
+            }, 2000);
+
+            // Request updated data
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'get_dashboard_data' }));
+            }
+        }
+
+        // Auto-refresh every 5 seconds
+        setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'get_dashboard_data' }));
+            }
+        }, 5000);
+
+        // Admin Error Simulation Functions
+        function simulateError() {
+            const cpId = document.getElementById('cpSelect').value;
+            const errorType = document.getElementById('errorTypeSelect').value;
+            
+            if (!cpId) {
+                alert('Por favor selecciona un punto de carga');
+                return;
+            }
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'simulate_error',
+                    cp_id: cpId,
+                    error_type: errorType
+                }));
+                addEventLog(`Simulando error "${errorType}" en ${cpId}`);
+            }
+        }
+        
+        function fixError() {
+            const cpId = document.getElementById('cpSelect').value;
+            
+            if (!cpId) {
+                alert('Por favor selecciona un punto de carga');
+                return;
+            }
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'fix_error',
+                    cp_id: cpId
+                }));
+                addEventLog(`Corrigiendo error en ${cpId}`);
+            }
+        }
+        
+        function refreshCPs() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'get_all_cps'
+                }));
+                addEventLog(`Actualizando lista de puntos de carga`);
+            }
+        }
+        
+        function normalizeStatus(status) {
+            switch ((status || '').toLowerCase()) {
+                case 'unavailable':
+                    return 'offline';
+                case 'error':
+                    return 'fault';
+                case 'maintenance':
+                case 'out_of_order':
+                    return 'out_of_service';
+                default:
+                    return status;
+            }
+        }
+
+        function updateCPList(chargingPoints) {
+            const select = document.getElementById('cpSelect');
+            const statusList = document.getElementById('cpStatusList');
+            
+            // Actualizar select
+            const currentValue = select.value;
+            select.innerHTML = '<option value="">Seleccionar punto de carga...</option>';
+            chargingPoints.forEach(cp => {
+                const option = document.createElement('option');
+                option.value = cp.cp_id;
+                option.textContent = `${cp.cp_id} - ${cp.location}`;
+                select.appendChild(option);
+            });
+            select.value = currentValue;
+            
+            // Actualizar lista de estado
+            statusList.innerHTML = '';
+            chargingPoints.forEach(cp => {
+                const normStatus = normalizeStatus(cp.status);
+                const statusColor = {
+                    'available': '#28a745',
+                    'charging': '#28a745',
+                    'fault': '#dc3545',
+                    'out_of_service': '#fd7e14',
+                    'offline': '#6c757d'
+                }[normStatus] || '#6c757d';
+                
+                const statusText = {
+                    'available': 'Disponible',
+                    'charging': 'Suministrando',
+                    'fault': 'Averiado',
+                    'out_of_service': 'Fuera de Servicio',
+                    'offline': 'Desconectado'
+                }[normStatus] || normStatus;
+                
+                const cpItem = document.createElement('div');
+                cpItem.style.cssText = `
+                    padding: 10px;
+                    margin-bottom: 8px;
+                    background: white;
+                    border-radius: 5px;
+                    border-left: 4px solid ${statusColor};
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                `;
+                cpItem.innerHTML = `
+                    <div>
+                        <strong>${cp.cp_id}</strong> - ${cp.location}<br>
+                        <small style="color: #666;">${cp.max_power_kw} kW | €${cp.tariff_per_kwh}/kWh</small>
+                    </div>
+                    <div style="font-weight: bold; color: ${statusColor};">${statusText}</div>
+                `;
+                statusList.appendChild(cpItem);
+            });
+        }
+
+        function registerNewCP(event) {
+            event.preventDefault();
+            
+            const cpId = document.getElementById('newCpId').value.trim();
+            const location = document.getElementById('newCpLocation').value.trim();
+            const maxPowerKw = parseFloat(document.getElementById('newCpPower').value);
+            const tariffPerKwh = parseFloat(document.getElementById('newCpTariff').value);
+            
+            // Validación básica
+            if (!cpId || !location) {
+                showRegisterMessage('Por favor completa todos los campos requeridos', 'error');
+                return;
+            }
+            
+            if (maxPowerKw <= 0 || tariffPerKwh <= 0) {
+                showRegisterMessage('La potencia y la tarifa deben ser valores positivos', 'error');
+                return;
+            }
+            
+            // Enviar solicitud al servidor
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'register_cp',
+                    cp_data: {
+                        cp_id: cpId,
+                        location: location,
+                        max_power_kw: maxPowerKw,
+                        tariff_per_kwh: tariffPerKwh
+                    }
+                }));
+                
+                showRegisterMessage('Registrando punto de carga...', 'info');
+                addEventLog(`Solicitando registro de ${cpId} en ${location}`);
+            } else {
+                showRegisterMessage('No hay conexión con el servidor', 'error');
+            }
+        }
+        
+        function clearRegisterForm() {
+            document.getElementById('registerCpForm').reset();
+            document.getElementById('newCpPower').value = '22.0';
+            document.getElementById('newCpTariff').value = '0.30';
+            hideRegisterMessage();
+        }
+        
+        function showRegisterMessage(message, type) {
+            const msgDiv = document.getElementById('registerMessage');
+            msgDiv.textContent = message;
+            msgDiv.style.display = 'block';
+            
+            // Colores según el tipo de mensaje
+            if (type === 'success') {
+                msgDiv.style.background = '#d4edda';
+                msgDiv.style.color = '#155724';
+                msgDiv.style.border = '1px solid #c3e6cb';
+            } else if (type === 'error') {
+                msgDiv.style.background = '#f8d7da';
+                msgDiv.style.color = '#721c24';
+                msgDiv.style.border = '1px solid #f5c6cb';
+            } else if (type === 'info') {
+                msgDiv.style.background = '#d1ecf1';
+                msgDiv.style.color = '#0c5460';
+                msgDiv.style.border = '1px solid #bee5eb';
+            }
+        }
+        
+        function hideRegisterMessage() {
+            document.getElementById('registerMessage').style.display = 'none';
+        }
+
+        // Initialize
+        connectWebSocket();
+    </script>
+</body>
+</html>
