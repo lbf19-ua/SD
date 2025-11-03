@@ -138,7 +138,7 @@ class EV_CP_Engine:
                     group_id=unique_group_id,  # Group ID único por inicio
                     request_timeout_ms=30000,
                     session_timeout_ms=10000
-                    # ⚠️ NO usar consumer_timeout_ms - esto causaba que el loop terminara después de 5s sin mensajes
+                    # NO usar consumer_timeout_ms - esto causaba que el loop terminara después de 5s sin mensajes
                     # y hacía que el Engine se reiniciara en Docker, causando re-registros infinitos
                 )
                 
@@ -236,7 +236,7 @@ class EV_CP_Engine:
             if reason:
                 print(f"[{self.cp_id}]    Reason: {reason}")
         
-        # ⚠️ PROTECCIÓN: Si acabamos de registrarnos y el estado es 'available', no publicar cp_status_change
+        # PROTECCIÓN: Si acabamos de registrarnos y el estado es 'available', no publicar cp_status_change
         # porque CP_REGISTRATION ya incluye el estado 'available'
         if new_status == 'available' and hasattr(self, '_registered') and self._registered:
             # Verificar si el registro fue reciente (menos de 5 segundos)
@@ -281,7 +281,7 @@ class EV_CP_Engine:
                 self.status = 'available'
                 print(f"[{self.cp_id}]  Status change: {self.previous_status} → available")
         
-        # ⚠️ REGISTRAR timestamp del registro para evitar cp_status_change subsecuentes
+        # REGISTRAR timestamp del registro para evitar cp_status_change subsecuentes
         self._registration_time = time.time()
         
         # Enviar UN SOLO evento CP_REGISTRATION con toda la información incluido el estado
@@ -444,7 +444,7 @@ class EV_CP_Engine:
             username: Nombre del usuario
         """
         def charging_loop():
-            print(f"[{self.cp_id}] ⚡ Starting charging simulation for user: {username}")
+            print(f"[{self.cp_id}] Starting charging simulation for user: {username}")
             
             start_time = time.time()
             energy_kwh = 0.0
@@ -466,7 +466,7 @@ class EV_CP_Engine:
                         self.current_session['energy_kwh'] = energy_kwh
                         self.current_session['cost'] = cost
                 
-                # ⏱️ REQUISITO 8: Publicar actualización CADA SEGUNDO
+                # REQUISITO 8: Publicar actualización CADA SEGUNDO
                 self.publish_event('charging_progress', {
                     'action': 'charging_progress',
                     'username': username,
@@ -703,7 +703,7 @@ class EV_CP_Engine:
                                 print(f"[{self.cp_id}]   No había sesión activa para desenchufar")
                     
                 except Exception as event_error:
-                    print(f"[{self.cp_id}]  ⚠️ Error procesando evento {event_type or action}: {event_error}")
+                    print(f"[{self.cp_id}]  Error procesando evento {event_type or action}: {event_error}")
                     import traceback
                     traceback.print_exc()
                     # Continuar con el siguiente mensaje en lugar de terminar
@@ -712,12 +712,12 @@ class EV_CP_Engine:
         except KeyboardInterrupt:
             print(f"\n[{self.cp_id}]   Interrupted by user")
         except Exception as e:
-            print(f"[{self.cp_id}]  ⚠️ Error crítico en command listener (reintentando en 5s): {e}")
+            print(f"[{self.cp_id}]  Error crítico en command listener (reintentando en 5s): {e}")
             import traceback
             traceback.print_exc()
-            # ⚠️ CRÍTICO: Si hay un error crítico, esperar un poco y reintentar en lugar de terminar
+            # CRÍTICO: Si hay un error crítico, esperar un poco y reintentar en lugar de terminar
             # Esto previene que Docker reinicie el contenedor constantemente
-            print(f"[{self.cp_id}]  ⏳ Esperando 5 segundos antes de reintentar...")
+            print(f"[{self.cp_id}]  Esperando 5 segundos antes de reintentar...")
             time.sleep(5)
             # Reintentar el loop si el Engine sigue corriendo
             if self.running:
@@ -915,14 +915,14 @@ class EV_CP_Engine:
             if self.charging_thread and self.charging_thread.is_alive():
                 self.charging_thread.join(timeout=2)
         
-        # ⚠️ PROTECCIÓN: Solo cambiar a 'offline' y publicar evento si NO acabamos de registrarnos
+        # PROTECCIÓN: Solo cambiar a 'offline' y publicar evento si NO acabamos de registrarnos
         # Esto previene que reinicios rápidos del Engine después del registro causen eventos 'offline'
         # que sobrescriban el estado 'available' en Central
         if hasattr(self, '_registered') and self._registered:
             if hasattr(self, '_registration_time'):
                 time_since_reg = time.time() - self._registration_time
                 if time_since_reg < 30.0:  # Si se registró hace menos de 30 segundos
-                    print(f"[{self.cp_id}]  ⚠️ Shutdown dentro de {time_since_reg:.1f}s después del registro - NO enviando cp_status_change a 'offline'")
+                    print(f"[{self.cp_id}]  Shutdown dentro de {time_since_reg:.1f}s después del registro - NO enviando cp_status_change a 'offline'")
                     print(f"[{self.cp_id}]    Esto previene que Central marque el CP como 'offline' después de registrarse correctamente")
                     # Solo cambiar el estado interno, NO publicar evento
                     with self.lock:
@@ -946,12 +946,12 @@ class EV_CP_Engine:
         """
         # 1. Conectar a Kafka - reintentar indefinidamente si falla (para Docker)
         # Esto evita que el contenedor se reinicie constantemente
-        print(f"[{self.cp_id}] ⏳ Esperando conexión a Kafka...")
+        print(f"[{self.cp_id}] Esperando conexión a Kafka...")
         while not self.initialize_kafka():
-            print(f"[{self.cp_id}] ⚠️ No se pudo conectar a Kafka, reintentando en 10 segundos...")
+            print(f"[{self.cp_id}] No se pudo conectar a Kafka, reintentando en 10 segundos...")
             print(f"[{self.cp_id}]    Verificar que Kafka está corriendo en {self.kafka_broker}")
             time.sleep(10)  # Esperar 10 segundos antes de reintentar
-        print(f"[{self.cp_id}] ✅ Kafka conectado exitosamente")
+        print(f"[{self.cp_id}] Kafka conectado exitosamente")
         
         # 2. Auto-registrarse en Central
         self.auto_register()
