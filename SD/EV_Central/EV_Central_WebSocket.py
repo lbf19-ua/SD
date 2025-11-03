@@ -1946,6 +1946,20 @@ async def broadcast_kafka_event(event):
                         print(f"[CENTRAL] ℹ️ Ignorando cp_status_change a 'available' para CP {cp_id} - ya registrado recientemente ({time_since_reg:.1f}s)")
                         return
             
+            # ⚠️ PROTECCIÓN CRÍTICA: Ignorar cp_status_change a 'offline' si el CP se acaba de registrar como 'available'
+            # Esto previene que mensajes antiguos de Kafka o reinicios de Engine causen que los CPs vuelvan a 'offline'
+            # después de haberse registrado correctamente
+            if status == 'offline' and current_status == 'available':
+                if not hasattr(shared_state, 'recent_registrations'):
+                    shared_state.recent_registrations = {}
+                recent_reg_time = shared_state.recent_registrations.get(cp_id, 0)
+                if recent_reg_time > 0:
+                    time_since_reg = time.time() - recent_reg_time
+                    if time_since_reg < 30.0:  # Si se registró hace menos de 30 segundos, ignorar cambio a 'offline'
+                        print(f"[CENTRAL] ⚠️ Ignorando cp_status_change a 'offline' para CP {cp_id} - acaba de registrarse como 'available' hace {time_since_reg:.1f}s")
+                        print(f"[CENTRAL]    Esto previene que mensajes antiguos de Kafka o reinicios causen desconexión incorrecta")
+                        return
+            
             # Solo si el estado cambió realmente, actualizar BD
             print(f"[CENTRAL] 🔄 Sincronizando estado BD: {cp_id} → {current_status} → {status} (cambio reportado por Engine)")
             db.update_charging_point_status(cp_id, status)

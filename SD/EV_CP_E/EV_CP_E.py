@@ -896,7 +896,21 @@ class EV_CP_Engine:
             if self.charging_thread and self.charging_thread.is_alive():
                 self.charging_thread.join(timeout=2)
         
-        # Cambiar estado a offline antes de apagar
+        # ⚠️ PROTECCIÓN: Solo cambiar a 'offline' y publicar evento si NO acabamos de registrarnos
+        # Esto previene que reinicios rápidos del Engine después del registro causen eventos 'offline'
+        # que sobrescriban el estado 'available' en Central
+        if hasattr(self, '_registered') and self._registered:
+            if hasattr(self, '_registration_time'):
+                time_since_reg = time.time() - self._registration_time
+                if time_since_reg < 30.0:  # Si se registró hace menos de 30 segundos
+                    print(f"[{self.cp_id}]  ⚠️ Shutdown dentro de {time_since_reg:.1f}s después del registro - NO enviando cp_status_change a 'offline'")
+                    print(f"[{self.cp_id}]    Esto previene que Central marque el CP como 'offline' después de registrarse correctamente")
+                    # Solo cambiar el estado interno, NO publicar evento
+                    with self.lock:
+                        self.status = 'offline'
+                    return
+        
+        # Cambiar estado a offline antes de apagar (solo si pasó suficiente tiempo desde el registro)
         self.change_status('offline', 'Engine shutting down')
         
         # Cerrar Kafka
