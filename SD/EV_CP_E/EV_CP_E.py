@@ -911,10 +911,14 @@ class EV_CP_Engine:
         """
         Método principal - inicia todos los servicios
         """
-        # 1. Conectar a Kafka
-        if not self.initialize_kafka():
-            print(f"[{self.cp_id}]  Cannot continue without Kafka")
-            return
+        # 1. Conectar a Kafka - reintentar indefinidamente si falla (para Docker)
+        # Esto evita que el contenedor se reinicie constantemente
+        print(f"[{self.cp_id}] ⏳ Esperando conexión a Kafka...")
+        while not self.initialize_kafka():
+            print(f"[{self.cp_id}] ⚠️ No se pudo conectar a Kafka, reintentando en 10 segundos...")
+            print(f"[{self.cp_id}]    Verificar que Kafka está corriendo en {self.kafka_broker}")
+            time.sleep(10)  # Esperar 10 segundos antes de reintentar
+        print(f"[{self.cp_id}] ✅ Kafka conectado exitosamente")
         
         # 2. Auto-registrarse en Central
         self.auto_register()

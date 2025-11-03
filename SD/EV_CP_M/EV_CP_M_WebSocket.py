@@ -86,8 +86,13 @@ class EV_MonitorWS:
         print(f"  Dashboard Port:  {SERVER_PORT}")
         print(f"{'='*80}\n")
         
-        self.initialize_kafka()
-        self.authenticate_with_central()  # Solo se ejecuta una vez
+        # Inicializar Kafka - si falla, se reintentará en authenticate_with_central
+        # No fallar si Kafka no está disponible inicialmente (para Docker)
+        if not self.initialize_kafka():
+            print(f"[MONITOR-{self.cp_id}] ⚠️ Kafka no disponible inicialmente, se reintentará durante autenticación")
+        
+        # Autenticación se reintentará si Kafka no está disponible
+        self.authenticate_with_central()  # Solo se ejecuta una vez si tiene éxito
         self.initialize_metrics()
 
     def initialize_kafka(self, max_retries=10):
@@ -109,7 +114,7 @@ class EV_MonitorWS:
                 # El flush() verificará que el producer funciona sin necesidad de enviar un mensaje
                 # Si hay un error, se lanzará una excepción en el siguiente send real
                 print(f"[MONITOR-{self.cp_id}] ✅ Kafka producer initialized and connected")
-                return
+                return True
             except Exception as e:
                 print(f"[MONITOR-{self.cp_id}] ⚠️  Attempt {attempt+1}/{max_retries} - Kafka connection failed: {e}")
                 if attempt < max_retries - 1:
@@ -119,6 +124,7 @@ class EV_MonitorWS:
                     print(f"[MONITOR-{self.cp_id}] ❌ Failed to connect to Kafka after {max_retries} attempts")
                     print(f"[MONITOR-{self.cp_id}] 💡 Tip: Verificar que Kafka está corriendo y accesible en {self.kafka_broker}")
                     self.producer = None
+                    return False
 
     def authenticate_with_central(self):
         """
@@ -137,18 +143,15 @@ class EV_MonitorWS:
         
         print(f"[MONITOR-{self.cp_id}] 🔐 Authenticating with Central...")
         
-        # Esperar a que Kafka esté disponible si es necesario
+        # Esperar a que Kafka esté disponible - reintentar indefinidamente si falla (para Docker)
+        # Esto evita que el contenedor se reinicie constantemente
         if not self.producer:
-            print(f"[MONITOR-{self.cp_id}] ⚠️  Kafka producer not initialized, retrying...")
-            self.initialize_kafka(max_retries=5)
-        
-        if not self.producer:
-            print(f"[MONITOR-{self.cp_id}] ❌ Cannot authenticate: Kafka not available")
-            print(f"[MONITOR-{self.cp_id}] 💡 Verificar:")
-            print(f"[MONITOR-{self.cp_id}]    1. Kafka está corriendo en {self.kafka_broker}")
-            print(f"[MONITOR-{self.cp_id}]    2. Red Docker correcta (ev-network)")
-            print(f"[MONITOR-{self.cp_id}]    3. Nombre 'broker' se resuelve correctamente")
-            return
+            print(f"[MONITOR-{self.cp_id}] ⚠️  Kafka producer not initialized, waiting for Kafka...")
+            while not self.initialize_kafka(max_retries=5):
+                print(f"[MONITOR-{self.cp_id}] ⚠️ No se pudo conectar a Kafka, reintentando en 10 segundos...")
+                print(f"[MONITOR-{self.cp_id}]    Verificar que Kafka está corriendo en {self.kafka_broker}")
+                time.sleep(10)  # Esperar 10 segundos antes de reintentar
+            print(f"[MONITOR-{self.cp_id}] ✅ Kafka conectado, procediendo con autenticación")
         
         try:
             # Marcar como autenticado ANTES de enviar (para evitar re-envío si falla el envío)

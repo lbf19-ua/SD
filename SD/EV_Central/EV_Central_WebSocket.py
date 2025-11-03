@@ -6,7 +6,7 @@ import threading
 import time
 import argparse
 from pathlib import Path
-from datetime import datetim
+from datetime import datetime, timedelta
 
 # WebSocket y HTTP server
 try:
@@ -1569,14 +1569,18 @@ async def broadcast_kafka_event(event):
                     max_kw_changed = abs((previous_max_kw or 0) - max_kw) > 0.01 if previous_max_kw else True
                     tariff_changed = abs((previous_tariff or 0) - tarifa_kwh) > 0.01 if previous_tariff else True
                     
-                    if not cp_existing:
-                        # Es un nuevo CP, publicar información al Monitor
-                        print(f"[CENTRAL] 🆕 Nuevo CP {cp_id} registrado, enviando CP_INFO al Monitor")
-                        central_instance.publish_cp_info_to_monitor(cp_id, force=True)
-                    elif status_changed or location_changed or max_kw_changed or tariff_changed:
-                        # Hay cambios reales, publicar
-                        print(f"[CENTRAL] 🔄 CP {cp_id} cambió (status: {previous_status}→{estado}), enviando CP_INFO al Monitor")
-                        central_instance.publish_cp_info_to_monitor(cp_id)
+                    # Simplificado: Si es nuevo CP o cambió de 'offline' a 'available', siempre enviar CP_INFO al Monitor
+                    # Esto asegura que cuando Central marca todos como 'offline' y luego los Engines se registran,
+                    # el Monitor recibe la información correcta
+                    if not cp_existing or status_changed or location_changed or max_kw_changed or tariff_changed:
+                        # Nuevo CP o hay cambios (especialmente offline→available), publicar información al Monitor
+                        if not cp_existing:
+                            print(f"[CENTRAL] 🆕 Nuevo CP {cp_id} registrado, enviando CP_INFO al Monitor")
+                        elif status_changed and previous_status == 'offline' and estado == 'available':
+                            print(f"[CENTRAL] ✅ CP {cp_id} se registró (offline→available), enviando CP_INFO al Monitor")
+                        else:
+                            print(f"[CENTRAL] 🔄 CP {cp_id} cambió, enviando CP_INFO al Monitor")
+                        central_instance.publish_cp_info_to_monitor(cp_id, force=(status_changed and previous_status == 'offline'))
                     else:
                         # Mismo estado y datos, no publicar (evitar bucles)
                         print(f"[CENTRAL] ℹ️ CP {cp_id} ya registrado sin cambios (status={estado}), omitiendo CP_INFO para evitar bucle")
@@ -2237,11 +2241,13 @@ async def main():
             if hasattr(db, 'terminate_all_active_sessions'):
                 sess, cps = db.terminate_all_active_sessions(mark_cp_offline=True)
                 print(f"[CENTRAL] � Inicio: sesiones activas terminadas: {sess}, CPs marcados offline: {cps}")
-            # 2) ⚠️ NO marcar TODOS los CPs como offline por defecto (COMENTADO para evitar bucles)
-            # Los Engines mantendrán su estado actual y solo se re-registrarán si detectan que Central no los conoce
-            # updated = db.set_all_cps_status_offline() if hasattr(db, 'set_all_cps_status_offline') else 0  # COMENTADO: evitar bucles
-            # updated = 0  # No marcar CPs como offline (COMENTADO completamente)
-            print(f"[CENTRAL] ℹ️ Central iniciado - CPs existentes mantendrán su estado actual para evitar desconexiones masivas")
+            # 2) Marcar TODOS los CPs como 'offline' al iniciar Central
+            # Esto asegura que Central no asume que los CPs están conectados hasta que se registren
+            updated = db.set_all_cps_status_offline() if hasattr(db, 'set_all_cps_status_offline') else 0
+            if updated > 0:
+                print(f"[CENTRAL] ✅ {updated} CP(s) marcado(s) como 'offline' al inicio - esperando registro de Engines")
+            else:
+                print(f"[CENTRAL] ℹ️ No hay CPs en BD o ya están marcados como offline")
         except Exception as e:
             print(f"[CENTRAL] ⚠️ No se pudo limpiar estado al inicio: {e}")
     

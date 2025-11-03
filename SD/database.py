@@ -446,19 +446,20 @@ def update_charging_point_status(cp_id: str, new_status: str) -> bool:
 
 # Actualiza todos los puntos de carga a 'offline'
 def set_all_cps_status_offline() -> int:
-    """Marca TODOS los puntos de carga como 'offline'. Retorna filas afectadas."""
+    """Marca TODOS los puntos de carga registrados como 'offline'. Retorna filas afectadas."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
         # Resetear TODOS los estados a offline al reiniciar Central
+        # Marcar todas las CPs registradas (sin filtrar por active, para incluir todas)
         cursor.execute("""
             UPDATE charging_points
             SET estado = 'offline'
-            WHERE active = 1 
         """)
         conn.commit()
-        print(f"[DB] OK Reset {cursor.rowcount} CPs to offline")
-        return cursor.rowcount
+        affected = cursor.rowcount
+        print(f"[DB] OK Reset {affected} CP(s) registrado(s) to offline")
+        return affected
     except Exception as e:
         print(f"[DB] ERROR setting all CPs offline: {e}")
         conn.rollback()
