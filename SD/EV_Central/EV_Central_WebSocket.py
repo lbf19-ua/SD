@@ -99,6 +99,8 @@ class SharedState:
         self.connected_clients = set()
         self.lock = threading.Lock()
         self.central_start_time = time.time()  # Timestamp de inicio de Central
+        self.processed_event_ids = set()  # IDs de eventos ya procesados (para deduplicación)
+        self.processed_lock = threading.Lock()  # Lock para processed_event_ids
 
 shared_state = SharedState()
 
@@ -1091,9 +1093,19 @@ async def kafka_listener():
                             if et == 'MONITOR_AUTH' or event.get('action', '') == 'authenticate':
                                 cp_id = event.get('cp_id')
                                 if cp_id:
-                                    print(f"[CENTRAL] 🔐 Monitor autenticado para CP {cp_id}, enviando información del CP...")
-                                    # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR (información inicial)
-                                    central_instance.publish_cp_info_to_monitor(cp_id)
+                                    print(f"[CENTRAL] 🔐 Monitor autenticado para CP {cp_id}")
+                                    # ⚠️ IMPORTANTE: Solo enviar CP_INFO si el CP está registrado y tiene información válida
+                                    # Si el CP no está registrado, esperar a que el Engine envíe CP_REGISTRATION
+                                    try:
+                                        cp = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+                                        if cp and cp.get('estado'):
+                                            # CP está registrado, enviar información
+                                            print(f"[CENTRAL] 📡 Enviando información del CP {cp_id} al Monitor...")
+                                            central_instance.publish_cp_info_to_monitor(cp_id)
+                                        else:
+                                            print(f"[CENTRAL] ℹ️ CP {cp_id} aún no está registrado, Monitor recibirá CP_INFO cuando Engine se registre")
+                                    except Exception as e:
+                                        print(f"[CENTRAL] ⚠️ Error verificando CP {cp_id} para Monitor: {e}")
                             
                             # ====================================================================
                             # REQUISITO b) Autorización de suministros - procesar aquí (no en broadcast)
@@ -1327,6 +1339,20 @@ async def broadcast_kafka_event(event):
     if event.get('source') == 'CENTRAL':
         return  # Central no debe procesar sus propios eventos
     
+    # ⚠️ DEDUPLICACIÓN: Ignorar eventos ya procesados por message_id
+    message_id = event.get('message_id')
+    if message_id:
+        with shared_state.processed_lock:
+            if message_id in shared_state.processed_event_ids:
+                print(f"[CENTRAL] ⚠️ Evento ya procesado (message_id={message_id[:8]}...), ignorando: {event.get('event_type', 'UNKNOWN')}")
+                return
+            # Marcar como procesado ANTES de procesarlo (para evitar procesamiento paralelo)
+            shared_state.processed_event_ids.add(message_id)
+            # Limpiar IDs antiguos para evitar memoria infinita (mantener últimos 1000)
+            if len(shared_state.processed_event_ids) > 1000:
+                # Mantener solo los últimos 500 (limpiar los más antiguos)
+                shared_state.processed_event_ids = set(list(shared_state.processed_event_ids)[-500:])
+    
     # ⚠️ PROTECCIÓN: Ignorar eventos muy antiguos que pueden ser de antes del reinicio
     current_time = time.time()
     central_start_time = shared_state.central_start_time
@@ -1344,6 +1370,10 @@ async def broadcast_kafka_event(event):
             # Esto asegura que solo procesamos eventos recientes (después del reinicio)
             if age_seconds > 30:  # 30 segundos
                 print(f"[CENTRAL] ⚠️ Ignorando evento antiguo ({age_seconds:.0f}s de antigüedad, probablemente de antes del reinicio): {event.get('event_type', 'UNKNOWN')}")
+                # Quitar del set si ya lo añadimos
+                if message_id:
+                    with shared_state.processed_lock:
+                        shared_state.processed_event_ids.discard(message_id)
                 return
             
             # Si Central acaba de iniciar (menos de 30 segundos), ignorar eventos que sean más antiguos que el inicio
@@ -1351,17 +1381,29 @@ async def broadcast_kafka_event(event):
                 # El evento debe ser más reciente que el inicio de Central
                 if event_time < central_start_time:
                     print(f"[CENTRAL] ⚠️ Ignorando evento anterior al reinicio (Central inició hace {time_since_start:.1f}s): {event.get('event_type', 'UNKNOWN')}")
+                    # Quitar del set si ya lo añadimos
+                    if message_id:
+                        with shared_state.processed_lock:
+                            shared_state.processed_event_ids.discard(message_id)
                     return
         except (ValueError, TypeError):
             # Si el timestamp no es válido, verificar si Central acaba de iniciar
             if time_since_start < 30:
                 # Si Central acaba de iniciar y el evento no tiene timestamp válido, es probablemente antiguo
                 print(f"[CENTRAL] ⚠️ Ignorando evento sin timestamp válido (Central inició hace {time_since_start:.1f}s): {event.get('event_type', 'UNKNOWN')}")
+                # Quitar del set si ya lo añadimos
+                if message_id:
+                    with shared_state.processed_lock:
+                        shared_state.processed_event_ids.discard(message_id)
                 return
     else:
         # Si el evento no tiene timestamp, y Central acaba de iniciar, ignorarlo
         if time_since_start < 30:
             print(f"[CENTRAL] ⚠️ Ignorando evento sin timestamp (Central inició hace {time_since_start:.1f}s): {event.get('event_type', 'UNKNOWN')}")
+            # Quitar del set si ya lo añadimos
+            if message_id:
+                with shared_state.processed_lock:
+                    shared_state.processed_event_ids.discard(message_id)
             return
     
     # ⚠️ PROTECCIÓN: Evitar procesar el mismo evento múltiples veces si ya se procesó
@@ -1426,9 +1468,15 @@ async def broadcast_kafka_event(event):
                 if cp_after:
                     print(f"[CENTRAL] ✅ CP registrado/actualizado: {cp_after['cp_id']} en {cp_after.get('location','')} estado={cp_after.get('estado','')}" )
                     # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR solo si es nuevo registro o cambió algo
-                    # (cp_status_change ya enviará CP_INFO si cambia el estado)
-                    if not cp_existing or cp_existing.get('estado') != estado:
-                        central_instance.publish_cp_info_to_monitor(cp_id)
+                    # ⚠️ IMPORTANTE: No publicar CP_INFO aquí si el CP ya estaba 'available'
+                    # porque cp_status_change lo hará después y evitaríamos duplicados
+                    previous_status = cp_existing.get('estado') if cp_existing else None
+                    if not cp_existing or previous_status != estado:
+                        # Solo publicar si es nuevo CP o si cambió de estado (no de 'available' a 'available')
+                        if previous_status != 'available':  # Solo publicar si no venía de 'available'
+                            central_instance.publish_cp_info_to_monitor(cp_id)
+                        else:
+                            print(f"[CENTRAL] ℹ️ CP {cp_id} ya estaba 'available', cp_status_change publicará CP_INFO si es necesario")
                     else:
                         print(f"[CENTRAL] ℹ️ CP {cp_id} ya registrado con mismo estado, omitiendo CP_INFO")
                 else:
@@ -1731,6 +1779,11 @@ async def broadcast_kafka_event(event):
                 # Solo actualizar si el estado cambió realmente
                 cp_current = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
                 current_status = cp_current.get('estado') or cp_current.get('status') if cp_current else None
+                
+                # ⚠️ IMPORTANTE: Solo procesar si el estado realmente cambió
+                if current_status == status:
+                    print(f"[CENTRAL] ℹ️ Estado {status} para CP {cp_id} ya está actualizado, no se envía CP_INFO")
+                    return  # No hacer nada si el estado ya es el mismo
                 
                 if current_status != status:
                     db.update_charging_point_status(cp_id, status)

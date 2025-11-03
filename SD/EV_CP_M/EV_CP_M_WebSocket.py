@@ -75,6 +75,7 @@ class EV_MonitorWS:
         self.engine_port = engine_port
         self.kafka_broker = kafka_broker
         self.producer = None
+        self._authenticated = False  # Flag para evitar re-autenticación
         
         print(f"\n{'='*80}")
         print(f"  🏥 EV MONITOR - Supervising {self.cp_id}")
@@ -86,7 +87,7 @@ class EV_MonitorWS:
         print(f"{'='*80}\n")
         
         self.initialize_kafka()
-        self.authenticate_with_central()
+        self.authenticate_with_central()  # Solo se ejecuta una vez
         self.initialize_metrics()
 
     def initialize_kafka(self, max_retries=10):
@@ -124,7 +125,14 @@ class EV_MonitorWS:
         
         Requisito del PDF: Al arrancar, el Monitor debe conectarse a Central
         para autenticarse y validar que está operativo.
+        
+        Solo se autentica UNA VEZ al iniciar.
         """
+        # ⚠️ PROTECCIÓN: Solo autenticarse una vez
+        if hasattr(self, '_authenticated') and self._authenticated:
+            print(f"[MONITOR-{self.cp_id}] ⚠️ Already authenticated, skipping")
+            return
+        
         print(f"[MONITOR-{self.cp_id}] 🔐 Authenticating with Central...")
         
         # Esperar a que Kafka esté disponible si es necesario
@@ -141,7 +149,10 @@ class EV_MonitorWS:
             return
         
         try:
-            # Enviar mensaje de autenticación a Central vía Kafka
+            # Marcar como autenticado ANTES de enviar (para evitar re-envío si falla el envío)
+            self._authenticated = True
+            
+            # Enviar mensaje de autenticación a Central vía Kafka (solo una vez)
             auth_event = {
                 'message_id': generate_message_id(),
                 'event_type': 'MONITOR_AUTH',
@@ -165,6 +176,8 @@ class EV_MonitorWS:
             print(f"[MONITOR-{self.cp_id}] ❌ Authentication failed: {e}")
             import traceback
             traceback.print_exc()
+            # Si falla, permitir reintentar
+            self._authenticated = False
 
     def initialize_metrics(self):
         """Inicializa métricas simuladas para el CP monitoreado"""
@@ -465,13 +478,16 @@ async def kafka_listener():
                 print(f"[KAFKA] 🔗 Using broker: {kafka_broker_to_use}")
                 # Usar cp_id de monitor_instance si está disponible, sino usar MONITORED_CP_ID global
                 cp_id_for_group = monitor_instance.cp_id if monitor_instance else MONITORED_CP_ID or 'default'
+                # ⚠️ IMPORTANTE: Usar group_id único y auto_offset_reset='latest' para evitar leer mensajes antiguos
+                import time as time_module
+                unique_group_id = f'ev_monitor_ws_group_{cp_id_for_group}_{int(time_module.time())}'
                 # Consumer sin api_version explícito (auto-detección)
                 consumer = KafkaConsumer(
                     *KAFKA_TOPICS_CONSUME,
                     bootstrap_servers=kafka_broker_to_use,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                    auto_offset_reset='earliest',
-                    group_id=f'ev_monitor_ws_group_{cp_id_for_group}',
+                    auto_offset_reset='latest',  # Solo leer mensajes nuevos después de conectarse
+                    group_id=unique_group_id,  # Group ID único por inicio
                     request_timeout_ms=30000,
                     session_timeout_ms=10000,
                     consumer_timeout_ms=5000
@@ -792,6 +808,9 @@ async def tcp_health_check():
     ============================================================================
     """
     consecutive_failures = 0
+    last_reported_failure = None  # Timestamp del último fallo reportado
+    startup_grace_period = 30  # Periodo de gracia al inicio (30 segundos) para dar tiempo al Engine
+    monitor_start_time = time.time()
     
     # Inicializar tracking
     shared_state.health_status = {
@@ -827,23 +846,40 @@ async def tcp_health_check():
                         'last_check': time.time(),
                         'last_status': 'TIMEOUT'
                     }
-                    if consecutive_failures >= 3:
-                        print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Connection timeouts, reporting to Central")
-                        if monitor_instance.producer:
-                            event = {
-                                'message_id': generate_message_id(),
-                                'event_type': 'ENGINE_FAILURE',
-                                'action': 'report_engine_failure',
-                                'cp_id': monitor_instance.cp_id,
-                                'failure_type': 'timeout',
-                                'consecutive_failures': consecutive_failures,
-                                'timestamp': current_timestamp(),
-                                'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
-                            }
-                            monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
-                            monitor_instance.producer.flush()
+                if consecutive_failures >= 3:
+                    # ⚠️ PROTECCIÓN: No reportar fallos durante el período de gracia inicial (Engine puede estar iniciando)
+                    time_since_start = time.time() - monitor_start_time
+                    if time_since_start < startup_grace_period:
+                        print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
+                        consecutive_failures = 0  # Reset durante grace period
+                        await asyncio.sleep(1)
+                        continue
+                    
+                    # ⚠️ PROTECCIÓN: No reportar el mismo fallo repetidamente (evitar bucle)
+                    current_time = time.time()
+                    if last_reported_failure and (current_time - last_reported_failure) < 60:  # No reportar más de una vez por minuto
+                        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
+                        consecutive_failures = 0  # Reset para evitar spam
+                        await asyncio.sleep(5)  # Esperar más tiempo antes de reintentar
+                        continue
+                    
+                    print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Connection timeouts, reporting to Central")
+                    if monitor_instance.producer:
+                        event = {
+                            'message_id': generate_message_id(),
+                            'event_type': 'ENGINE_FAILURE',
+                            'action': 'report_engine_failure',
+                            'cp_id': monitor_instance.cp_id,
+                            'failure_type': 'timeout',
+                            'consecutive_failures': consecutive_failures,
+                            'timestamp': current_timestamp(),
+                            'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                        }
+                        monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                        monitor_instance.producer.flush()
+                        last_reported_failure = current_time  # Marcar que se reportó
                         consecutive_failures = 0
-                    await asyncio.sleep(1)  # Esperar antes de reintentar
+                    await asyncio.sleep(5)  # Esperar más tiempo antes de reintentar
                     continue  # Volver al inicio del loop
                 
                 # ✅ Enviar "STATUS?"
@@ -960,6 +996,14 @@ async def tcp_health_check():
                     
                     # ✅ Si 3+ fallos consecutivos, reportar a Central
                     if consecutive_failures >= 3:
+                        # ⚠️ PROTECCIÓN: No reportar el mismo fallo repetidamente (evitar bucle)
+                        current_time = time.time()
+                        if last_reported_failure and (current_time - last_reported_failure) < 60:  # No reportar más de una vez por minuto
+                            print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
+                            consecutive_failures = 0  # Reset para evitar spam
+                            await asyncio.sleep(2)
+                            continue
+                        
                         print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 3+ consecutive failures, reporting to Central")
                         
                         # Añadir alerta crítica
@@ -984,6 +1028,7 @@ async def tcp_health_check():
                             monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
                             monitor_instance.producer.flush()
                             print(f"[MONITOR-{monitor_instance.cp_id}] 📤 ENGINE_FAILURE reported to Central")
+                            last_reported_failure = current_time  # Marcar que se reportó
                         
                         # Reset contador después de reportar
                         consecutive_failures = 0
@@ -1008,6 +1053,22 @@ async def tcp_health_check():
                 }
                 
                 if consecutive_failures >= 3:
+                    # ⚠️ PROTECCIÓN: No reportar fallos durante el período de gracia inicial
+                    time_since_start = time.time() - monitor_start_time
+                    if time_since_start < startup_grace_period:
+                        print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
+                        consecutive_failures = 0  # Reset durante grace period
+                        await asyncio.sleep(2)
+                        continue
+                    
+                    # ⚠️ PROTECCIÓN: No reportar el mismo fallo repetidamente (evitar bucle)
+                    current_time = time.time()
+                    if last_reported_failure and (current_time - last_reported_failure) < 60:  # No reportar más de una vez por minuto
+                        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
+                        consecutive_failures = 0  # Reset para evitar spam
+                        await asyncio.sleep(5)
+                        continue
+                    
                     print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Connection timeouts, reporting to Central")
                     
                     alert = monitor_instance.add_alert(
@@ -1029,6 +1090,7 @@ async def tcp_health_check():
                         }
                         monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
                         monitor_instance.producer.flush()
+                        last_reported_failure = current_time  # Marcar que se reportó
                     
                     consecutive_failures = 0
             
@@ -1044,6 +1106,22 @@ async def tcp_health_check():
                 }
                 
                 if consecutive_failures >= 3:
+                    # ⚠️ PROTECCIÓN: No reportar fallos durante el período de gracia inicial (Engine puede estar iniciando)
+                    time_since_start = time.time() - monitor_start_time
+                    if time_since_start < startup_grace_period:
+                        print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
+                        consecutive_failures = 0  # Reset durante grace period
+                        await asyncio.sleep(2)
+                        continue
+                    
+                    # ⚠️ PROTECCIÓN: No reportar el mismo fallo repetidamente (evitar bucle)
+                    current_time = time.time()
+                    if last_reported_failure and (current_time - last_reported_failure) < 60:  # No reportar más de una vez por minuto
+                        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Engine offline ya reportado recientemente, esperando antes de reportar de nuevo")
+                        consecutive_failures = 0  # Reset para evitar spam
+                        await asyncio.sleep(5)
+                        continue
+                    
                     print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Engine offline, reporting to Central")
                     
                     alert = monitor_instance.add_alert(
@@ -1064,6 +1142,7 @@ async def tcp_health_check():
                         }
                         monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
                         monitor_instance.producer.flush()
+                        last_reported_failure = current_time  # Marcar que se reportó
                     
                     consecutive_failures = 0
                     
