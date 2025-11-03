@@ -178,7 +178,23 @@ class EV_CentralWS:
         Publica información del CP al Monitor cuando hay cambios.
         Central es el único que puede acceder a la BD, por lo que envía
         esta información actualizada al Monitor.
+        
+        ⚠️ PROTECCIÓN: Limita la frecuencia de publicación para evitar bucles.
         """
+        # ⚠️ PROTECCIÓN: Throttling - no publicar más de una vez por segundo por CP
+        if not hasattr(self, '_last_cp_info_publish'):
+            self._last_cp_info_publish = {}
+        
+        current_time = time.time()
+        last_publish = self._last_cp_info_publish.get(cp_id, 0)
+        time_since_last = current_time - last_publish
+        
+        if time_since_last < 1.0:  # Mínimo 1 segundo entre publicaciones del mismo CP
+            print(f"[CENTRAL] ⚠️ Throttling: CP_INFO para {cp_id} ya se publicó hace {time_since_last:.2f}s, omitiendo para evitar bucle")
+            return
+        
+        self._last_cp_info_publish[cp_id] = current_time
+        
         try:
             # Obtener CP desde BD (la función se llama get_charging_point, no get_charging_point_by_id)
             cp_row = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
@@ -962,12 +978,18 @@ async def kafka_listener():
         while retry_count < max_retries:
             try:
                 print(f"[KAFKA] 🔄 Attempt {retry_count + 1}/{max_retries} to connect to Kafka at {KAFKA_BROKER}")
+                
+                # ⚠️ CRÍTICO: Usar group_id único en cada inicio para evitar leer mensajes antiguos
+                # Esto asegura que Central solo procese mensajes nuevos después de conectarse
+                unique_group_id = f'ev_central_ws_group_{int(time.time())}'
+                print(f"[KAFKA] 📝 Using unique group_id: {unique_group_id} (ignores old messages)")
+                
                 consumer = KafkaConsumer(
                     *KAFKA_TOPICS_CONSUME,
                     bootstrap_servers=KAFKA_BROKER,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                    auto_offset_reset='latest',  # Solo mensajes nuevos (después de conectarse)
-                    group_id='ev_central_ws_group',
+                    auto_offset_reset='latest',  # ⚠️ CRÍTICO: Solo mensajes nuevos (después de conectarse)
+                    group_id=unique_group_id,  # ⚠️ CRÍTICO: Group ID único por inicio (no reutiliza offsets anteriores)
                     enable_auto_commit=True,  # Guardar progreso
                     # NO especificar api_version - dejar que detecte automáticamente la versión del broker
                     request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms
@@ -979,51 +1001,21 @@ async def kafka_listener():
                 # Test connection
                 consumer.topics()
                 print(f"[KAFKA] ✅ Connected to Kafka successfully!")
+                print(f"[KAFKA] 🔒 Consumer configured to ONLY read NEW messages (latest offset)")
                 
-                # ⚠️ REQUISITO: Al reiniciar Central, resetear offsets para leer solo mensajes nuevos
-                # Esto asegura que no procese eventos antiguos que quedaron en Kafka
-                try:
-                    print(f"[KAFKA] 🔄 Resetting consumer group offsets to 'latest' to ignore old messages...")
-                    # Forzar que el consumidor empiece desde el offset más reciente
-                    # Cerrando y recreando el consumer con el mismo group_id pero con seek al final
-                    consumer.close()
-                    # Crear consumer temporal solo para resetear offsets
-                    from kafka.admin import KafkaAdminClient
-                    from kafka.admin.new_partitions import NewPartitions
-                    from kafka.coordinator.assignors.range import RangePartitionAssignor
-                    try:
-                        admin = KafkaAdminClient(bootstrap_servers=KAFKA_BROKER)
-                        # No hay API directa para resetear offsets en kafka-python fácilmente
-                        # En su lugar, usamos un group_id único en cada inicio para evitar leer mensajes antiguos
-                        import uuid
-                        unique_group_id = f'ev_central_ws_group_{int(time.time())}'
-                        print(f"[KAFKA] 📝 Using unique group_id: {unique_group_id} (ignores old messages)")
-                        admin.close()
-                    except:
-                        unique_group_id = f'ev_central_ws_group_{int(time.time())}'
-                        print(f"[KAFKA] 📝 Using unique group_id: {unique_group_id} (ignores old messages)")
-                    
-                    # Recrear consumer con group_id único para ignorar mensajes antiguos
-                    consumer = KafkaConsumer(
-                        *KAFKA_TOPICS_CONSUME,
-                        bootstrap_servers=KAFKA_BROKER,
-                        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                        auto_offset_reset='latest',  # Solo mensajes nuevos
-                        group_id=unique_group_id,  # Group ID único por inicio
-                        enable_auto_commit=True,
-                        request_timeout_ms=30000,
-                        session_timeout_ms=10000,
-                        max_poll_records=100,
-                        fetch_min_bytes=1,
-                        fetch_max_wait_ms=500
-                    )
-                    consumer.topics()
-                except Exception as offset_error:
-                    print(f"[KAFKA] ⚠️ Could not reset offsets, continuing with default: {offset_error}")
-                    # Continuar con el consumer original si falla el reset
-                
-                print(f"[KAFKA] 📡 Consumer started, listening to {KAFKA_TOPICS_CONSUME}")
+                # Exit del try correcto, break para salir del while
                 break
+            except Exception as offset_error:
+                print(f"[KAFKA] ⚠️ Error connecting to Kafka: {offset_error}")
+                import traceback
+                traceback.print_exc()
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"[KAFKA] ❌ Failed to connect after {max_retries} attempts")
+                    return
             except Exception as e:
                 retry_count += 1
                 if consumer:
@@ -1766,31 +1758,44 @@ async def broadcast_kafka_event(event):
                 print(f"[CENTRAL] ⚠️ Error actualizando progreso de sesión: {e}")
         
         elif action in ['cp_status_change']:
+            """
+            ⚠️ IMPORTANTE: Este evento viene del Engine que YA cambió su estado.
+            Central solo debe ACTUALIZAR la BD para reflejar el cambio, NO causar más cambios.
+            No debe publicar eventos que puedan causar que el Engine vuelva a cambiar estado.
+            """
             status = event.get('status')
-            if status:
-                # Asegurar CP existe antes de actualizar
-                try:
-                    if not db.get_charging_point_by_id(cp_id) and hasattr(db, 'register_or_update_charging_point'):
-                        db.register_or_update_charging_point(cp_id, 'Desconocido', max_kw=22.0, tarifa_kwh=0.30, estado=status)
-                        print(f"[CENTRAL] 🆕 CP auto-creado en cp_status_change: {cp_id}")
-                except Exception as e:
-                    print(f"[CENTRAL] ⚠️ Error asegurando CP en cp_status_change: {e}")
-                
-                # Solo actualizar si el estado cambió realmente
-                cp_current = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
-                current_status = cp_current.get('estado') or cp_current.get('status') if cp_current else None
-                
-                # ⚠️ IMPORTANTE: Solo procesar si el estado realmente cambió
-                if current_status == status:
-                    print(f"[CENTRAL] ℹ️ Estado {status} para CP {cp_id} ya está actualizado, no se envía CP_INFO")
-                    return  # No hacer nada si el estado ya es el mismo
-                
-                if current_status != status:
-                    db.update_charging_point_status(cp_id, status)
-                    # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR solo si cambió
-                    central_instance.publish_cp_info_to_monitor(cp_id)
-                else:
-                    print(f"[CENTRAL] ℹ️ Estado {status} para {cp_id} ya está actualizado, no se envía CP_INFO")
+            if not status:
+                print(f"[CENTRAL] ⚠️ cp_status_change sin 'status', ignorando")
+                return
+            
+            # Asegurar CP existe antes de actualizar
+            try:
+                if not db.get_charging_point_by_id(cp_id) and hasattr(db, 'register_or_update_charging_point'):
+                    db.register_or_update_charging_point(cp_id, 'Desconocido', max_kw=22.0, tarifa_kwh=0.30, estado=status)
+                    print(f"[CENTRAL] 🆕 CP auto-creado en cp_status_change: {cp_id}")
+            except Exception as e:
+                print(f"[CENTRAL] ⚠️ Error asegurando CP en cp_status_change: {e}")
+            
+            # Solo actualizar BD si el estado cambió realmente (sincronización con Engine)
+            cp_current = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+            current_status = cp_current.get('estado') or cp_current.get('status') if cp_current else None
+            
+            # ⚠️ CRÍTICO: Solo actualizar BD si el estado realmente cambió
+            # NO publicar CP_INFO aquí porque podría causar bucles
+            # El Monitor ya recibe el cp_status_change del Engine directamente o de CP_INFO publicado solo cuando es necesario
+            if current_status == status:
+                print(f"[CENTRAL] ℹ️ Estado {status} para CP {cp_id} ya está sincronizado en BD, solo informando al Monitor")
+                # Informar al Monitor SOLO si realmente cambió (throttling ya está en publish_cp_info_to_monitor)
+                central_instance.publish_cp_info_to_monitor(cp_id)
+                return
+            
+            # Solo si el estado cambió realmente, actualizar BD
+            print(f"[CENTRAL] 🔄 Sincronizando estado BD: {cp_id} → {current_status} → {status} (cambio reportado por Engine)")
+            db.update_charging_point_status(cp_id, status)
+            
+            # ⚠️ IMPORTANTE: Publicar CP_INFO al Monitor SOLO una vez después de actualizar BD
+            # Esto informa al Monitor del cambio de estado sin causar bucles
+            central_instance.publish_cp_info_to_monitor(cp_id)
         elif action in ['cp_error_simulated', 'cp_error_fixed']:
             new_status = event.get('new_status') or event.get('status')
             if new_status:

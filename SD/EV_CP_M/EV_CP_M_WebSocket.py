@@ -494,14 +494,31 @@ async def kafka_listener():
                 )
                 
                 print(f"[KAFKA] ✅ Consumer connected, listening to {KAFKA_TOPICS_CONSUME}")
+                print(f"[KAFKA] 🔒 Consumer configured to ONLY read NEW messages (latest offset)")
                 
-                for message in consumer:
-                    event = message.value
-                    # Programar el procesamiento en el event loop
-                    asyncio.run_coroutine_threadsafe(
-                        process_kafka_event(event),
-                        loop
-                    )
+                # ⚠️ CRÍTICO: Usar poll() en lugar de 'for message in consumer:' para mejor control
+                # 'for message in consumer:' puede leer offsets antiguos si el group_id no es único
+                while True:
+                    try:
+                        # Poll con timeout para procesar mensajes nuevos
+                        msg_pack = consumer.poll(timeout_ms=2000, max_records=50)
+                        
+                        if msg_pack:
+                            # Procesar mensajes recibidos
+                            for topic_partition, messages in msg_pack.items():
+                                for message in messages:
+                                    event = message.value
+                                    # Programar el procesamiento en el event loop
+                                    asyncio.run_coroutine_threadsafe(
+                                        process_kafka_event(event),
+                                        loop
+                                    )
+                    except Exception as poll_error:
+                        print(f"[KAFKA] ⚠️ Error en poll: {poll_error}")
+                        import traceback
+                        traceback.print_exc()
+                        time.sleep(1)
+                        continue
                     
             except Exception as e:
                 import traceback
