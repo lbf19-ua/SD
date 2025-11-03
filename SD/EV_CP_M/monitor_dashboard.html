@@ -363,7 +363,7 @@
 
         <!-- Alerts Section -->
         <div class="alerts-section" id="alertsSection">
-            <h2>🚨 Alertas del Sistema</h2>
+            <h2>Alertas del Sistema</h2>
             <div id="alertsContainer">
                 <div class="empty-state">No hay alertas activas</div>
             </div>
@@ -547,7 +547,6 @@
                     statusText = normStatus === 'charging' ? 'Suministrando' : 'Disponible';
                 dotColor = 'green';
                 } else if (normStatus === 'offline') {
-                statusIcon = '⚫';
                 statusText = 'Desconectado';
                 dotColor = 'gray';
                 } else if (normStatus === 'fault') {
@@ -555,12 +554,10 @@
                 statusText = 'Averiado';
                 dotColor = 'red';
                 } else if (normStatus === 'out_of_service') {
-                statusIcon = '🔶';
                     statusText = 'Fuera de Servicio';
                 dotColor = 'orange';
             } else {
                     // Estado desconocido - mostrar en gris
-                statusIcon = '⚫';
                     statusText = normStatus || 'Desconocido';
                 dotColor = 'gray';
             }
@@ -589,7 +586,7 @@
                         <div class="info-value">${cp.power_output} kW</div>
                     </div>
                     <div class="info-item">
-                        <div class="info-label">💶 Tarifa</div>
+                        <div class="info-label">Tarifa</div>
                         <div class="info-value">€${cp.tariff}/kWh</div>
                     </div>
                     <div class="info-item">
@@ -600,15 +597,15 @@
 
                 <div class="cp-metrics">
                     <div class="metric-row">
-                        <span class="metric-label">🌡️ Temperatura:</span>
+                        <span class="metric-label">Temperatura:</span>
                         <span class="metric-value">${temperature}°C</span>
                     </div>
                     <div class="metric-row">
-                        <span class="metric-label">⚙️ Eficiencia:</span>
+                        <span class="metric-label">Eficiencia:</span>
                         <span class="metric-value">${efficiency}%</span>
                     </div>
                     <div class="metric-row">
-                        <span class="metric-label">⏱️ Tiempo activo:</span>
+                        <span class="metric-label">Tiempo activo:</span>
                         <span class="metric-value">${uptime}</span>
                     </div>
                     <div class="metric-row">

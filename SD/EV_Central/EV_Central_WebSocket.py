@@ -1086,14 +1086,16 @@ async def kafka_listener():
                                 cp_id = event.get('cp_id')
                                 if cp_id:
                                     print(f"[CENTRAL] 🔐 Monitor autenticado para CP {cp_id}")
-                                    # ⚠️ IMPORTANTE: Solo enviar CP_INFO si el CP está registrado y tiene información válida
-                                    # Si el CP no está registrado, esperar a que el Engine envíe CP_REGISTRATION
+                                    # ⚠️ NO publicar CP_INFO aquí - se enviará cuando el Engine se registre
+                                    # Esto evita eventos innecesarios. El Monitor recibirá CP_INFO cuando
+                                    # Central procese el CP_REGISTRATION del Engine
                                     try:
                                         cp = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
                                         if cp and cp.get('estado'):
-                                            # CP está registrado, enviar información
-                                            print(f"[CENTRAL] 📡 Enviando información del CP {cp_id} al Monitor...")
-                                            central_instance.publish_cp_info_to_monitor(cp_id)
+                                            # CP ya está registrado - enviar CP_INFO solo una vez si es necesario
+                                            # pero con throttling para evitar bucles (el CP_INFO ya se envió en CP_REGISTRATION)
+                                            print(f"[CENTRAL] ℹ️ CP {cp_id} ya registrado - Monitor recibirá CP_INFO cuando Engine se registre o ya lo recibió")
+                                            # NO publicar CP_INFO aquí - evitar duplicados
                                         else:
                                             print(f"[CENTRAL] ℹ️ CP {cp_id} aún no está registrado, Monitor recibirá CP_INFO cuando Engine se registre")
                                     except Exception as e:

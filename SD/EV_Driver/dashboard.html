@@ -651,7 +651,7 @@
                     break;
 
                 case 'charging_ticket':
-                    // 🎫 RECIBIR TICKET FINAL DE CARGA
+                    // RECIBIR TICKET FINAL DE CARGA
                     // FILTRAR: Solo procesar si es para el usuario actual
                     if (data.username && data.username !== currentUser) {
                         console.log(`[WS] Ignorando charging_ticket de otro usuario: ${data.username}`);
