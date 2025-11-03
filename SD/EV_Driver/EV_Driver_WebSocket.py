@@ -72,7 +72,7 @@ class EV_DriverWS:
 
     def initialize_kafka(self):
         """Inicializa el productor y consumidor de Kafka con reintentos indefinidos"""
-        print(f"[DRIVER] 🔄 Connecting to Kafka at {self.kafka_broker}...")
+        print(f"[DRIVER] Connecting to Kafka at {self.kafka_broker}...")
         
         # Retry indefinido para producer
         while True:
@@ -85,27 +85,27 @@ class EV_DriverWS:
                     retries=3,
                     acks='all'  # Esperar confirmación de todos los replicas
                 )
-                print(f"[DRIVER] ✅ Kafka producer initialized")
+                print(f"[DRIVER] Kafka producer initialized")
                 break
             except Exception as e:
-                print(f"[DRIVER] ⚠️  Kafka producer not available: {e}")
-                print(f"[DRIVER] 🔄 Retrying in 5 seconds...")
+                print(f"[DRIVER]  Kafka producer not available: {e}")
+                print(f"[DRIVER] Retrying in 5 seconds...")
                 time.sleep(5)
         
         # Retry indefinido para consumer (se inicializa en kafka_listener)
         # El consumer se inicializa en kafka_listener() para manejar reconexiones
-        print(f"[DRIVER] 📡 Kafka broker: {self.kafka_broker}")
-        print(f"[DRIVER] 📥 Will consume topics: {KAFKA_TOPICS_CONSUME}")
-        print(f"[DRIVER] 📤 Publishing to: {KAFKA_TOPIC_PRODUCE}")
+        print(f"[DRIVER] Kafka broker: {self.kafka_broker}")
+        print(f"[DRIVER] Will consume topics: {KAFKA_TOPICS_CONSUME}")
+        print(f"[DRIVER] Publishing to: {KAFKA_TOPIC_PRODUCE}")
             
     def kafka_listener(self):
         """Escucha mensajes de Kafka, especialmente las respuestas de autorización"""
-        print(f"[KAFKA] 📡 Consumer thread started, will listen to {KAFKA_TOPICS_CONSUME}")
+        print(f"[KAFKA] Consumer thread started, will listen to {KAFKA_TOPICS_CONSUME}")
         
         # Inicializar consumer con retry indefinido
         while self.consumer is None:
             try:
-                print(f"[KAFKA] 🔄 Initializing consumer...")
+                print(f"[KAFKA] Initializing consumer...")
                 # Sin api_version explícito (auto-detección)
                 self.consumer = KafkaConsumer(
                     *KAFKA_TOPICS_CONSUME,
@@ -115,13 +115,13 @@ class EV_DriverWS:
                     group_id=f'ev_driver_group_{self.driver_id}',
                     request_timeout_ms=30000,
                     session_timeout_ms=10000
-                    # ⚠️ NO usar consumer_timeout_ms - esto causaba que el loop terminara después de 5s sin mensajes
+                    # NO usar consumer_timeout_ms - esto causaba que el loop terminara después de 5s sin mensajes
                 )
-                print(f"[KAFKA] ✅ Consumer initialized successfully")
-                print(f"[KAFKA] 📡 Listening to {KAFKA_TOPICS_CONSUME}")
+                print(f"[KAFKA] Consumer initialized successfully")
+                print(f"[KAFKA] Listening to {KAFKA_TOPICS_CONSUME}")
             except Exception as e:
-                print(f"[KAFKA] ⚠️ Failed to initialize consumer: {e}")
-                print(f"[KAFKA] 🔄 Retrying in 5 seconds...")
+                print(f"[KAFKA] Failed to initialize consumer: {e}")
+                print(f"[KAFKA] Retrying in 5 seconds...")
                 time.sleep(5)
         
         while True:
@@ -140,7 +140,7 @@ class EV_DriverWS:
                             group_id=f'ev_driver_group_{self.driver_id}',
                             request_timeout_ms=30000,
                             session_timeout_ms=10000
-                            # ⚠️ NO usar consumer_timeout_ms - esto causaba que el loop terminara después de 5s sin mensajes
+                            # NO usar consumer_timeout_ms - esto causaba que el loop terminara después de 5s sin mensajes
                         )
                         print(f"[KAFKA] Consumer reconnected successfully")
                     except Exception as e:
@@ -168,7 +168,7 @@ class EV_DriverWS:
                                     websocket_ref = auth_data.get('websocket')
                                     
                                     if authorized:
-                                        print(f"[DRIVER] ✅ Central autorizó carga en {cp_id}")
+                                        print(f"[DRIVER] Central autorizó carga en {cp_id}")
                                         
                                         # 🔴 ARQUITECTURA REAL:
                                         # Central ya envió el comando 'charging_started' al CP_E.
@@ -222,7 +222,7 @@ class EV_DriverWS:
                             error_type = event.get('error_type')
                             message_text = event.get('message')
                             
-                            print(f"[DRIVER] ⚠️ CP {cp_id} tiene error: {error_type}")
+                            print(f"[DRIVER] CP {cp_id} tiene error: {error_type}")
                             
                             # Verificar si algún usuario está usando ese CP
                             with shared_state.lock:
@@ -243,7 +243,7 @@ class EV_DriverWS:
                             cp_id = event.get('cp_id')
                             message_text = event.get('message')
                             
-                            print(f"[DRIVER] ✅ CP {cp_id} reparado")
+                            print(f"[DRIVER] CP {cp_id} reparado")
                             
                             # Notificar a todos los usuarios conectados
                             notification = {
@@ -265,7 +265,7 @@ class EV_DriverWS:
                                 if username in shared_state.charging_sessions:
                                     shared_state.charging_sessions[username]['energy'] = energy_kwh
                                     shared_state.charging_sessions[username]['cost'] = cost
-                                    shared_state.charging_sessions[username]['cp_charging_confirmed'] = True  # ✅ CP confirmó que está cargando
+                                    shared_state.charging_sessions[username]['cp_charging_confirmed'] = True  # CP confirmó que está cargando
                                     print(f"[DRIVER] 📊 Actualización de CP_E: {username} → {energy_kwh:.2f} kWh, €{cost:.2f}")
                         
                         # 🎫 RECIBIR TICKET FINAL AL TERMINAR LA CARGA
@@ -302,13 +302,13 @@ class EV_DriverWS:
                             })
                     except Exception as msg_error:
                         # Error procesando un mensaje individual - continuar con el siguiente
-                        print(f"[KAFKA] ⚠️ Error processing message: {msg_error}")
+                        print(f"[KAFKA] Error processing message: {msg_error}")
                         import traceback
                         traceback.print_exc()
                         continue
                 
             except Exception as e:
-                print(f"[KAFKA] ⚠️ Consumer error: {e}")
+                print(f"[KAFKA] Consumer error: {e}")
                 import traceback
                 traceback.print_exc()
                 # Cerrar consumer anterior si existe
@@ -332,11 +332,11 @@ class EV_DriverWS:
                         group_id=f'ev_driver_group_{self.driver_id}',
                         request_timeout_ms=30000,
                         session_timeout_ms=10000
-                        # ⚠️ NO usar consumer_timeout_ms - esto causaba que el loop terminara después de 5s sin mensajes
+                        # NO usar consumer_timeout_ms - esto causaba que el loop terminara después de 5s sin mensajes
                     )
                     print(f"[KAFKA] Consumer reconnected successfully")
                 except Exception as reconnect_error:
-                    print(f"[KAFKA] ⚠️ Failed to reconnect: {reconnect_error}")
+                    print(f"[KAFKA] Failed to reconnect: {reconnect_error}")
                     import traceback
                     traceback.print_exc()
                     self.consumer = None
@@ -772,9 +772,9 @@ async def websocket_handler(websocket, path):
                                     'timestamp': current_timestamp()
                                 })
                                 driver_instance.producer.flush()
-                                print(f"[DRIVER] 📤 Evento DRIVER_CONNECTED enviado a Central para {username}")
+                                print(f"[DRIVER] Evento DRIVER_CONNECTED enviado a Central para {username}")
                             except Exception as e:
-                                print(f"[DRIVER] ⚠️ Error enviando DRIVER_CONNECTED: {e}")
+                                print(f"[DRIVER] Error enviando DRIVER_CONNECTED: {e}")
                         
                         response = {
                             'type': 'login_response',
@@ -971,7 +971,7 @@ async def websocket_handler(websocket, path):
                                 print(f"[DRIVER] [BATCH] Error en stop_charging para {cp_id}: {e}")
                             
                             # 6. Esperar a recibir el CHARGING_TICKET de Central (máximo 10 segundos)
-                            print(f"[DRIVER] ⏳ [BATCH] Esperando ticket de Central para {cp_id}...")
+                            print(f"[DRIVER] [BATCH] Esperando ticket de Central para {cp_id}...")
                             ticket_received = False
                             ticket_data = None
                             
@@ -983,13 +983,13 @@ async def websocket_handler(websocket, path):
                                         # Verificar que el ticket sea para este CP
                                         if ticket_data.get('cp_id') == cp_id:
                                             ticket_received = True
-                                            print(f"[DRIVER] ✅ [BATCH] Ticket recibido para {cp_id}: {ticket_data.get('energy_kwh', 0):.2f} kWh, €{ticket_data.get('cost', 0):.2f}")
+                                            print(f"[DRIVER] [BATCH] Ticket recibido para {cp_id}: {ticket_data.get('energy_kwh', 0):.2f} kWh, €{ticket_data.get('cost', 0):.2f}")
                                             # Limpiar el ticket después de leerlo
                                             del shared_state.pending_tickets[username]
                                             break
                             
                             if not ticket_received:
-                                print(f"[DRIVER] ⚠️ [BATCH] No se recibió ticket para {cp_id} después de 10s, usando datos de sesión")
+                                print(f"[DRIVER] [BATCH] No se recibió ticket para {cp_id} después de 10s, usando datos de sesión")
                                 # Obtener datos de la sesión si aún existe
                                 with shared_state.lock:
                                     if username in shared_state.charging_sessions:
@@ -1018,9 +1018,9 @@ async def websocket_handler(websocket, path):
                                     'total_cost': ticket_data.get('cost', 0.0) if ticket_data else 0.0,
                                     'duration_sec': ticket_data.get('duration_sec', 0) if ticket_data else 0
                                 }))
-                                print(f"[DRIVER] 📤 [BATCH] Evento batch_progress enviado para {cp_id} con energy={ticket_data.get('energy_kwh', 0):.2f} kWh, cost=€{ticket_data.get('cost', 0):.2f}")
+                                print(f"[DRIVER] [BATCH] Evento batch_progress enviado para {cp_id} con energy={ticket_data.get('energy_kwh', 0):.2f} kWh, cost=€{ticket_data.get('cost', 0):.2f}")
                             except Exception as e:
-                                print(f"[DRIVER] ⚠️ [BATCH] Error enviando batch_progress: {e}")
+                                print(f"[DRIVER] [BATCH] Error enviando batch_progress: {e}")
                             
                             print(f"[DRIVER] [BATCH] {cp_id} completado - Pasando al siguiente CP")
                             await asyncio.sleep(0.5)  # Pausa breve entre CPs
@@ -1181,9 +1181,9 @@ async def websocket_handler_http(request):
                                         'timestamp': current_timestamp()
                                     })
                                     driver_instance.producer.flush()
-                                    print(f"[DRIVER] 📤 Evento DRIVER_CONNECTED enviado a Central para {username}")
+                                    print(f"[DRIVER] Evento DRIVER_CONNECTED enviado a Central para {username}")
                                 except Exception as e:
-                                    print(f"[DRIVER] ⚠️ Error enviando DRIVER_CONNECTED: {e}")
+                                    print(f"[DRIVER] Error enviando DRIVER_CONNECTED: {e}")
                             
                             response = {
                                 'type': 'login_response',
@@ -1413,7 +1413,7 @@ async def websocket_handler_http(request):
                                     stop_res = {'success': False, 'message': str(e)}
                                 
                                 # 6. Esperar a recibir el CHARGING_TICKET de Central (máximo 10 segundos)
-                                print(f"[DRIVER] ⏳ [BATCH] Esperando ticket de Central para {cp_id}...")
+                                print(f"[DRIVER] [BATCH] Esperando ticket de Central para {cp_id}...")
                                 ticket_received = False
                                 ticket_data = None
                                 
@@ -1425,13 +1425,13 @@ async def websocket_handler_http(request):
                                             # Verificar que el ticket sea para este CP
                                             if ticket_data.get('cp_id') == cp_id:
                                                 ticket_received = True
-                                                print(f"[DRIVER] ✅ [BATCH] Ticket recibido para {cp_id}: {ticket_data.get('energy_kwh', 0):.2f} kWh, €{ticket_data.get('cost', 0):.2f}")
+                                                print(f"[DRIVER] [BATCH] Ticket recibido para {cp_id}: {ticket_data.get('energy_kwh', 0):.2f} kWh, €{ticket_data.get('cost', 0):.2f}")
                                                 # Limpiar el ticket después de leerlo
                                                 del shared_state.pending_tickets[username]
                                                 break
                                 
                                 if not ticket_received:
-                                    print(f"[DRIVER] ⚠️ [BATCH] No se recibió ticket para {cp_id} después de 10s, usando datos de sesión o stop_res")
+                                    print(f"[DRIVER] [BATCH] No se recibió ticket para {cp_id} después de 10s, usando datos de sesión o stop_res")
                                     # Obtener datos de la sesión si aún existe
                                     with shared_state.lock:
                                         if username in shared_state.charging_sessions:
@@ -1468,9 +1468,9 @@ async def websocket_handler_http(request):
                                         'total_cost': ticket_data.get('cost', 0.0) if ticket_data else 0.0,
                                         'duration_sec': ticket_data.get('duration_sec', 0) if ticket_data else 0
                                     }))
-                                    print(f"[DRIVER] 📤 [BATCH] Evento batch_progress enviado para {cp_id} con energy={ticket_data.get('energy_kwh', 0):.2f} kWh, cost=€{ticket_data.get('cost', 0):.2f}")
+                                    print(f"[DRIVER] [BATCH] Evento batch_progress enviado para {cp_id} con energy={ticket_data.get('energy_kwh', 0):.2f} kWh, cost=€{ticket_data.get('cost', 0):.2f}")
                                 except Exception as e:
-                                    print(f"[DRIVER] ⚠️ [BATCH] Error enviando batch_progress: {e}")
+                                    print(f"[DRIVER] [BATCH] Error enviando batch_progress: {e}")
                                 
                                 print(f"[DRIVER] [BATCH] {cp_id} completado - Pasando al siguiente CP")
                                 
