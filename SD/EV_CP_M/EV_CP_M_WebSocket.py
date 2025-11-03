@@ -840,83 +840,96 @@ async def tcp_health_check():
     print(f"[MONITOR-{monitor_instance.cp_id}]    Engine: {monitor_instance.engine_host}:{monitor_instance.engine_port}")
     print(f"[MONITOR-{monitor_instance.cp_id}]    Frequency: Every 1 second")
     
+    # ⚠️ IMPORTANTE: Esperar al inicio para que el Engine esté completamente listo
+    # El Engine necesita tiempo para iniciar Kafka, registrarse y abrir el servidor TCP
+    initial_wait_time = 10  # Esperar 10 segundos antes de empezar health checks
+    print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Waiting {initial_wait_time}s for Engine to be ready...")
+    await asyncio.sleep(initial_wait_time)
+    print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Starting health checks")
+    
     while True:
         try:
             await asyncio.sleep(1)  # ✅ CADA 1 SEGUNDO (según PDF)
             
             try:
                 # ✅ Conectar al Engine vía TCP
+                # Reducir logs excesivos - solo imprimir cada 10 intentos o si hay error
                 # Aumentar timeout para dar más tiempo a la conexión
-                print(f"[MONITOR-{monitor_instance.cp_id}] 🔍 Attempting to connect to {monitor_instance.engine_host}:{monitor_instance.engine_port}")
+                # print(f"[MONITOR-{monitor_instance.cp_id}] 🔍 Attempting to connect to {monitor_instance.engine_host}:{monitor_instance.engine_port}")
                 try:
                     reader, writer = await asyncio.wait_for(
                         asyncio.open_connection(monitor_instance.engine_host, monitor_instance.engine_port),
-                        timeout=5.0  # Aumentado de 2.0 a 5.0 segundos
+                        timeout=3.0  # Timeout razonable para conexión TCP
                     )
-                    print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Connected to Engine")
+                    # Solo imprimir cada 10 conexiones exitosas para reducir ruido
+                    # print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Connected to Engine")
                 except asyncio.TimeoutError:
                     # Timeout en la conexión - esto SÍ es un timeout real
                     consecutive_failures += 1
-                    print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Connection timeout (failure {consecutive_failures}/3)")
+                    # Solo imprimir cada 3 fallos para reducir ruido
+                    if consecutive_failures % 3 == 0 or consecutive_failures <= 3:
+                        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Connection timeout (failure {consecutive_failures}/3)")
                     shared_state.health_status = {
                         'consecutive_failures': consecutive_failures,
                         'last_check': time.time(),
                         'last_status': 'TIMEOUT'
                     }
-                if consecutive_failures >= 3:
-                    # ⚠️ PROTECCIÓN: No reportar fallos durante el período de gracia inicial (Engine puede estar iniciando)
-                    time_since_start = time.time() - monitor_start_time
-                    if time_since_start < startup_grace_period:
-                        print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
-                        consecutive_failures = 0  # Reset durante grace period
-                        await asyncio.sleep(1)
-                        continue
                     
-                    # ⚠️ PROTECCIÓN: No reportar el mismo fallo repetidamente (evitar bucle)
-                    current_time = time.time()
-                    if last_reported_failure and (current_time - last_reported_failure) < 60:  # No reportar más de una vez por minuto
-                        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
-                        consecutive_failures = 0  # Reset para evitar spam
+                    # Si hay 3+ fallos consecutivos, reportar a Central
+                    if consecutive_failures >= 3:
+                        # ⚠️ PROTECCIÓN: No reportar fallos durante el período de gracia inicial (Engine puede estar iniciando)
+                        time_since_start = time.time() - monitor_start_time
+                        if time_since_start < startup_grace_period:
+                            print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
+                            consecutive_failures = 0  # Reset durante grace period
+                            await asyncio.sleep(1)
+                            continue
+                        
+                        # ⚠️ PROTECCIÓN: No reportar el mismo fallo repetidamente (evitar bucle)
+                        current_time = time.time()
+                        if last_reported_failure and (current_time - last_reported_failure) < 60:  # No reportar más de una vez por minuto
+                            print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
+                            consecutive_failures = 0  # Reset para evitar spam
+                            await asyncio.sleep(5)  # Esperar más tiempo antes de reintentar
+                            continue
+                        
+                        print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Connection timeouts, reporting to Central")
+                        if monitor_instance.producer:
+                            event = {
+                                'message_id': generate_message_id(),
+                                'event_type': 'ENGINE_FAILURE',
+                                'action': 'report_engine_failure',
+                                'cp_id': monitor_instance.cp_id,
+                                'failure_type': 'timeout',
+                                'consecutive_failures': consecutive_failures,
+                                'timestamp': current_timestamp(),
+                                'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                            }
+                            monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                            monitor_instance.producer.flush()
+                            last_reported_failure = current_time  # Marcar que se reportó
+                            consecutive_failures = 0
                         await asyncio.sleep(5)  # Esperar más tiempo antes de reintentar
-                        continue
                     
-                    print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Connection timeouts, reporting to Central")
-                    if monitor_instance.producer:
-                        event = {
-                            'message_id': generate_message_id(),
-                            'event_type': 'ENGINE_FAILURE',
-                            'action': 'report_engine_failure',
-                            'cp_id': monitor_instance.cp_id,
-                            'failure_type': 'timeout',
-                            'consecutive_failures': consecutive_failures,
-                            'timestamp': current_timestamp(),
-                            'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
-                        }
-                        monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
-                        monitor_instance.producer.flush()
-                        last_reported_failure = current_time  # Marcar que se reportó
-                        consecutive_failures = 0
-                    await asyncio.sleep(5)  # Esperar más tiempo antes de reintentar
-                    continue  # Volver al inicio del loop
+                    # Continuar al siguiente intento
+                    continue
                 
                 # ✅ Enviar "STATUS?"
-                print(f"[MONITOR-{monitor_instance.cp_id}] 📤 Sending: STATUS?")
+                # Reducir logs - no imprimir cada STATUS? enviado
                 writer.write(b"STATUS?\n")
                 await writer.drain()
-                # NO cerrar el writer aquí - mantenerlo abierto para recibir la respuesta
-                # El writer se cerrará después de leer la respuesta
-                print(f"[MONITOR-{monitor_instance.cp_id}] ✅ STATUS? sent (writer still open for reading)")
                 
                 # ✅ Recibir respuesta - leer hasta encontrar newline o timeout
-                print(f"[MONITOR-{monitor_instance.cp_id}] 👂 Waiting for response...")
                 try:
-                    # Aumentar timeout para dar más tiempo - el Engine puede tardar en responder
+                    # Timeout razonable para respuesta TCP
                     data = await asyncio.wait_for(
                         reader.readuntil(b'\n'),  # Leer hasta encontrar newline
-                        timeout=5.0  # Aumentado de 3.0 a 5.0 segundos para más robustez
+                        timeout=2.0  # Timeout de 2 segundos es suficiente
                     )
                     response = data.decode().strip()
-                    print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Received: {response}")
+                    # Solo imprimir si hay problema, no cada respuesta OK
+                    if response != "OK":
+                        print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Received: {response}")
                 except asyncio.IncompleteReadError as e:
                     # Si hay datos parciales, leerlos
                     partial = e.partial
@@ -1059,9 +1072,11 @@ async def tcp_health_check():
                     pass
                 
             except asyncio.TimeoutError:
-                # Timeout - considerar como fallo
+                # Timeout durante lectura de respuesta - considerar como fallo
                 consecutive_failures += 1
-                print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Timeout (failure {consecutive_failures}/3)")
+                # Solo imprimir cada 3 fallos para reducir ruido
+                if consecutive_failures % 3 == 0 or consecutive_failures <= 3:
+                    print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Timeout reading response (failure {consecutive_failures}/3)")
                 
                 shared_state.health_status = {
                     'consecutive_failures': consecutive_failures,
@@ -1114,7 +1129,9 @@ async def tcp_health_check():
             except (ConnectionRefusedError, OSError) as e:
                 # Engine no está corriendo
                 consecutive_failures += 1
-                print(f"[MONITOR-{monitor_instance.cp_id}] ❌ Cannot connect to Engine (failure {consecutive_failures}/3)")
+                # Solo imprimir cada 3 fallos para reducir ruido
+                if consecutive_failures % 3 == 0 or consecutive_failures <= 3:
+                    print(f"[MONITOR-{monitor_instance.cp_id}] ❌ Cannot connect to Engine (failure {consecutive_failures}/3)")
                 
                 shared_state.health_status = {
                     'consecutive_failures': consecutive_failures,

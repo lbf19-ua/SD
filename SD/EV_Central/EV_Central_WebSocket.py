@@ -1372,8 +1372,42 @@ async def broadcast_kafka_event(event):
                 # Mantener solo los últimos 500 (limpiar los más antiguos)
                 shared_state.processed_event_ids = set(list(shared_state.processed_event_ids)[-500:])
     
-    # ⚠️ PROTECCIÓN: Ignorar eventos muy antiguos que pueden ser de antes del reinicio
+    # ⚠️ IMPORTANTE: Calcular current_time una vez para usar en todas las verificaciones
+    import time
     current_time = time.time()
+    
+    # ⚠️ DEDUPLICACIÓN ADICIONAL: Evitar procesar el mismo tipo de evento para el mismo CP en muy poco tiempo
+    # Esto previene bucles cuando el mismo evento llega con diferentes message_ids
+    cp_id = event.get('cp_id') or event.get('engine_id')
+    event_type = event.get('event_type', '')
+    action = event.get('action', '')
+    
+    # Solo aplicar a eventos de CP que pueden causar bucles
+    if cp_id and (event_type in ['CP_REGISTRATION', 'cp_status_change'] or action in ['connect', 'cp_status_change']):
+        if not hasattr(shared_state, 'recent_cp_events'):
+            shared_state.recent_cp_events = {}  # {(cp_id, event_type): timestamp}
+        event_key = (cp_id, event_type or action)
+        last_event_time = shared_state.recent_cp_events.get(event_key, 0)
+        
+        # Ignorar si el mismo evento para el mismo CP ocurrió hace menos de 2 segundos
+        if current_time - last_event_time < 2.0:
+            print(f"[CENTRAL] ⚠️ Evento {event_type or action} para CP {cp_id} procesado hace {current_time - last_event_time:.2f}s, ignorando duplicado")
+            # Quitar del set si ya lo añadimos
+            if message_id:
+                with shared_state.processed_lock:
+                    shared_state.processed_event_ids.discard(message_id)
+            return
+        
+        # Registrar timestamp de este evento
+        shared_state.recent_cp_events[event_key] = current_time
+        
+        # Limpiar eventos antiguos (más de 30 segundos)
+        keys_to_remove = [k for k, t in shared_state.recent_cp_events.items() if current_time - t > 30.0]
+        for k in keys_to_remove:
+            del shared_state.recent_cp_events[k]
+    
+    # ⚠️ PROTECCIÓN: Ignorar eventos muy antiguos que pueden ser de antes del reinicio
+    # current_time ya se calculó arriba en la deduplicación adicional
     central_start_time = shared_state.central_start_time
     time_since_start = current_time - central_start_time
     
@@ -1425,21 +1459,30 @@ async def broadcast_kafka_event(event):
                     shared_state.processed_event_ids.discard(message_id)
             return
     
-    # ⚠️ PROTECCIÓN: Evitar procesar el mismo evento múltiples veces si ya se procesó
-    action = event.get('action', '')
-    event_type = event.get('event_type', '')
-    cp_id = event.get('cp_id') or event.get('engine_id')
-    
-    # Para CP_REGISTRATION, verificar si el CP ya existe y está en el mismo estado
-    # PERO solo ignorar si está 'available' - si está 'offline' (después de reinicio), permitir registro
+    # ⚠️ PROTECCIÓN ADICIONAL: Evitar procesar CP_REGISTRATION repetidamente
+    # (action, event_type y cp_id ya se calcularon arriba)
+    # incluso si tienen diferentes message_ids (pueden ser reintentos)
     if (event_type == 'CP_REGISTRATION' or action == 'connect') and cp_id:
+        # Verificar si este CP se registró recientemente (últimos 10 segundos)
+        if not hasattr(shared_state, 'recent_registrations'):
+            shared_state.recent_registrations = {}  # {cp_id: timestamp}
+        
+        # current_time ya se calculó arriba en la deduplicación adicional
+        recent_reg_time = shared_state.recent_registrations.get(cp_id, 0)
+        
+        # Si se registró recientemente, ignorar registros duplicados
+        if current_time - recent_reg_time < 10.0:
+            print(f"[CENTRAL] ⚠️ CP {cp_id} ya se registró recientemente ({current_time - recent_reg_time:.1f}s), ignorando registro duplicado")
+            return
+        
+        # Verificar también en BD si ya está registrado como 'available'
         try:
             cp_existing = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
             if cp_existing:
                 existing_status = cp_existing.get('estado') or cp_existing.get('status')
                 # Solo ignorar si ya está 'available' - permitir si está 'offline' (necesita reconexión)
                 if existing_status == 'available':
-                    print(f"[CENTRAL] ⚠️ CP {cp_id} ya registrado como 'available', ignorando registro duplicado")
+                    print(f"[CENTRAL] ⚠️ CP {cp_id} ya registrado como 'available' en BD, ignorando registro duplicado")
                     return
                 # Si está 'offline', permitir el registro (reconexión después de reinicio)
                 elif existing_status == 'offline':
@@ -1764,34 +1807,52 @@ async def broadcast_kafka_event(event):
         # 📊 ACTUALIZACIÓN DE PROGRESO DE CARGA (del CP_E)
         # ========================================================================
         elif action in ['charging_progress'] or event_type == 'charging_progress':
+            # ⚠️ PROTECCIÓN: Throttling para charging_progress - no actualizar más de una vez por segundo
+            # porque el Engine envía actualizaciones cada segundo
+            if not hasattr(shared_state, '_last_progress_update'):
+                shared_state._last_progress_update = {}  # {(username, cp_id): timestamp}
+            
             username = event.get('username')
             energy_kwh = event.get('energy_kwh', 0.0)
             cost = event.get('cost', 0.0)
             
-            print(f"[CENTRAL] 📊 Progreso de carga: {username} → {energy_kwh:.2f} kWh, €{cost:.2f}")
+            # Verificar throttling por usuario y CP
+            progress_key = (username or '', cp_id or '')
+            last_update_time = shared_state._last_progress_update.get(progress_key, 0)
             
-            # Actualizar energía en la sesión activa de la BD
-            try:
-                if username:
-                    user = db.get_user_by_username(username)
-                    if user:
-                        user_id = user.get('id')
-                        session = db.get_active_sesion_for_user(user_id)
-                        if session:
-                            session_id = session.get('id')
-                            # Actualizar energia_kwh en la sesión
-                            conn = db.get_connection()
-                            cur = conn.cursor()
-                            cur.execute("""
-                                UPDATE charging_sesiones
-                                SET energia_kwh = ?
-                                WHERE id = ? AND estado = 'active'
-                            """, (energy_kwh, session_id))
-                            conn.commit()
-                            conn.close()
-                            print(f"[CENTRAL] ✅ Sesión {session_id} actualizada: {energy_kwh:.2f} kWh")
-            except Exception as e:
-                print(f"[CENTRAL] ⚠️ Error actualizando progreso de sesión: {e}")
+            # Solo actualizar si pasó al menos 0.5 segundos desde la última actualización
+            # Esto reduce el ruido en logs pero permite actualizaciones razonables
+            if current_time - last_update_time < 0.5:
+                # Silenciar para no saturar logs, pero no es un error
+                pass  # Omitir actualización muy frecuente
+            else:
+                shared_state._last_progress_update[progress_key] = current_time
+                print(f"[CENTRAL] 📊 Progreso de carga: {username} → {energy_kwh:.2f} kWh, €{cost:.2f}")
+                
+                # Actualizar energía en la sesión activa de la BD
+                try:
+                    if username:
+                        user = db.get_user_by_username(username)
+                        if user:
+                            user_id = user.get('id')
+                            session = db.get_active_sesion_for_user(user_id)
+                            if session:
+                                session_id = session.get('id')
+                                # Actualizar energia_kwh en la sesión
+                                conn = db.get_connection()
+                                cur = conn.cursor()
+                                cur.execute("""
+                                    UPDATE charging_sesiones
+                                    SET energia_kwh = ?
+                                    WHERE id = ? AND estado = 'active'
+                                """, (energy_kwh, session_id))
+                                conn.commit()
+                                conn.close()
+                                # Solo imprimir cada 5 segundos para reducir ruido
+                                if int(current_time) % 5 == 0:
+                                    print(f"[CENTRAL] ✅ Sesión {session_id} actualizada: {energy_kwh:.2f} kWh")
+                except Exception as e:
+                    print(f"[CENTRAL] ⚠️ Error actualizando progreso de sesión: {e}")
         
         elif action in ['cp_status_change']:
             """
