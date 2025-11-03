@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🏢 EV Central - Admin Dashboard</title>
+    <title>EV Central - Admin Dashboard</title>
     <style>
         * {
             margin: 0;
@@ -247,7 +247,7 @@
     </div>
 
     <div class="container">
-        <h1>🏢 EV Central - Admin Dashboard</h1>
+        <h1>EV Central - Admin Dashboard</h1>
         <p class="subtitle">Panel de Control del Sistema de Carga</p>
 
         <!-- Connection Status -->
@@ -259,22 +259,18 @@
         <!-- Statistics Cards -->
         <div class="stats-grid">
             <div class="stat-card">
-                <div class="icon">👥</div>
                 <div class="label">Usuarios Registrados</div>
                 <div class="value" id="totalUsers">0</div>
             </div>
             <div class="stat-card">
-                <div class="icon">PC</div>
                 <div class="label">Puntos de Carga</div>
                 <div class="value" id="totalCPs">0</div>
             </div>
             <div class="stat-card">
-                <div class="icon">POT</div>
                 <div class="label">Sesiones Activas</div>
                 <div class="value" id="activeSessions">0</div>
             </div>
             <div class="stat-card">
-                <div class="icon">EUR</div>
                 <div class="label">Ingresos Hoy</div>
                 <div class="value" id="todayRevenue">€0</div>
             </div>
@@ -326,7 +322,7 @@
 
         <!-- Recent Users -->
         <div class="data-table">
-            <h2>👥 Usuarios Conectados Recientemente</h2>
+            <h2>Usuarios Conectados Recientemente</h2>
             <table id="usersTable">
                 <thead>
                     <tr>
@@ -355,7 +351,7 @@
 
         <!-- Admin Error Simulation Panel -->
         <div class="data-table" style="background: #fff3cd; border: 2px solid #ffc107;">
-            <h2 style="color: #856404;">⚙️ Panel de Simulación de Errores</h2>
+            <h2 style="color: #856404;">Panel de Simulación de Errores</h2>
             <p style="color: #856404; margin-bottom: 15px;">Simular errores en puntos de carga para pruebas</p>
             
             <div style="display: flex; gap: 10px; margin-bottom: 15px;">
@@ -418,10 +414,10 @@
                 
                 <div style="display: flex; gap: 10px;">
                     <button type="submit" style="flex: 1; padding: 12px; background: #17a2b8; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
-                        ➕ Registrar Punto de Carga
+                        Registrar Punto de Carga
                     </button>
                     <button type="button" onclick="clearRegisterForm()" style="padding: 12px 20px; background: #6c757d; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
-                        🔄 Limpiar
+                        Limpiar
                     </button>
                 </div>
                 
@@ -566,7 +562,7 @@
                     break;
 
                 case 'user_login':
-                    addEventLog(`👤 Usuario conectado: ${data.username}`);
+                    addEventLog(`Usuario conectado: ${data.username}`);
                     break;
 
                 case 'kafka_event':
@@ -577,12 +573,12 @@
                         'CHARGING_STARTED': 'CARGA',
                         'CHARGING_STOPPED': 'PARADA',
                         'CP_STATUS_UPDATE': 'ESTADO'
-                    }[data.event_type] || '📨';
+                    }[data.event_type];
                     addEventLog(`${icon} ${data.message}`);
                     break;
 
                 case 'system_event':
-                    addEventLog(`⚙️ ${data.message}`);
+                    addEventLog(`${data.message}`);
                     break;
             }
         }
@@ -680,8 +676,8 @@
             const tbody = document.getElementById('sessionsBody');
             tbody.innerHTML = '';
 
-            console.log('[FRONTEND] 🔍 updateSessionsTable - dashboardData:', dashboardData);
-            console.log('[FRONTEND] 🔍 updateSessionsTable - active_sessions:', dashboardData?.active_sessions);
+            console.log('[FRONTEND]  updateSessionsTable - dashboardData:', dashboardData);
+            console.log('[FRONTEND]  updateSessionsTable - active_sessions:', dashboardData?.active_sessions);
 
             if (!dashboardData || !dashboardData.active_sessions || dashboardData.active_sessions.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No hay sesiones activas</td></tr>';
@@ -806,7 +802,7 @@
                 ws.send(JSON.stringify({
                     type: 'get_all_cps'
                 }));
-                addEventLog(`🔄 Actualizando lista de puntos de carga`);
+                addEventLog(`Actualizando lista de puntos de carga`);
             }
         }
         
@@ -913,7 +909,7 @@
                 }));
                 
                 showRegisterMessage('Registrando punto de carga...', 'info');
-                addEventLog(`➕ Solicitando registro de ${cpId} en ${location}`);
+                addEventLog(`Solicitando registro de ${cpId} en ${location}`);
             } else {
                 showRegisterMessage('No hay conexión con el servidor', 'error');
             }
