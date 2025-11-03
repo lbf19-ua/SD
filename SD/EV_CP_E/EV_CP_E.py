@@ -76,6 +76,7 @@ class EV_CP_Engine:
         # Estado del CP
         self.status = 'offline'
         self.previous_status = 'offline'
+        self._registered = False  # Flag para evitar re-registros
         
         # Sesión actual de carga
         self.current_session = None
@@ -126,12 +127,15 @@ class EV_CP_Engine:
                 # Consumidor para recibir comandos de Central
                 print(f"[{self.cp_id}] 📥 Initializing consumer...")
                 # Consumer sin api_version explícito (auto-detección)
+                # Usar group_id único para evitar leer mensajes antiguos al reiniciar
+                import time as time_module
+                unique_group_id = f'engine_group_{self.cp_id}_{int(time_module.time())}'
                 self.consumer = KafkaConsumer(
                     KAFKA_TOPICS['central_events'],
                     bootstrap_servers=self.kafka_broker,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                    auto_offset_reset='earliest',
-                    group_id=f'engine_group_{self.cp_id}',
+                    auto_offset_reset='latest',  # Solo leer mensajes nuevos después de conectarse
+                    group_id=unique_group_id,  # Group ID único por inicio
                     request_timeout_ms=30000,
                     session_timeout_ms=10000,
                     consumer_timeout_ms=5000
@@ -225,8 +229,17 @@ class EV_CP_Engine:
         """
         Auto-registro del CP al iniciar
         Envía información del CP a Central para que lo registre en BD
+        Solo se registra UNA VEZ al iniciar
         """
+        # Flag para asegurar que solo nos registramos una vez
+        if hasattr(self, '_registered') and self._registered:
+            print(f"[{self.cp_id}] ⚠️ Already registered, skipping auto-registration")
+            return
+        
         print(f"[{self.cp_id}] 📝 Auto-registering with Central...")
+        
+        # Marcar que ya nos registramos para evitar re-registros
+        self._registered = True
         
         self.publish_event('CP_REGISTRATION', {
             'action': 'connect',
@@ -241,8 +254,25 @@ class EV_CP_Engine:
             }
         })
         
-        # Cambiar a estado available
-        self.change_status('available', 'Auto-registration completed')
+        # Esperar un poco antes de cambiar estado para evitar eventos simultáneos
+        time.sleep(0.5)
+        
+        # Cambiar a estado available solo si aún estamos en offline
+        with self.lock:
+            if self.status == 'offline':
+                self.previous_status = self.status
+                self.status = 'available'
+                print(f"[{self.cp_id}] 🔄 Status change: {self.previous_status} → available")
+                
+                # Publicar cambio de estado
+                self.publish_event('cp_status_change', {
+                    'action': 'cp_status_change',
+                    'status': 'available',
+                    'previous_status': 'offline',
+                    'reason': 'Auto-registration completed'
+                })
+            else:
+                print(f"[{self.cp_id}] ℹ️ Status already changed to {self.status}, skipping status change event")
         
         print(f"[{self.cp_id}] ✅ Registration request sent to Central")
     

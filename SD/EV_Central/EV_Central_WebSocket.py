@@ -98,6 +98,7 @@ class SharedState:
     def __init__(self):
         self.connected_clients = set()
         self.lock = threading.Lock()
+        self.central_start_time = time.time()  # Timestamp de inicio de Central
 
 shared_state = SharedState()
 
@@ -1326,22 +1327,42 @@ async def broadcast_kafka_event(event):
     if event.get('source') == 'CENTRAL':
         return  # Central no debe procesar sus propios eventos
     
-    # ⚠️ PROTECCIÓN: Ignorar eventos muy antiguos (más de 2 minutos) que pueden ser de antes del reinicio
+    # ⚠️ PROTECCIÓN: Ignorar eventos muy antiguos que pueden ser de antes del reinicio
+    current_time = time.time()
+    central_start_time = shared_state.central_start_time
+    time_since_start = current_time - central_start_time
+    
+    # Verificar timestamp del evento si existe
     event_timestamp = event.get('timestamp')
     if event_timestamp:
         try:
             # Calcular diferencia de tiempo
-            current_time = time.time()
             event_time = float(event_timestamp)
             age_seconds = current_time - event_time
             
-            # Ignorar eventos con más de 2 minutos de antigüedad (son de antes del reinicio)
-            if age_seconds > 120:  # 2 minutos
+            # Ignorar eventos con más de 30 segundos de antigüedad respecto al tiempo actual
+            # Esto asegura que solo procesamos eventos recientes (después del reinicio)
+            if age_seconds > 30:  # 30 segundos
                 print(f"[CENTRAL] ⚠️ Ignorando evento antiguo ({age_seconds:.0f}s de antigüedad, probablemente de antes del reinicio): {event.get('event_type', 'UNKNOWN')}")
                 return
+            
+            # Si Central acaba de iniciar (menos de 30 segundos), ignorar eventos que sean más antiguos que el inicio
+            if time_since_start < 30:
+                # El evento debe ser más reciente que el inicio de Central
+                if event_time < central_start_time:
+                    print(f"[CENTRAL] ⚠️ Ignorando evento anterior al reinicio (Central inició hace {time_since_start:.1f}s): {event.get('event_type', 'UNKNOWN')}")
+                    return
         except (ValueError, TypeError):
-            # Si el timestamp no es válido, continuar (puede ser un evento sin timestamp)
-            pass
+            # Si el timestamp no es válido, verificar si Central acaba de iniciar
+            if time_since_start < 30:
+                # Si Central acaba de iniciar y el evento no tiene timestamp válido, es probablemente antiguo
+                print(f"[CENTRAL] ⚠️ Ignorando evento sin timestamp válido (Central inició hace {time_since_start:.1f}s): {event.get('event_type', 'UNKNOWN')}")
+                return
+    else:
+        # Si el evento no tiene timestamp, y Central acaba de iniciar, ignorarlo
+        if time_since_start < 30:
+            print(f"[CENTRAL] ⚠️ Ignorando evento sin timestamp (Central inició hace {time_since_start:.1f}s): {event.get('event_type', 'UNKNOWN')}")
+            return
     
     # ⚠️ PROTECCIÓN: Evitar procesar el mismo evento múltiples veces si ya se procesó
     action = event.get('action', '')
@@ -2022,6 +2043,10 @@ async def main():
     else:
         # Requisito: al iniciar Central TODO debe estar apagado
         try:
+            # Actualizar timestamp de inicio para filtrar eventos antiguos
+            shared_state.central_start_time = time.time()
+            print(f"[CENTRAL] Timestamp de inicio de Central: {shared_state.central_start_time}")
+            
             # 1) Terminar cualquier sesión activa que haya quedado de ejecuciones anteriores
             if hasattr(db, 'terminate_all_active_sessions'):
                 sess, cps = db.terminate_all_active_sessions(mark_cp_offline=True)
