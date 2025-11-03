@@ -6,14 +6,18 @@
 # Este PC ejecuta:
 #   - Kafka Broker (puerto 9092)
 #   - EV_Central Server (puerto 8002)
+#   - Kafka UI (puerto 8080) - Interfaz web para administrar Kafka
 #
 # ANTES DE EJECUTAR:
-#   1. Editar network_config.py con las IPs reales
-#   2. Reemplazar PC2_IP en KAFKA_ADVERTISED_LISTENERS con la IP real de este PC
+#   1. Editar network_config.py con las IPs reales (PC2_IP)
+#   2. Crear archivo .env con la IP real de este PC:
+#      PC2_IP=192.168.1.XXX  (IP real de este ordenador donde está PC2)
+#      KAFKA_BROKER=broker:29092  (para contenedores en misma red)
 #   3. Inicializar la base de datos: python reset_db_correcto.py
 #   4. Abrir puertos del firewall (PowerShell como admin):
 #      New-NetFirewallRule -DisplayName "EV Kafka" -Direction Inbound -LocalPort 9092 -Protocol TCP -Action Allow
 #      New-NetFirewallRule -DisplayName "EV Central" -Direction Inbound -LocalPort 8002 -Protocol TCP -Action Allow
+#      New-NetFirewallRule -DisplayName "Kafka UI" -Direction Inbound -LocalPort 8080 -Protocol TCP -Action Allow
 #
 # INICIAR:
 #   docker-compose -f docker-compose.pc2.yml up -d
@@ -40,8 +44,10 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      # ⚠️ CAMBIAR localhost POR LA IP REAL DE PC2
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092'
+      # ⚠️ IMPORTANTE: Usar variable de entorno PC2_IP desde .env
+      # Si no existe .env, usa localhost (para mismo host)
+      # Si existe .env con PC2_IP, usa esa IP (para hosts separados)
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://broker:29092,PLAINTEXT_HOST://${PC2_IP:-localhost}:9092'
       KAFKA_PROCESS_ROLES: 'broker,controller'
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@broker:29093'
       KAFKA_LISTENERS: 'PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092'
@@ -84,6 +90,32 @@ services:
       - ev-network
     restart: unless-stopped
 
+  # ==========================================================================
+  # Kafka UI - Interfaz web para administrar Kafka
+  # ==========================================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ev-kafka-ui
+    depends_on:
+      - kafka-broker
+    ports:
+      - "8080:8080"  # Kafka UI Web Interface
+    environment:
+      # Configuración de Kafka Cluster
+      KAFKA_CLUSTERS_0_NAME: "EV Charging Kafka Cluster"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker:29092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: "local"
+      # Configuración de seguridad (deshabilitada para desarrollo local)
+      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: PLAINTEXT
+      # Configuración de autenticación (sin autenticación para desarrollo)
+      # Configuración avanzada
+      DYNAMIC_CONFIG_ENABLED: "true"
+      # Métricas (opcional)
+      METRICS_ENABLED: "true"
+    networks:
+      - ev-network
+    restart: unless-stopped
+
 # ==============================================================================
 # Volúmenes
 # ==============================================================================
@@ -105,4 +137,8 @@ networks:
 # ==============================================================================
 # Kafka Broker:        192.168.1.235:9092 (cambiar por tu IP real)
 # Admin Dashboard:     http://192.168.1.235:8002 (cambiar por tu IP real)
+# Kafka UI:            http://192.168.1.235:8080 (cambiar por tu IP real)
+#                      - Ver topics, mensajes, consumers, producers
+#                      - Administrar cluster de Kafka
+#                      - Visualizar métricas
 # ==============================================================================

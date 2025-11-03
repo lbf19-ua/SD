@@ -89,16 +89,32 @@ class EV_MonitorWS:
         self.authenticate_with_central()
         self.initialize_metrics()
 
-    def initialize_kafka(self):
-        """Inicializa el productor de Kafka"""
-        try:
-            self.producer = KafkaProducer(
-                bootstrap_servers=self.kafka_broker,
-                value_serializer=lambda v: json.dumps(v).encode('utf-8')
-            )
-            print(f"[MONITOR-{self.cp_id}] ✅ Kafka producer initialized")
-        except Exception as e:
-            print(f"[MONITOR-{self.cp_id}] ⚠️  Warning: Kafka not available: {e}")
+    def initialize_kafka(self, max_retries=10):
+        """Inicializa el productor de Kafka con reintentos"""
+        print(f"[MONITOR-{self.cp_id}] 🔌 Connecting to Kafka at {self.kafka_broker}...")
+        for attempt in range(max_retries):
+            try:
+                self.producer = KafkaProducer(
+                    bootstrap_servers=self.kafka_broker,
+                    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                    api_version=(0, 10, 1),  # Versión de API compatible
+                    request_timeout_ms=10000,  # Timeout de 10 segundos
+                    retries=3
+                )
+                # Intentar enviar un mensaje de prueba para verificar la conexión
+                self.producer.send(KAFKA_TOPIC_PRODUCE, {'test': 'connection'})
+                self.producer.flush(timeout=5)
+                print(f"[MONITOR-{self.cp_id}] ✅ Kafka producer initialized and connected")
+                return
+            except Exception as e:
+                print(f"[MONITOR-{self.cp_id}] ⚠️  Attempt {attempt+1}/{max_retries} - Kafka connection failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"[MONITOR-{self.cp_id}] ❌ Failed to connect to Kafka after {max_retries} attempts")
+                    print(f"[MONITOR-{self.cp_id}] 💡 Tip: Verificar que Kafka está corriendo y accesible en {self.kafka_broker}")
+                    self.producer = None
 
     def authenticate_with_central(self):
         """
@@ -109,6 +125,19 @@ class EV_MonitorWS:
         para autenticarse y validar que está operativo.
         """
         print(f"[MONITOR-{self.cp_id}] 🔐 Authenticating with Central...")
+        
+        # Esperar a que Kafka esté disponible si es necesario
+        if not self.producer:
+            print(f"[MONITOR-{self.cp_id}] ⚠️  Kafka producer not initialized, retrying...")
+            self.initialize_kafka(max_retries=5)
+        
+        if not self.producer:
+            print(f"[MONITOR-{self.cp_id}] ❌ Cannot authenticate: Kafka not available")
+            print(f"[MONITOR-{self.cp_id}] 💡 Verificar:")
+            print(f"[MONITOR-{self.cp_id}]    1. Kafka está corriendo en {self.kafka_broker}")
+            print(f"[MONITOR-{self.cp_id}]    2. Red Docker correcta (ev-network)")
+            print(f"[MONITOR-{self.cp_id}]    3. Nombre 'broker' se resuelve correctamente")
+            return
         
         try:
             # Enviar mensaje de autenticación a Central vía Kafka
@@ -124,15 +153,17 @@ class EV_MonitorWS:
                 'timestamp': current_timestamp()
             }
             
-            if self.producer:
-                self.producer.send(KAFKA_TOPIC_PRODUCE, auth_event)
-                self.producer.flush()
-                print(f"[MONITOR-{self.cp_id}] ✅ Authentication sent to Central")
-                print(f"[MONITOR-{self.cp_id}] ✅ Monitor validated and ready to monitor {self.cp_id}")
-            else:
-                print(f"[MONITOR-{self.cp_id}] ⚠️  Cannot authenticate: Kafka not available")
+            print(f"[MONITOR-{self.cp_id}] 📤 Sending authentication event to topic '{KAFKA_TOPIC_PRODUCE}'...")
+            future = self.producer.send(KAFKA_TOPIC_PRODUCE, auth_event)
+            # Esperar confirmación del envío
+            record_metadata = future.get(timeout=10)
+            self.producer.flush(timeout=5)
+            print(f"[MONITOR-{self.cp_id}] ✅ Authentication sent to Central (topic: {record_metadata.topic}, partition: {record_metadata.partition})")
+            print(f"[MONITOR-{self.cp_id}] ✅ Monitor validated and ready to monitor {self.cp_id}")
         except Exception as e:
             print(f"[MONITOR-{self.cp_id}] ❌ Authentication failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     def initialize_metrics(self):
         """Inicializa métricas simuladas para el CP monitoreado"""
@@ -416,27 +447,45 @@ async def kafka_listener():
     
     def consume_kafka():
         """Función bloqueante que consume de Kafka"""
-        try:
-            consumer = KafkaConsumer(
-                *KAFKA_TOPICS_CONSUME,
-                bootstrap_servers=KAFKA_BROKER,
-                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                auto_offset_reset='latest',
-                group_id='ev_monitor_ws_group'
-            )
-            
-            print(f"[KAFKA] 📡 Consumer started, listening to {KAFKA_TOPICS_CONSUME}")
-            
-            for message in consumer:
-                event = message.value
-                # Programar el procesamiento en el event loop
-                asyncio.run_coroutine_threadsafe(
-                    process_kafka_event(event),
-                    loop
+        max_retries = 10
+        for attempt in range(max_retries):
+            try:
+                print(f"[KAFKA] 🔌 Connecting consumer to Kafka at {KAFKA_BROKER}...")
+                # Usar cp_id de monitor_instance si está disponible, sino usar MONITORED_CP_ID global
+                cp_id_for_group = monitor_instance.cp_id if monitor_instance else MONITORED_CP_ID or 'default'
+                consumer = KafkaConsumer(
+                    *KAFKA_TOPICS_CONSUME,
+                    bootstrap_servers=KAFKA_BROKER,
+                    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                    auto_offset_reset='earliest',  # Cambiar a 'earliest' para recibir todos los mensajes
+                    group_id=f'ev_monitor_ws_group_{cp_id_for_group}',  # Group ID único por CP
+                    api_version=(0, 10, 1),
+                    request_timeout_ms=10000,
+                    consumer_timeout_ms=10000
                 )
                 
-        except Exception as e:
-            print(f"[KAFKA] ⚠️  Consumer error: {e}")
+                print(f"[KAFKA] ✅ Consumer connected, listening to {KAFKA_TOPICS_CONSUME}")
+                
+                for message in consumer:
+                    event = message.value
+                    # Programar el procesamiento en el event loop
+                    asyncio.run_coroutine_threadsafe(
+                        process_kafka_event(event),
+                        loop
+                    )
+                    
+            except Exception as e:
+                print(f"[KAFKA] ⚠️  Attempt {attempt+1}/{max_retries} - Consumer error: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"[KAFKA] ❌ Failed to connect consumer after {max_retries} attempts")
+                    print(f"[KAFKA] 💡 Verificar:")
+                    print(f"[KAFKA]    1. Kafka está corriendo en {KAFKA_BROKER}")
+                    print(f"[KAFKA]    2. Red Docker correcta (ev-network)")
+                    print(f"[KAFKA]    3. Nombre 'broker' se resuelve correctamente")
+                    break
     
     # Ejecutar el consumidor de Kafka en un thread separado
     kafka_thread = threading.Thread(target=consume_kafka, daemon=True)
@@ -453,6 +502,10 @@ async def process_kafka_event(event):
     event_type = event.get('event_type', '')
     cp_id = event.get('cp_id') or event.get('engine_id')
     
+    # Debug: Log todos los eventos recibidos
+    if event_type in ['CP_INFO', 'CP_REGISTRATION'] or 'cp_info' in action:
+        print(f"[MONITOR-{monitor_instance.cp_id if monitor_instance else 'UNKNOWN'}] 📨 Evento recibido: type={event_type}, action={action}, cp_id={cp_id}")
+    
     # ⚠️ IGNORAR eventos MONITOR_AUTH (no contienen información del CP)
     if event_type == 'MONITOR_AUTH':
         # Este evento es solo para autenticación, Central enviará CP_INFO después
@@ -460,6 +513,10 @@ async def process_kafka_event(event):
     
     # Actualizar información del CP recibida de Central
     # Solo procesar eventos para el CP que este Monitor supervisa
+    if not monitor_instance:
+        print(f"[MONITOR] ⚠️ monitor_instance no está inicializado")
+        return
+    
     if cp_id and cp_id == monitor_instance.cp_id:
         # Este evento es para el CP que este Monitor supervisa
         with shared_state.lock:
@@ -480,6 +537,7 @@ async def process_kafka_event(event):
                 if not cp_location or cp_location.strip() == '':
                     cp_location = 'Unknown'
                 
+                # Extraer estado: primero del data, luego del nivel raíz
                 cp_status = cp_data.get('status') or cp_data.get('estado') or ''
                 if not cp_status:
                     # Fallback: buscar en el nivel raíz del evento
@@ -489,9 +547,13 @@ async def process_kafka_event(event):
                 valid_statuses = ['available', 'charging', 'offline', 'fault', 'out_of_service']
                 if cp_status and cp_status.lower() not in valid_statuses:
                     cp_status = 'available'  # Estado por defecto si no es válido
+                else:
+                    cp_status = cp_status.lower()
                 
                 max_power = cp_data.get('max_power_kw') or cp_data.get('max_kw') or 22.0
                 tariff = cp_data.get('tariff_per_kwh') or cp_data.get('tarifa_kwh') or 0.30
+                
+                print(f"[MONITOR-{cp_id}] ✅ Procesando CP_INFO: status={cp_status}, location={cp_location}, max_power={max_power}, tariff={tariff}")
                 
                 # Guardar en shared_state.cp_info
                 shared_state.cp_info[cp_id].update({
@@ -505,8 +567,12 @@ async def process_kafka_event(event):
                     'status': cp_status,
                     'estado': cp_status
                 })
+                print(f"[MONITOR-{cp_id}] 💾 CP_INFO guardado en shared_state.cp_info: {shared_state.cp_info[cp_id]}")
                 # Actualizar dashboard inmediatamente
                 await broadcast_monitor_data()
+            elif cp_id and cp_id != monitor_instance.cp_id:
+                # Evento para otro CP, ignorar
+                pass
             elif ('status' in event or 'estado' in event) and event_type != 'MONITOR_AUTH':
                 # Actualizar estado del CP (solo si no es MONITOR_AUTH)
                 new_status = event.get('status') or event.get('estado')

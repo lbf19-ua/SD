@@ -122,8 +122,10 @@ class EV_CP_Engine:
                     KAFKA_TOPICS['central_events'],
                     bootstrap_servers=self.kafka_broker,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                    auto_offset_reset='latest',
-                    group_id=f'engine_group_{self.cp_id}'
+                    auto_offset_reset='earliest',  # Cambiar a 'earliest' para recibir todos los mensajes
+                    group_id=f'engine_group_{self.cp_id}',
+                    api_version=(0, 10, 1),
+                    request_timeout_ms=10000
                 )
                 
                 print(f"[{self.cp_id}] ✅ Kafka connected successfully")
@@ -413,8 +415,13 @@ class EV_CP_Engine:
             return
         
         print(f"[{self.cp_id}] 👂 Listening for commands from Central...")
+        print(f"[{self.cp_id}] 📡 Topic: {KAFKA_TOPICS['central_events']}")
+        print(f"[{self.cp_id}] 🔌 Kafka broker: {self.kafka_broker}")
+        print(f"[{self.cp_id}] ⏳ Waiting for messages...")
         
         try:
+            # Verificar que el consumer está funcionando
+            print(f"[{self.cp_id}] ✅ Kafka consumer ready, entering message loop...")
             for message in self.consumer:
                 if not self.running:
                     break
@@ -426,11 +433,15 @@ class EV_CP_Engine:
                 # Filtrar solo eventos relevantes para este CP
                 event_cp_id = event.get('cp_id')
                 
+                # Debug: Log todos los eventos recibidos
+                print(f"[{self.cp_id}] 📨 Evento recibido: type={event_type}, action={action}, cp_id={event_cp_id}")
+                
                 # Procesar eventos globales o específicos para este CP
                 if event_cp_id and event_cp_id != self.cp_id:
+                    print(f"[{self.cp_id}] ⏭️  Ignorando evento para otro CP: {event_cp_id}")
                     continue  # No es para nosotros
                 
-                print(f"[{self.cp_id}] 📨 Received: {event_type or action}")
+                print(f"[{self.cp_id}] ✅ Procesando evento: {event_type or action}")
                 
                 # ============================================================
                 # RESPUESTA DE AUTORIZACIÓN
