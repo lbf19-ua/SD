@@ -144,3 +144,4 @@ print("\n" + "=" * 80)
 print("✅ DIAGNÓSTICO COMPLETADO - Conexión a Kafka OK")
 print("=" * 80)
 
+

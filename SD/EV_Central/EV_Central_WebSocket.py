@@ -116,10 +116,7 @@ class EV_CentralWS:
             try:
                 self.producer = KafkaProducer(
                     bootstrap_servers=self.kafka_broker,
-                    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                    api_version=(0, 10, 1),
-                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms
-                    retries=3
+                    value_serializer=lambda v: json.dumps(v).encode('utf-8')
                 )
                 print(f"[CENTRAL] ✅ Kafka producer initialized")
                 return
@@ -138,10 +135,7 @@ class EV_CentralWS:
             try:
                 self.producer = KafkaProducer(
                     bootstrap_servers=self.kafka_broker,
-                    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                    api_version=(0, 10, 1),
-                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms
-                    retries=3
+                    value_serializer=lambda v: json.dumps(v).encode('utf-8')
                 )
                 print(f"[CENTRAL] ✅ Kafka producer reconnected successfully")
                 return True
@@ -940,12 +934,9 @@ async def kafka_listener():
                     *KAFKA_TOPICS_CONSUME,
                     bootstrap_servers=KAFKA_BROKER,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                    auto_offset_reset='earliest',  # Cambiado a 'earliest' para recibir TODOS los mensajes (incluyendo CP_REGISTRATION)
+                    auto_offset_reset='latest',  # Solo mensajes nuevos
                     group_id='ev_central_ws_group',
-                    enable_auto_commit=True,  # Guardar progreso
-                    api_version=(0, 10, 1),
-                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms
-                    session_timeout_ms=10000  # 10s - timeout de sesión del grupo de consumidores
+                    enable_auto_commit=True  # Guardar progreso
                 )
                 # Test connection
                 consumer.topics()
@@ -975,11 +966,7 @@ async def kafka_listener():
             # ========================================================================
             for message in consumer:
                 event = message.value
-                event_type = event.get('event_type', 'UNKNOWN')
-                cp_id = event.get('cp_id') or event.get('engine_id', 'N/A')
-                action = event.get('action', 'N/A')
-                print(f"[KAFKA] 📨 Received event: type={event_type}, cp_id={cp_id}, action={action}, topic={message.topic}")
-                print(f"[KAFKA] 📋 Full event: {json.dumps(event, indent=2)}")
+                print(f"[KAFKA] 📨 Received event: {event.get('event_type', 'UNKNOWN')} from topic: {message.topic}")
                 
                 # ====================================================================
                 # REQUISITO a) Registro de Charging Points (Auto-registro)
@@ -1704,9 +1691,14 @@ async def broadcast_kafka_event(event):
                 except Exception as e:
                     print(f"[CENTRAL] ❌ Error finalizando sesión por avería: {e}")
 
-    # Si no hay clientes conectados, no hace falta construir ni enviar mensajes
+    # ========================================================================
+    # BROADCAST A CLIENTES WEBSOCKET (solo si hay clientes conectados)
+    # ========================================================================
+    # El procesamiento de eventos ya se hizo arriba (actualizaciones de BD, etc.)
+    # Ahora solo necesitamos notificar a los clientes WebSocket si están conectados
+    # ========================================================================
     if not shared_state.connected_clients:
-        print(f"[KAFKA] ⚠️  No clients connected, skipping broadcast")
+        print(f"[KAFKA] ⚠️  No clients connected, skipping broadcast (events already processed)")
         return
 
     # Crear mensaje según el tipo de acción

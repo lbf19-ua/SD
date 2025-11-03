@@ -188,3 +188,4 @@ Este script verifica:
    - PC2 y PC3 deben estar en la misma red local
    - Probar ping: `ping <IP_PC2>` desde PC3
 
+
