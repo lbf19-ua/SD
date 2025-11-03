@@ -12,7 +12,8 @@ ENV PYTHONUNBUFFERED=1
 ENV CP_ID=CP_001
 ENV LOCATION="Default Location"
 ENV HEALTH_PORT=5100
-ENV KAFKA_BROKER=localhost:9092
+# KAFKA_BROKER se pasa desde docker-compose (.env file)
+# ENV KAFKA_BROKER=localhost:9092  # ⚠️ NO usar - debe venir de .env en despliegue multi-PC
 
 # Instalar dependencias del sistema
 RUN apt-get update && apt-get install -y \

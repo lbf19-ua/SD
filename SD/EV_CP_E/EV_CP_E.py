@@ -107,17 +107,23 @@ class EV_CP_Engine:
     
     def initialize_kafka(self, max_retries=10):
         """Inicializa productor y consumidor de Kafka con reintentos"""
-        print(f"[{self.cp_id}] 🔄 Connecting to Kafka...")
+        print(f"[{self.cp_id}] 🔄 Connecting to Kafka at {self.kafka_broker}...")
+        print(f"[{self.cp_id}] 📍 Broker address: {self.kafka_broker}")
         
         for attempt in range(max_retries):
             try:
                 # Productor para enviar eventos
+                print(f"[{self.cp_id}] 📤 Initializing producer...")
                 self.producer = KafkaProducer(
                     bootstrap_servers=self.kafka_broker,
-                    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                    api_version=(0, 10, 1),
+                    request_timeout_ms=10000,
+                    retries=3
                 )
                 
                 # Consumidor para recibir comandos de Central
+                print(f"[{self.cp_id}] 📥 Initializing consumer...")
                 self.consumer = KafkaConsumer(
                     KAFKA_TOPICS['central_events'],
                     bootstrap_servers=self.kafka_broker,
@@ -128,17 +134,29 @@ class EV_CP_Engine:
                     request_timeout_ms=10000
                 )
                 
+                # Test producer connection
+                print(f"[{self.cp_id}] 🧪 Testing producer connection...")
+                future = self.producer.send(KAFKA_TOPICS['cp_events'], {'test': 'connection_check'})
+                self.producer.flush(timeout=5)
                 print(f"[{self.cp_id}] ✅ Kafka connected successfully")
                 print(f"[{self.cp_id}] 📡 Listening to: {KAFKA_TOPICS['central_events']}")
                 print(f"[{self.cp_id}] 📤 Publishing to: {KAFKA_TOPICS['cp_events']}")
                 return True
                 
             except Exception as e:
+                import traceback
                 print(f"[{self.cp_id}] ⚠️  Attempt {attempt+1}/{max_retries} failed: {e}")
+                print(f"[{self.cp_id}] 📋 Error details: {traceback.format_exc()}")
                 if attempt < max_retries - 1:
+                    print(f"[{self.cp_id}] ⏳ Retrying in 2 seconds...")
                     time.sleep(2)
                 else:
                     print(f"[{self.cp_id}] ❌ Failed to connect to Kafka after {max_retries} attempts")
+                    print(f"[{self.cp_id}] 💡 Verificar:")
+                    print(f"[{self.cp_id}]    1. Kafka está corriendo en {self.kafka_broker}")
+                    print(f"[{self.cp_id}]    2. Desde PC3, probar: telnet <IP_PC2> 9092")
+                    print(f"[{self.cp_id}]    3. Firewall permite tráfico en puerto 9092 de PC2")
+                    print(f"[{self.cp_id}]    4. Variable KAFKA_BROKER en .env de PC3: {self.kafka_broker}")
                     return False
     
     def publish_event(self, event_type, data=None):

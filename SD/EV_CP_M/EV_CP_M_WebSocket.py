@@ -448,14 +448,19 @@ async def kafka_listener():
     def consume_kafka():
         """Función bloqueante que consume de Kafka"""
         max_retries = 10
+        # Usar kafka_broker de la instancia del Monitor si está disponible, sino usar la variable global
+        kafka_broker_to_use = monitor_instance.kafka_broker if monitor_instance else KAFKA_BROKER
+        
         for attempt in range(max_retries):
             try:
-                print(f"[KAFKA] 🔌 Connecting consumer to Kafka at {KAFKA_BROKER}...")
+                print(f"[KAFKA] 🔌 Connecting consumer to Kafka at {kafka_broker_to_use}...")
+                print(f"[KAFKA] 📍 Monitor instance: {monitor_instance.cp_id if monitor_instance else 'None'}")
+                print(f"[KAFKA] 🔗 Using broker: {kafka_broker_to_use}")
                 # Usar cp_id de monitor_instance si está disponible, sino usar MONITORED_CP_ID global
                 cp_id_for_group = monitor_instance.cp_id if monitor_instance else MONITORED_CP_ID or 'default'
                 consumer = KafkaConsumer(
                     *KAFKA_TOPICS_CONSUME,
-                    bootstrap_servers=KAFKA_BROKER,
+                    bootstrap_servers=kafka_broker_to_use,  # Usar kafka_broker de la instancia
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                     auto_offset_reset='earliest',  # Cambiar a 'earliest' para recibir todos los mensajes
                     group_id=f'ev_monitor_ws_group_{cp_id_for_group}',  # Group ID único por CP
@@ -475,16 +480,20 @@ async def kafka_listener():
                     )
                     
             except Exception as e:
+                import traceback
                 print(f"[KAFKA] ⚠️  Attempt {attempt+1}/{max_retries} - Consumer error: {e}")
+                print(f"[KAFKA] 📋 Error details: {traceback.format_exc()}")
                 if attempt < max_retries - 1:
                     time.sleep(2)
                     continue
                 else:
                     print(f"[KAFKA] ❌ Failed to connect consumer after {max_retries} attempts")
                     print(f"[KAFKA] 💡 Verificar:")
-                    print(f"[KAFKA]    1. Kafka está corriendo en {KAFKA_BROKER}")
-                    print(f"[KAFKA]    2. Red Docker correcta (ev-network)")
-                    print(f"[KAFKA]    3. Nombre 'broker' se resuelve correctamente")
+                    print(f"[KAFKA]    1. Kafka está corriendo en {kafka_broker_to_use}")
+                    print(f"[KAFKA]    2. Desde PC3, probar conectividad: telnet <IP_PC2> 9092")
+                    print(f"[KAFKA]    3. Firewall permite tráfico en puerto 9092 de PC2")
+                    print(f"[KAFKA]    4. Variable KAFKA_BROKER en .env de PC3: {kafka_broker_to_use}")
+                    print(f"[KAFKA]    5. PC2_IP en .env de PC2 debe ser la IP real de PC2")
                     break
     
     # Ejecutar el consumidor de Kafka en un thread separado

@@ -333,7 +333,9 @@
 
         // Connect to WebSocket server
         function connectWebSocket() {
-            const wsUrl = 'ws://localhost:8001/ws';
+            // Usar hostname actual (funciona tanto en local como desde otros PCs)
+            const hostname = window.location.hostname;
+            const wsUrl = `ws://${hostname}:8001/ws`;
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
