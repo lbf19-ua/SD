@@ -90,13 +90,28 @@ def send_command(cp_id, command, kafka_broker=None):
     try:
         # Conectar a Kafka sin api_version explícito (auto-detección)
         print(f"📡 Conectando a Kafka broker: {kafka_broker}")
-        producer = KafkaProducer(
-            bootstrap_servers=kafka_broker,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            request_timeout_ms=30000,
-            retries=3,
-            acks='all'  # Esperar confirmación de todos los replicas
-        )
+        print(f"   ℹ️  Verificando conectividad...")
+        
+        # Intentar conectar con timeout más corto inicialmente para diagnóstico
+        try:
+            producer = KafkaProducer(
+                bootstrap_servers=kafka_broker,
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                request_timeout_ms=30000,
+                retries=3,
+                acks='all'  # Esperar confirmación de todos los replicas
+            )
+            print(f"✅ Conectado a Kafka exitosamente")
+        except Exception as conn_error:
+            print(f"❌ Error de conexión a Kafka: {conn_error}")
+            print(f"\n💡 Diagnóstico:")
+            print(f"   1. Verifica que Kafka está corriendo en: {kafka_broker}")
+            print(f"   2. Verifica conectividad de red:")
+            print(f"      Windows: Test-NetConnection 192.168.1.235 -Port 9092")
+            print(f"      Linux:   telnet 192.168.1.235 9092")
+            print(f"   3. Verifica firewall: puerto 9092 debe estar abierto")
+            print(f"   4. Si estás en PC3, asegúrate de poder alcanzar PC2 (192.168.1.235)")
+            raise
         
         # Crear evento según el comando
         if action == 'status':
