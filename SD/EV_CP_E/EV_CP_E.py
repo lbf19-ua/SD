@@ -966,8 +966,13 @@ class EV_CP_Engine:
         print(f"[{self.cp_id}]  Ready to charge vehicles\n")
         
         # 4. Iniciar menú CLI interactivo (opcional)
+        # ⚠️ NOTA: El menú CLI integrado está desactivado por defecto.
+        # Para usar el menú en una terminal separada, ejecutar:
+        #   python EV_CP_E/cp_control.py CP_XXX --interactive
         cli_thread = None
         if hasattr(self, 'enable_cli') and self.enable_cli:
+            print(f"[{self.cp_id}] ⚠️ CLI menu activado en esta terminal")
+            print(f"[{self.cp_id}] ℹ️  Para usar el menú en terminal separada: python EV_CP_E/cp_control.py {self.cp_id} --interactive")
             cli_thread = self.start_cli_menu()
         
         # 5. Escuchar comandos (bloqueante)

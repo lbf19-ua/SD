@@ -41,6 +41,8 @@ class SharedState:
         self.central_start_time = time.time()  # Timestamp de inicio de Central
         self.processed_event_ids = set()  # IDs de eventos ya procesados (para deduplicación)
         self.processed_lock = threading.Lock()  # Lock para processed_event_ids
+        self.connected_drivers = set()  # Usernames de drivers conectados
+        self.driver_connection_times = {}  # {username: timestamp} para tracking de conexiones
 
 shared_state = SharedState()
 
@@ -425,7 +427,32 @@ class EV_CentralWS:
                 active_user_ids = {row[0] for row in cur.fetchall()}
                 conn.close()
                 
-                # Mapear usuarios con su estado de sesión activa
+                # Combinar usuarios con sesiones activas Y usuarios conectados (sin sesión activa)
+                # Un usuario está "activo" si tiene sesión activa O está conectado al sistema
+                with shared_state.lock:
+                    connected_usernames = shared_state.connected_drivers.copy()
+                
+                # Debug: mostrar qué usuarios están conectados
+                if connected_usernames:
+                    print(f"[CENTRAL] 🔍 DEBUG: Usuarios conectados detectados: {connected_usernames}")
+                
+                # Obtener user_ids de usuarios conectados
+                connected_user_ids = set()
+                for u in users_raw:
+                    nombre = u.get('nombre') or u.get('username')
+                    if nombre in connected_usernames:
+                        user_id = u.get('id')
+                        connected_user_ids.add(user_id)
+                        print(f"[CENTRAL] ✅ Usuario {nombre} (id: {user_id}) marcado como conectado")
+                
+                # Un usuario está activo si tiene sesión activa O está conectado
+                active_user_ids = active_user_ids.union(connected_user_ids)
+                
+                # Debug: mostrar user_ids finales
+                if connected_user_ids:
+                    print(f"[CENTRAL] 🔍 DEBUG: User IDs conectados: {connected_user_ids}, User IDs activos totales: {active_user_ids}")
+                
+                # Mapear usuarios con su estado de sesión activa o conexión
                 users = [self._standardize_user(u, u.get('id') in active_user_ids) for u in users_raw]
             except Exception as e:
                 print(f"[CENTRAL] ⚠️ Error obteniendo usuarios: {e}")
@@ -1218,6 +1245,41 @@ async def kafka_listener():
                                         print(f"[CENTRAL] ⚠️ Error verificando CP {cp_id} para Monitor: {e}")
                             
                             # ====================================================================
+                            # DRIVER_CONNECTED: Notificación de conexión de Driver
+                            # ====================================================================
+                            if et == 'DRIVER_CONNECTED':
+                                try:
+                                    username = event.get('username')
+                                    user_id = event.get('user_id')
+                                    print(f"[CENTRAL] 🔍 DEBUG DRIVER_CONNECTED: username={username}, user_id={user_id}, event completo: {event}")
+                                    if username:
+                                        with shared_state.lock:
+                                            shared_state.connected_drivers.add(username)
+                                            shared_state.driver_connection_times[username] = time.time()
+                                            print(f"[CENTRAL] ✅ Driver {username} añadido a connected_drivers. Total conectados: {len(shared_state.connected_drivers)}")
+                                            print(f"[CENTRAL] 🔍 DEBUG: connected_drivers ahora contiene: {shared_state.connected_drivers}")
+                                    else:
+                                        print(f"[CENTRAL] ⚠️ DRIVER_CONNECTED recibido pero username está vacío")
+                                except Exception as e:
+                                    print(f"[CENTRAL] ⚠️ Error procesando DRIVER_CONNECTED: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                            
+                            # ====================================================================
+                            # DRIVER_DISCONNECTED: Notificación de desconexión de Driver
+                            # ====================================================================
+                            if et == 'DRIVER_DISCONNECTED':
+                                try:
+                                    username = event.get('username')
+                                    if username:
+                                        with shared_state.lock:
+                                            shared_state.connected_drivers.discard(username)
+                                            shared_state.driver_connection_times.pop(username, None)
+                                        print(f"[CENTRAL] ❌ Driver {username} desconectado")
+                                except Exception as e:
+                                    print(f"[CENTRAL] ⚠️ Error procesando DRIVER_DISCONNECTED: {e}")
+                            
+                            # ====================================================================
                             # REQUISITO b) Autorización de suministros - procesar aquí (no en broadcast)
                             # ====================================================================
                             
@@ -1394,7 +1456,8 @@ async def kafka_listener():
                             # ⚠️ IMPORTANTE: Pasar TODOS los eventos (excepto los procesados arriba) 
                             # a broadcast_kafka_event() para procesamiento unificado
                             # Esto evita procesamiento duplicado de CP_REGISTRATION y cp_status_change
-                            if et not in ['MONITOR_AUTH', 'AUTHORIZATION_REQUEST']:
+                            # DRIVER_CONNECTED y DRIVER_DISCONNECTED se procesan aquí, no en broadcast
+                            if et not in ['MONITOR_AUTH', 'AUTHORIZATION_REQUEST', 'DRIVER_CONNECTED', 'DRIVER_DISCONNECTED']:
                                 try:
                                     asyncio.run_coroutine_threadsafe(
                                         broadcast_kafka_event(event),

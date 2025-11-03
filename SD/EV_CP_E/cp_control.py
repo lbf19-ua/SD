@@ -4,11 +4,20 @@
 CP Control - Script para controlar un Charging Point remotamente
 ================================================================================
 
-Este script permite enviar comandos a un CP sin necesidad de acceder directamente
-al contenedor Docker. Se conecta vía Kafka para enviar comandos al CP.
+Este script permite enviar comandos a un CP desde una TERMINAL SEPARADA sin 
+necesidad de acceder directamente al contenedor Docker. Se conecta vía Kafka 
+para enviar comandos al CP.
+
+REQUISITO 7: Menú en terminal separada para simular enchufe/desenchufe del vehículo.
 
 USO:
-    python cp_control.py CP_001 [comando]
+    # Menú interactivo (recomendado - en terminal separada)
+    python cp_control.py CP_001 --interactive
+    # O simplemente:
+    python cp_control.py CP_001
+    
+    # Comando directo
+    python cp_control.py CP_001 plug
 
 Comandos disponibles:
     [P] plug      - Simular que el vehículo se enchufa
@@ -18,8 +27,14 @@ Comandos disponibles:
     [S] status    - Mostrar estado actual del CP
 
 Ejemplo:
+    python cp_control.py CP_001 --interactive
     python cp_control.py CP_001 unplug
     python cp_control.py CP_001 status
+
+VENTAJAS:
+    - Menú en terminal separada (no mezcla con logs del Engine)
+    - Control remoto desde cualquier PC con acceso a Kafka
+    - No interfiere con el funcionamiento del Engine
 ================================================================================
 """
 
