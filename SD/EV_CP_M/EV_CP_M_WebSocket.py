@@ -729,6 +729,13 @@ async def process_kafka_event(event):
                 
                 print(f"[MONITOR-{cp_id}] Procesando CP_INFO: status={cp_status} (cambió: {status_changed}), location={cp_location}, max_power={max_power}, tariff={tariff}")
                 print(f"[MONITOR-{cp_id}] Datos extraídos del evento - cp_data.location: {cp_data.get('location')}, cp_data.localizacion: {cp_data.get('localizacion')}, event.location: {event.get('location')}, event.localizacion: {event.get('localizacion')}")
+                print(f"[MONITOR-{cp_id}] Procesando CP_INFO: status={cp_status} (cambió: {status_changed}), location='{cp_location}' (cambió: {location_changed}), max_power={max_power}, tariff={tariff}")
+                print(f"[MONITOR-{cp_id}] Datos extraídos del evento - cp_data.location: '{cp_data.get('location')}', cp_data.localizacion: '{cp_data.get('localizacion')}', event.location: '{event.get('location')}', event.localizacion: '{event.get('localizacion')}'")
+                # DEBUG: Mostrar todos los campos del evento para diagnosticar problemas
+                if cp_location == 'Unknown' or not cp_location:
+                    print(f"[MONITOR-{cp_id}] DEBUG: cp_location es '{cp_location}', verificando evento completo:")
+                    print(f"[MONITOR-{cp_id}] DEBUG: event.data keys: {list(cp_data.keys()) if isinstance(cp_data, dict) else 'NOT A DICT'}")
+                    print(f"[MONITOR-{cp_id}] DEBUG: event root keys: {list(event.keys())[:10]}...")  # Primeros 10 campos
                 
                 # Guardar en shared_state.cp_info solo si hay cambios
                 shared_state.cp_info[cp_id].update({
@@ -743,6 +750,11 @@ async def process_kafka_event(event):
                     'estado': cp_status
                 })
                 print(f"[MONITOR-{cp_id}] CP_INFO actualizado en shared_state - location: '{cp_location}', status: {cp_status}")
+                # DEBUG: Si location es 'Unknown' o status es 'offline', verificar qué pasó
+                if cp_location == 'Unknown' or cp_location == '':
+                    print(f"[MONITOR-{cp_id}] ADVERTENCIA: Location sigue siendo 'Unknown' después de actualizar CP_INFO")
+                if cp_status == 'offline':
+                    print(f"[MONITOR-{cp_id}] ADVERTENCIA: Status es 'offline' - el Engine debería estar 'available' cuando está corriendo")
                 # No es necesario broadcast inmediato - el broadcast periódico lo hará cada 3 segundos
                 # await broadcast_monitor_data()  # Comentado para evitar saturación
             elif ('status' in event or 'estado' in event) and event_type != 'MONITOR_AUTH' and event_type != 'CP_REGISTRATION':

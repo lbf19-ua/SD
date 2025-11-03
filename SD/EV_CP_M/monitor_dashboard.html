@@ -547,7 +547,9 @@
                     statusText = normStatus === 'charging' ? 'Suministrando' : 'Disponible';
                 dotColor = 'green';
                 } else if (normStatus === 'offline') {
-                statusText = 'Desconectado';
+                    // ⚠️ Cuando el CP está offline, NO mostrar 'OK' - el Engine puede estar respondiendo pero el CP está desconectado
+                    statusIcon = 'OFFLINE';
+                    statusText = 'Desconectado';
                 dotColor = 'gray';
                 } else if (normStatus === 'fault') {
                 statusIcon = 'ERROR';
