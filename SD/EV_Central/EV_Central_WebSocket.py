@@ -43,6 +43,10 @@ class SharedState:
         self.processed_lock = threading.Lock()  # Lock para processed_event_ids
         self.connected_drivers = set()  # Usernames de drivers conectados
         self.driver_connection_times = {}  # {username: timestamp} para tracking de conexiones
+        # Tracking de estado del Monitor y Engine
+        self.monitor_heartbeats = {}  # {cp_id: timestamp} - último heartbeat recibido del Monitor
+        self.engine_status = {}  # {cp_id: 'OK'|'KO'} - estado del Engine según Monitor
+        self.monitor_status = {}  # {cp_id: 'OK'|'KO'} - estado del Monitor (basado en heartbeats)
 
 shared_state = SharedState()
 
@@ -1059,6 +1063,134 @@ async def start_http_server():
     await site.start()
     print(f"[HTTP] 🌐 Server started on http://0.0.0.0:{SERVER_PORT}")
 
+async def check_monitor_timeouts():
+    """
+    ============================================================================
+    DETECCIÓN DE MONITORS CAÍDOS
+    ============================================================================
+    Verifica cada 15 segundos si algún Monitor no ha enviado heartbeat.
+    Si no hay heartbeat en los últimos 30 segundos, marca el Monitor como KO.
+    ============================================================================
+    """
+    while True:
+        try:
+            await asyncio.sleep(15)  # Verificar cada 15 segundos
+            
+            current_time = time.time()
+            timeout_threshold = 30  # 30 segundos sin heartbeat = Monitor KO
+            
+            with shared_state.lock:
+                monitors_to_check = list(shared_state.monitor_heartbeats.keys())
+            
+            for cp_id in monitors_to_check:
+                with shared_state.lock:
+                    last_heartbeat = shared_state.monitor_heartbeats.get(cp_id, 0)
+                    current_monitor_status = shared_state.monitor_status.get(cp_id, 'UNKNOWN')
+                
+                time_since_heartbeat = current_time - last_heartbeat
+                
+                if time_since_heartbeat > timeout_threshold:
+                    # Monitor KO - no ha enviado heartbeat
+                    if current_monitor_status != 'KO':
+                        print(f"[CENTRAL] 🚨 Monitor KO detectado para {cp_id} (sin heartbeat por {time_since_heartbeat:.1f}s)")
+                        with shared_state.lock:
+                            shared_state.monitor_status[cp_id] = 'KO'
+                        
+                        # Aplicar lógica de estados combinados
+                        update_combined_status(cp_id)
+                elif last_heartbeat > 0:
+                    # Monitor OK - hay heartbeat reciente
+                    if current_monitor_status != 'OK':
+                        print(f"[CENTRAL] ✅ Monitor OK detectado para {cp_id} (heartbeat hace {time_since_heartbeat:.1f}s)")
+                        with shared_state.lock:
+                            shared_state.monitor_status[cp_id] = 'OK'
+                        
+                        # Aplicar lógica de estados combinados
+                        update_combined_status(cp_id)
+        except Exception as e:
+            print(f"[CENTRAL] ⚠️ Error checking monitor timeouts: {e}")
+            await asyncio.sleep(5)
+
+
+def update_combined_status(cp_id):
+    """
+    ============================================================================
+    LÓGICA DE ESTADOS COMBINADOS
+    ============================================================================
+    Determina el estado final del CP basándose en:
+    - Monitor_OK and Engine_OK => Activado (Verde) [estado 'available']
+    - Monitor_OK and Engine_KO => Averiado (Rojo) [estado 'fault']
+    - Monitor_KO and Engine_OK => Desconectado [estado 'offline']
+    - Monitor_KO and Engine_KO => Desconectado [estado 'offline']
+    ============================================================================
+    """
+    with shared_state.lock:
+        monitor_status = shared_state.monitor_status.get(cp_id, 'UNKNOWN')
+        engine_status = shared_state.engine_status.get(cp_id, 'UNKNOWN')
+    
+    # Determinar estado combinado
+    if monitor_status == 'OK' and engine_status == 'OK':
+        new_status = 'available'
+        reason = "Monitor_OK + Engine_OK"
+    elif monitor_status == 'OK' and engine_status == 'KO':
+        new_status = 'fault'
+        reason = "Monitor_OK + Engine_KO"
+    elif monitor_status == 'KO':
+        new_status = 'offline'
+        reason = f"Monitor_KO (Engine: {engine_status})"
+    else:
+        # Estado desconocido - no cambiar
+        return
+    
+    # Verificar si el estado realmente cambió
+    try:
+        cp_current = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+        current_status = cp_current.get('estado') or cp_current.get('status') if cp_current else None
+        
+        if current_status != new_status:
+            print(f"[CENTRAL] 🔄 Estado combinado actualizado para {cp_id}: {current_status} → {new_status} ({reason})")
+            db.update_charging_point_status(cp_id, new_status)
+            
+            # Si Monitor está KO y hay sesión activa, finalizarla
+            if monitor_status == 'KO':
+                try:
+                    active_sessions = db.get_active_sessions_for_cp(cp_id) if hasattr(db, 'get_active_sessions_for_cp') else []
+                    if not active_sessions:
+                        all_sessions = db.get_all_sessions() if hasattr(db, 'get_all_sessions') else []
+                        active_sessions = [s for s in all_sessions if s.get('cp_id') == cp_id and s.get('estado') == 'active']
+                    
+                    for session in active_sessions:
+                        session_id = session.get('id')
+                        user_id = session.get('user_id')
+                        
+                        if session_id and user_id:
+                            user = db.get_user_by_id(user_id)
+                            if user:
+                                username = user.get('username')
+                                # Finalizar sesión con energía actual
+                                energy_kwh = session.get('energy_kwh', 0.0)
+                                result = db.end_charging_sesion(session_id, energy_kwh)
+                                
+                                if result:
+                                    print(f"[CENTRAL] ✅ Sesión {session_id} finalizada por Monitor KO para usuario {username}")
+                                    
+                                    # Notificar al Driver
+                                    central_instance.publish_event('CP_ERROR_SIMULATED', {
+                                        'cp_id': cp_id,
+                                        'error_type': 'monitor_down',
+                                        'message': f'El Monitor de {cp_id} está desconectado. La carga ha sido finalizada.',
+                                        'username': username,
+                                        'user_id': user_id
+                                    })
+                except Exception as e:
+                    print(f"[CENTRAL] ⚠️ Error finalizando sesión por Monitor KO: {e}")
+            
+            # Publicar cambio de estado
+            central_instance.publish_cp_info_to_monitor(cp_id)
+    except Exception as e:
+        print(f"[CENTRAL] ⚠️ Error actualizando estado combinado: {e}")
+
+
 async def broadcast_updates():
     """Broadcast actualizaciones periódicas a todos los clientes"""
     while True:
@@ -1229,6 +1361,12 @@ async def kafka_listener():
                                 cp_id = event.get('cp_id')
                                 if cp_id:
                                     print(f"[CENTRAL] 🔐 Monitor autenticado para CP {cp_id}")
+                                    
+                                    # Registrar Monitor como OK (inicial)
+                                    with shared_state.lock:
+                                        shared_state.monitor_status[cp_id] = 'OK'
+                                        shared_state.monitor_heartbeats[cp_id] = time.time()
+                                    
                                     # ⚠️ NO publicar CP_INFO aquí - se enviará cuando el Engine se registre
                                     # Esto evita eventos innecesarios. El Monitor recibirá CP_INFO cuando
                                     # Central procese el CP_REGISTRATION del Engine
@@ -2192,11 +2330,38 @@ async def broadcast_kafka_event(event):
         # ========================================================================
         # Cuando el Monitor detecta que el Engine no responde (3+ timeouts),
         # notifica a Central para que cancele sesiones activas y libere el CP
+        elif event_type == 'MONITOR_HEARTBEAT' or action == 'monitor_heartbeat':
+            # Registrar heartbeat del Monitor
+            with shared_state.lock:
+                shared_state.monitor_heartbeats[cp_id] = time.time()
+                shared_state.monitor_status[cp_id] = 'OK'  # Monitor está vivo
+                # También actualizar estado del Engine desde el heartbeat
+                engine_status_from_heartbeat = event.get('engine_status', 'UNKNOWN')
+                if engine_status_from_heartbeat in ['OK', 'KO']:
+                    shared_state.engine_status[cp_id] = engine_status_from_heartbeat
+            
+            # Aplicar lógica de estados combinados
+            update_combined_status(cp_id)
+        
+        elif event_type == 'ENGINE_OK' or action == 'report_engine_ok':
+            # Engine se recuperó
+            print(f"[CENTRAL] ✅ ENGINE_OK recibido: cp={cp_id} - Engine recuperado")
+            
+            with shared_state.lock:
+                shared_state.engine_status[cp_id] = 'OK'
+            
+            # Aplicar lógica de estados combinados
+            update_combined_status(cp_id)
+        
         elif event_type in ['ENGINE_FAILURE', 'ENGINE_OFFLINE'] or action in ['report_engine_failure', 'report_engine_offline']:
             failure_type = event.get('failure_type', 'unknown')
             consecutive_failures = event.get('consecutive_failures', 0)
             
             print(f"[CENTRAL] 🚨 ENGINE_FAILURE recibido: cp={cp_id}, type={failure_type}, failures={consecutive_failures}")
+            
+            # Actualizar estado del Engine
+            with shared_state.lock:
+                shared_state.engine_status[cp_id] = 'KO'
             
             # Cambiar estado del CP a 'offline' o 'fault'
             new_status = 'offline' if event_type == 'ENGINE_OFFLINE' else 'fault'
@@ -2219,6 +2384,9 @@ async def broadcast_kafka_event(event):
                     # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR solo si el estado realmente cambió
                     # NO usar force=True aquí para respetar throttling
                     central_instance.publish_cp_info_to_monitor(cp_id)
+                    
+                    # Aplicar lógica de estados combinados (puede sobrescribir el estado)
+                    update_combined_status(cp_id)
             except Exception as e:
                 print(f"[CENTRAL] ⚠️ Error verificando/actualizando estado del CP: {e}")
             
@@ -2499,11 +2667,15 @@ async def main():
         # Iniciar listener de Kafka
         kafka_task = asyncio.create_task(kafka_listener())
         
+        # Iniciar verificación de timeouts de Monitor
+        monitor_timeout_task = asyncio.create_task(check_monitor_timeouts())
+        
         print("\n✅ All services started successfully!")
-        print(f"🌐 Open http://localhost:{SERVER_PORT} in your browser\n")
+        print(f"🌐 Open http://localhost:{SERVER_PORT} in your browser")
+        print(f"💓 Monitor timeout checker active (every 15s)\n")
         
         # Mantener el servidor corriendo
-        await asyncio.gather(broadcast_task, kafka_task)
+        await asyncio.gather(broadcast_task, kafka_task, monitor_timeout_task)
         
     except Exception as e:
         print(f"\n❌ Error starting server: {e}")
