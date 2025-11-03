@@ -232,7 +232,6 @@ class EV_MonitorWS:
             else:
                 cp_status = 'offline'
             
-            print(f"[MONITOR-{self.cp_id}] 📊 get_monitor_data - Estado extraído de shared_state.cp_info: raw_status='{raw_status}', cp_status='{cp_status}'")
             if cp_status == 'charging':
                 current_power = max_power * random.uniform(0.85, 0.95)
             
@@ -598,7 +597,6 @@ async def process_kafka_event(event):
                     tariff = 0.30
                 
                 print(f"[MONITOR-{cp_id}] ✅ Procesando CP_INFO: status={cp_status}, location={cp_location}, max_power={max_power}, tariff={tariff}")
-                print(f"[MONITOR-{cp_id}] 📋 Estado extraído del evento - data.status={cp_data.get('status')}, data.estado={cp_data.get('estado')}, event.status={event.get('status')}, event.estado={event.get('estado')}")
                 
                 # Guardar en shared_state.cp_info
                 shared_state.cp_info[cp_id].update({
@@ -612,9 +610,9 @@ async def process_kafka_event(event):
                     'status': cp_status,
                     'estado': cp_status
                 })
-                print(f"[MONITOR-{cp_id}] 💾 CP_INFO guardado en shared_state.cp_info - status final: {shared_state.cp_info[cp_id].get('status')}")
-                # Actualizar dashboard inmediatamente
-                await broadcast_monitor_data()
+                print(f"[MONITOR-{cp_id}] 💾 CP_INFO actualizado - status: {cp_status}")
+                # No es necesario broadcast inmediato - el broadcast periódico lo hará cada 3 segundos
+                # await broadcast_monitor_data()  # Comentado para evitar saturación
             elif cp_id and cp_id != monitor_instance.cp_id:
                 # Evento para otro CP, ignorar
                 pass
@@ -632,8 +630,7 @@ async def process_kafka_event(event):
                     shared_state.cp_info[cp_id]['status'] = new_status
                     shared_state.cp_info[cp_id]['estado'] = new_status
                     print(f"[MONITOR-{cp_id}] 📥 Estado actualizado desde Central: {new_status}")
-                    # Actualizar dashboard inmediatamente
-                    await broadcast_monitor_data()
+                    # El broadcast periódico actualizará el dashboard automáticamente
     
     # Procesar eventos de carga y errores
     if action == 'charging_started':
@@ -707,8 +704,7 @@ async def process_kafka_event(event):
                     elif error_type == 'out_of_service':
                         shared_state.cp_info[cp_id]['status'] = 'out_of_service'
                     shared_state.cp_info[cp_id]['estado'] = shared_state.cp_info[cp_id]['status']
-            # Actualizar dashboard inmediatamente
-            await broadcast_monitor_data()
+            # El broadcast periódico actualizará el dashboard automáticamente
         
     elif action == 'cp_error_fixed' or action == 'resume':
         if cp_id == monitor_instance.cp_id:
@@ -722,8 +718,7 @@ async def process_kafka_event(event):
                 if cp_id in shared_state.cp_info:
                     shared_state.cp_info[cp_id]['status'] = 'available'
                     shared_state.cp_info[cp_id]['estado'] = 'available'
-            # Actualizar dashboard inmediatamente
-            await broadcast_monitor_data()
+            # El broadcast periódico actualizará el dashboard automáticamente
 
 async def broadcast_alert(alert):
     """Broadcast una alerta a todos los clientes WebSocket"""

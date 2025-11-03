@@ -157,6 +157,7 @@ class EV_CentralWS:
                 'message_id': generate_message_id(),
                 'event_type': event_type,
                 'timestamp': current_timestamp(),
+                'source': 'CENTRAL',  # Marcar origen para evitar loops
                 **data
             }
             
@@ -975,6 +976,49 @@ async def kafka_listener():
                 # Test connection
                 consumer.topics()
                 print(f"[KAFKA] ✅ Connected to Kafka successfully!")
+                
+                # ⚠️ REQUISITO: Al reiniciar Central, resetear offsets para leer solo mensajes nuevos
+                # Esto asegura que no procese eventos antiguos que quedaron en Kafka
+                try:
+                    print(f"[KAFKA] 🔄 Resetting consumer group offsets to 'latest' to ignore old messages...")
+                    # Forzar que el consumidor empiece desde el offset más reciente
+                    # Cerrando y recreando el consumer con el mismo group_id pero con seek al final
+                    consumer.close()
+                    # Crear consumer temporal solo para resetear offsets
+                    from kafka.admin import KafkaAdminClient
+                    from kafka.admin.new_partitions import NewPartitions
+                    from kafka.coordinator.assignors.range import RangePartitionAssignor
+                    try:
+                        admin = KafkaAdminClient(bootstrap_servers=KAFKA_BROKER)
+                        # No hay API directa para resetear offsets en kafka-python fácilmente
+                        # En su lugar, usamos un group_id único en cada inicio para evitar leer mensajes antiguos
+                        import uuid
+                        unique_group_id = f'ev_central_ws_group_{int(time.time())}'
+                        print(f"[KAFKA] 📝 Using unique group_id: {unique_group_id} (ignores old messages)")
+                        admin.close()
+                    except:
+                        unique_group_id = f'ev_central_ws_group_{int(time.time())}'
+                        print(f"[KAFKA] 📝 Using unique group_id: {unique_group_id} (ignores old messages)")
+                    
+                    # Recrear consumer con group_id único para ignorar mensajes antiguos
+                    consumer = KafkaConsumer(
+                        *KAFKA_TOPICS_CONSUME,
+                        bootstrap_servers=KAFKA_BROKER,
+                        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                        auto_offset_reset='latest',  # Solo mensajes nuevos
+                        group_id=unique_group_id,  # Group ID único por inicio
+                        enable_auto_commit=True,
+                        request_timeout_ms=30000,
+                        session_timeout_ms=10000,
+                        max_poll_records=100,
+                        fetch_min_bytes=1,
+                        fetch_max_wait_ms=500
+                    )
+                    consumer.topics()
+                except Exception as offset_error:
+                    print(f"[KAFKA] ⚠️ Could not reset offsets, continuing with default: {offset_error}")
+                    # Continuar con el consumer original si falla el reset
+                
                 print(f"[KAFKA] 📡 Consumer started, listening to {KAFKA_TOPICS_CONSUME}")
                 break
             except Exception as e:
@@ -1036,44 +1080,11 @@ async def kafka_listener():
                             # Procesar el evento
                             print(f"[KAFKA] 📨 Processing event: {event.get('event_type', 'UNKNOWN')} from topic: {message.topic}")
                             
-                            # ====================================================================
-                            # REQUISITO a) Registro de Charging Points (Auto-registro)
-                            # ====================================================================
-                            # Cuando un CP se conecta o envía CP_REGISTRATION, se registra
-                            # automáticamente en la base de datos
-                            # --------------------------------------------------------------------
-                            try:
-                                et = event.get('event_type', '')
-                                action = event.get('action', '')
-                                cp_id = event.get('cp_id') or event.get('engine_id')
-                                
-                                if cp_id and (et == 'CP_REGISTRATION' or action == 'connect'):
-                                    data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
-                                    localizacion = data.get('localizacion') or data.get('location') or 'Desconocido'
-                                    max_kw = data.get('max_kw') or data.get('max_power_kw') or 22.0
-                                    tarifa_kwh = data.get('tarifa_kwh') or data.get('tariff_per_kwh') or data.get('price_eur_kwh') or 0.30
-                                    if hasattr(db, 'register_or_update_charging_point'):
-                                        db.register_or_update_charging_point(cp_id, localizacion, max_kw=max_kw, tarifa_kwh=tarifa_kwh, estado='available')
-                                        print(f"[CENTRAL] 💾 CP registrado/actualizado (auto-registro): {cp_id}")
-                                        # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR
-                                        central_instance.publish_cp_info_to_monitor(cp_id)
-                                
-                                # Auto-crear CP si llega evento pero no existe
-                                if cp_id and action == 'cp_status_change':
-                                    try:
-                                        cp_row = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
-                                        if not cp_row:
-                                            status = event.get('status', 'available')
-                                            if hasattr(db, 'register_or_update_charging_point'):
-                                                db.register_or_update_charging_point(cp_id, 'Desconocido', max_kw=22.0, tarifa_kwh=0.30, estado=status)
-                                                print(f"[CENTRAL] 💾 CP auto-creado por status_change: {cp_id}")
-                                    except Exception as ie:
-                                        print(f"[CENTRAL] ⚠️ Error auto-creando CP por status_change: {ie}")
-                            except Exception as e:
-                                print(f"[CENTRAL] ⚠️ Error persistiendo registro de CP: {e}")
+                            # ⚠️ IMPORTANTE: Todo el procesamiento de eventos se hace en broadcast_kafka_event()
+                            # para evitar procesamiento duplicado. Este listener solo consume y pasa eventos.
                             
                             # ====================================================================
-                            # MONITOR AUTH: Cuando un Monitor se autentica, enviar información del CP
+                            # MONITOR AUTH: Excepción - procesar aquí porque no debe pasar por broadcast
                             # ====================================================================
                             et = event.get('event_type', '')
                             if et == 'MONITOR_AUTH' or event.get('action', '') == 'authenticate':
@@ -1082,6 +1093,10 @@ async def kafka_listener():
                                     print(f"[CENTRAL] 🔐 Monitor autenticado para CP {cp_id}, enviando información del CP...")
                                     # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR (información inicial)
                                     central_instance.publish_cp_info_to_monitor(cp_id)
+                            
+                            # ====================================================================
+                            # REQUISITO b) Autorización de suministros - procesar aquí (no en broadcast)
+                            # ====================================================================
                             
                             # ====================================================================
                             # REQUISITO b) Autorización de suministros
@@ -1253,11 +1268,17 @@ async def kafka_listener():
                             # La Central actualiza el estado del CP y registra la sesión.
                             # --------------------------------------------------------------------
                             
-                            # Programar el broadcast en el event loop
-                            asyncio.run_coroutine_threadsafe(
-                                broadcast_kafka_event(event),
-                                loop
-                            )
+                            # ⚠️ IMPORTANTE: Pasar TODOS los eventos (excepto los procesados arriba) 
+                            # a broadcast_kafka_event() para procesamiento unificado
+                            # Esto evita procesamiento duplicado de CP_REGISTRATION y cp_status_change
+                            if et not in ['MONITOR_AUTH', 'AUTHORIZATION_REQUEST']:
+                                try:
+                                    asyncio.run_coroutine_threadsafe(
+                                        broadcast_kafka_event(event),
+                                        loop
+                                    )
+                                except Exception as e:
+                                    print(f"[CENTRAL] ⚠️ Error scheduling broadcast: {e}")
                             
                 except Exception as poll_error:
                     # Errores de polling no deberían detener el bucle
@@ -1301,6 +1322,49 @@ async def broadcast_kafka_event(event):
     - REQUISITO b) Autorización de suministro: Procesa 'charging_started'
     ============================================================================
     """
+    # ⚠️ IMPORTANTE: Ignorar eventos originados por Central mismo para evitar loops infinitos
+    if event.get('source') == 'CENTRAL':
+        return  # Central no debe procesar sus propios eventos
+    
+    # ⚠️ PROTECCIÓN: Ignorar eventos muy antiguos (más de 2 minutos) que pueden ser de antes del reinicio
+    event_timestamp = event.get('timestamp')
+    if event_timestamp:
+        try:
+            # Calcular diferencia de tiempo
+            current_time = time.time()
+            event_time = float(event_timestamp)
+            age_seconds = current_time - event_time
+            
+            # Ignorar eventos con más de 2 minutos de antigüedad (son de antes del reinicio)
+            if age_seconds > 120:  # 2 minutos
+                print(f"[CENTRAL] ⚠️ Ignorando evento antiguo ({age_seconds:.0f}s de antigüedad, probablemente de antes del reinicio): {event.get('event_type', 'UNKNOWN')}")
+                return
+        except (ValueError, TypeError):
+            # Si el timestamp no es válido, continuar (puede ser un evento sin timestamp)
+            pass
+    
+    # ⚠️ PROTECCIÓN: Evitar procesar el mismo evento múltiples veces si ya se procesó
+    action = event.get('action', '')
+    event_type = event.get('event_type', '')
+    cp_id = event.get('cp_id') or event.get('engine_id')
+    
+    # Para CP_REGISTRATION, verificar si el CP ya existe y está en el mismo estado
+    # PERO solo ignorar si está 'available' - si está 'offline' (después de reinicio), permitir registro
+    if (event_type == 'CP_REGISTRATION' or action == 'connect') and cp_id:
+        try:
+            cp_existing = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+            if cp_existing:
+                existing_status = cp_existing.get('estado') or cp_existing.get('status')
+                # Solo ignorar si ya está 'available' - permitir si está 'offline' (necesita reconexión)
+                if existing_status == 'available':
+                    print(f"[CENTRAL] ⚠️ CP {cp_id} ya registrado como 'available', ignorando registro duplicado")
+                    return
+                # Si está 'offline', permitir el registro (reconexión después de reinicio)
+                elif existing_status == 'offline':
+                    print(f"[CENTRAL] ℹ️ CP {cp_id} está 'offline', permitiendo reconexión después de reinicio de Central")
+        except Exception as e:
+            print(f"[CENTRAL] ⚠️ Error verificando CP existente: {e}")
+    
     print(f"[KAFKA] 🔄 Processing event for broadcast: {event.get('event_type', 'UNKNOWN')}, clients: {len(shared_state.connected_clients)}")
     
     # Determinar el tipo de evento y formatearlo para el dashboard
@@ -1326,18 +1390,26 @@ async def broadcast_kafka_event(event):
                 tarifa_kwh = data.get('tarifa_kwh') or data.get('tariff_per_kwh') or data.get('price_eur_kwh') or 0.30
                 estado = 'available'
                 print(f"[CENTRAL] 🆕 Auto-reg CP on connect: cp_id={cp_id}, loc={localizacion}, max_kw={max_kw}, tarifa={tarifa_kwh}")
+                # Verificar si el CP ya existe antes de registrar
+                cp_existing = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+                
                 # Registrar o actualizar
                 if hasattr(db, 'register_or_update_charging_point'):
                     db.register_or_update_charging_point(cp_id, localizacion, max_kw=max_kw, tarifa_kwh=tarifa_kwh, estado=estado)
                 else:
                     # Fallback: intentar solo actualizar estado
                     db.update_charging_point_status(cp_id, estado)
-                # Confirmar existencia
+                
+                # Confirmar existencia y enviar CP_INFO solo una vez
                 cp_after = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
                 if cp_after:
                     print(f"[CENTRAL] ✅ CP registrado/actualizado: {cp_after['cp_id']} en {cp_after.get('location','')} estado={cp_after.get('estado','')}" )
-                    # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR
-                    central_instance.publish_cp_info_to_monitor(cp_id)
+                    # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR solo si es nuevo registro o cambió algo
+                    # (cp_status_change ya enviará CP_INFO si cambia el estado)
+                    if not cp_existing or cp_existing.get('estado') != estado:
+                        central_instance.publish_cp_info_to_monitor(cp_id)
+                    else:
+                        print(f"[CENTRAL] ℹ️ CP {cp_id} ya registrado con mismo estado, omitiendo CP_INFO")
                 else:
                     print(f"[CENTRAL] ⚠️ No se pudo verificar CP {cp_id} tras auto-registro")
             except Exception as e:
@@ -1634,9 +1706,17 @@ async def broadcast_kafka_event(event):
                         print(f"[CENTRAL] 🆕 CP auto-creado en cp_status_change: {cp_id}")
                 except Exception as e:
                     print(f"[CENTRAL] ⚠️ Error asegurando CP en cp_status_change: {e}")
-                db.update_charging_point_status(cp_id, status)
-                # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
-                central_instance.publish_cp_info_to_monitor(cp_id)
+                
+                # Solo actualizar si el estado cambió realmente
+                cp_current = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+                current_status = cp_current.get('estado') or cp_current.get('status') if cp_current else None
+                
+                if current_status != status:
+                    db.update_charging_point_status(cp_id, status)
+                    # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR solo si cambió
+                    central_instance.publish_cp_info_to_monitor(cp_id)
+                else:
+                    print(f"[CENTRAL] ℹ️ Estado {status} para {cp_id} ya está actualizado, no se envía CP_INFO")
         elif action in ['cp_error_simulated', 'cp_error_fixed']:
             new_status = event.get('new_status') or event.get('status')
             if new_status:
