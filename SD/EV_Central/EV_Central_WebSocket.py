@@ -138,6 +138,82 @@ class EV_CentralWS:
             import traceback
             traceback.print_exc()
 
+    def publish_cp_info_to_monitor_with_data(self, cp_id, location, status, max_power_kw=22.0, tariff_per_kwh=0.30, force=False):
+        """
+        Publica CP_INFO al Monitor usando datos directamente proporcionados en lugar de leer de BD.
+        Útil para el registro inicial donde puede haber race condition si leemos de BD inmediatamente.
+        
+        Args:
+            cp_id: ID del CP
+            location: Ubicación del CP
+            status: Estado del CP
+            max_power_kw: Potencia máxima
+            tariff_per_kwh: Tarifa
+            force: Si es True, fuerza el envío incluso si hay throttling
+        """
+        if not self.ensure_producer():
+            return
+        
+        try:
+            # ⚠️ CRÍTICO: Asegurar que cp_id está presente y es correcto
+            if not cp_id or not isinstance(cp_id, str):
+                print(f"[CENTRAL] ❌ ERROR: Invalid cp_id when publishing CP_INFO: {cp_id}")
+                return
+            
+            # Normalizar location
+            if location:
+                location = str(location).strip()
+            if not location or location == '':
+                location = 'Unknown'
+            
+            # Normalizar status
+            status = self._normalize_status(status)
+            if not status or status.strip() == '':
+                status = 'offline'
+            
+            # Asegurar que son números
+            try:
+                max_power_kw = float(max_power_kw) if max_power_kw else 22.0
+                tariff_per_kwh = float(tariff_per_kwh) if tariff_per_kwh else 0.30
+            except (ValueError, TypeError):
+                max_power_kw = 22.0
+                tariff_per_kwh = 0.30
+            
+            # Publicar evento CP_INFO al Monitor con los datos proporcionados
+            event_data = {
+                'action': 'cp_info_update',
+                'cp_id': cp_id,
+                'engine_id': cp_id,
+                'data': {
+                    'cp_id': cp_id,
+                    'engine_id': cp_id,
+                    'location': location,
+                    'localizacion': location,
+                    'max_power_kw': float(max_power_kw),
+                    'max_kw': float(max_power_kw),
+                    'tariff_per_kwh': float(tariff_per_kwh),
+                    'tarifa_kwh': float(tariff_per_kwh),
+                    'status': status,
+                    'estado': status
+                },
+                # También incluir en el nivel raíz como fallback
+                'status': status,
+                'estado': status,
+                'location': location,
+                'localizacion': location,
+                'max_power_kw': float(max_power_kw),
+                'max_kw': float(max_power_kw),
+                'tariff_per_kwh': float(tariff_per_kwh),
+                'tarifa_kwh': float(tariff_per_kwh)
+            }
+            
+            self.publish_event('CP_INFO', event_data)
+            print(f"[CENTRAL] 📡 CP_INFO enviado al Monitor (directo) - CP: {cp_id}, Location: '{location}', Status: {status}, Max Power: {max_power_kw} kW, Tariff: €{tariff_per_kwh}/kWh")
+        except Exception as e:
+            print(f"[CENTRAL] ⚠️ Error publicando info del CP {cp_id} al Monitor: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def publish_cp_info_to_monitor(self, cp_id, force=False):
         if not hasattr(self, '_last_cp_info_publish'):
             self._last_cp_info_publish = {}
@@ -175,11 +251,20 @@ class EV_CentralWS:
             
             # Extraer datos del cp_info ya estandarizado con fallbacks
             location = cp_info.get('location') or cp_info.get('localizacion') or ''
-            if not location or location.strip() == '':
-                # Si no hay location en BD, intentar obtenerla de los datos originales
-                location = cp_row.get('localizacion') or cp_row.get('location') or 'Unknown'
-                if location.strip() == '':
+            # Normalizar location - eliminar espacios y verificar que no esté vacío
+            if location:
+                location = str(location).strip()
+            if not location or location == '':
+                # Si no hay location en cp_info, intentar obtenerla directamente de los datos originales de BD
+                location = cp_row.get('localizacion') or cp_row.get('location') or ''
+                if location:
+                    location = str(location).strip()
+                # Si aún está vacío, usar 'Unknown' como último recurso
+                if not location or location == '':
                     location = 'Unknown'
+                    print(f"[CENTRAL] ⚠️ CP {cp_id} no tiene location en BD, usando 'Unknown'")
+                else:
+                    print(f"[CENTRAL] ℹ️ CP {cp_id} location obtenida directamente de BD: '{location}'")
             
             status = cp_info.get('status') or cp_info.get('estado') or 'offline'
             status = self._normalize_status(status)
@@ -236,7 +321,12 @@ class EV_CentralWS:
                 event_data['engine_id'] = cp_id
             
             self.publish_event('CP_INFO', event_data)
-            print(f"[CENTRAL] 📡 CP_INFO enviado al Monitor - CP: {cp_id}, Location: {location}, Status: {status}, Max Power: {max_power} kW, Tariff: €{tariff}/kWh")
+            print(f"[CENTRAL] 📡 CP_INFO enviado al Monitor - CP: {cp_id}, Location: '{location}', Status: {status}, Max Power: {max_power} kW, Tariff: €{tariff}/kWh")
+            # ⚠️ DEBUG: Verificar que location no esté vacío
+            if not location or location == '' or location == 'Unknown':
+                print(f"[CENTRAL] ⚠️ ADVERTENCIA: CP_INFO enviado con location vacío o 'Unknown' para CP {cp_id}!")
+                print(f"[CENTRAL] ⚠️ DEBUG: cp_row['localizacion'] = '{cp_row.get('localizacion')}', cp_row['location'] = '{cp_row.get('location')}'")
+                print(f"[CENTRAL] ⚠️ DEBUG: cp_info['location'] = '{cp_info.get('location')}', cp_info['localizacion'] = '{cp_info.get('localizacion')}'")
         except Exception as e:
             print(f"[CENTRAL] ⚠️ Error publicando info del CP {cp_id} al Monitor: {e}")
             import traceback
@@ -256,7 +346,12 @@ class EV_CentralWS:
         # Extraer ubicación con múltiples variantes posibles
         # La BD usa 'localizacion' (español), convertir a 'location' (inglés)
         location = cp_row.get('localizacion') or cp_row.get('location') or ''
-        if not location or location.strip() == '':
+        # ⚠️ IMPORTANTE: Si location está vacío pero la BD tiene 'Desconocido', mantenerlo
+        # No convertir a cadena vacía porque se perdería la información
+        if location:
+            location = str(location).strip()
+        # Si está vacío o es None, mantener cadena vacía (se manejará en publish_cp_info_to_monitor)
+        if not location:
             location = ''
         
         # Extraer estado y normalizarlo
@@ -1532,17 +1627,24 @@ async def broadcast_kafka_event(event):
                 cp = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
                 data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
                 # Extraer localización con múltiples fallbacks para asegurar que se obtiene correctamente
+                # ⚠️ CRÍTICO: El Engine envía location en data.location y data.localizacion
                 localizacion = (data.get('localizacion') or data.get('location') or 
-                              event.get('localizacion') or event.get('location') or 'Desconocido')
+                              event.get('localizacion') or event.get('location') or '')
                 # Normalizar location - eliminar espacios
                 if localizacion:
                     localizacion = str(localizacion).strip()
                 if not localizacion or localizacion == '':
                     # Si aún no hay location, intentar obtenerla de la BD si el CP ya existe
                     if cp:
-                        localizacion = cp.get('localizacion') or cp.get('location') or 'Desconocido'
-                    if not localizacion or localizacion.strip() == '':
+                        localizacion = cp.get('localizacion') or cp.get('location') or ''
+                        if localizacion:
+                            localizacion = str(localizacion).strip()
+                    # Si aún está vacío, usar 'Desconocido' como último recurso
+                    if not localizacion or localizacion == '':
                         localizacion = 'Desconocido'
+                        print(f"[CENTRAL] ⚠️ CP {cp_id} no tiene location en CP_REGISTRATION, usando 'Desconocido'")
+                else:
+                    print(f"[CENTRAL] ℹ️ CP {cp_id} location extraída de CP_REGISTRATION: '{localizacion}'")
                 
                 max_kw = data.get('max_kw') or data.get('max_power_kw') or 22.0
                 tarifa_kwh = data.get('tarifa_kwh') or data.get('tariff_per_kwh') or data.get('price_eur_kwh') or 0.30
@@ -1564,11 +1666,20 @@ async def broadcast_kafka_event(event):
                 import time
                 shared_state.recent_registrations[cp_id] = time.time()
                 
+                # ⚠️ CRÍTICO: Para nuevo registro inicial, enviar CP_INFO con los datos del evento directamente
+                # en lugar de leer de BD inmediatamente (puede haber race condition donde BD aún no se ha actualizado)
+                # Guardar los datos que acabamos de procesar para enviarlos al Monitor
+                registration_location = localizacion
+                registration_status = estado
+                
                 # Confirmar existencia y enviar CP_INFO solo una vez
                 cp_after = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
                 if cp_after:
                     stored_location = cp_after.get('localizacion') or cp_after.get('location') or 'Desconocido'
                     stored_status = cp_after.get('estado') or cp_after.get('status') or 'offline'
+                    # ⚠️ Si stored_location está vacío pero tenemos registration_location, usar la del registro
+                    if (not stored_location or stored_location == '' or stored_location == 'Desconocido') and registration_location:
+                        stored_location = registration_location
                     print(f"[CENTRAL] ✅ CP registrado/actualizado: {cp_after['cp_id']} en '{stored_location}' estado={stored_status}" )
                     # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR solo si es nuevo registro o cambió realmente
                     # ⚠️ IMPORTANTE: Evitar publicar CP_INFO innecesariamente para prevenir bucles
@@ -1583,21 +1694,46 @@ async def broadcast_kafka_event(event):
                     max_kw_changed = abs((previous_max_kw or 0) - max_kw) > 0.01 if previous_max_kw else True
                     tariff_changed = abs((previous_tariff or 0) - tarifa_kwh) > 0.01 if previous_tariff else True
                     
-                    # Simplificado: Si es nuevo CP o cambió de 'offline' a 'available', siempre enviar CP_INFO al Monitor
-                    # Esto asegura que cuando Central marca todos como 'offline' y luego los Engines se registran,
-                    # el Monitor recibe la información correcta
-                    if not cp_existing or status_changed or location_changed or max_kw_changed or tariff_changed:
-                        # Nuevo CP o hay cambios (especialmente offline→available), publicar información al Monitor
+                    # ⚠️ CRÍTICO: Si es nuevo CP O si cambió de 'offline' a 'available', SIEMPRE enviar CP_INFO al Monitor
+                    # Esto asegura que cuando los Engines se registran, el Monitor recibe la información correcta inmediatamente
+                    # También enviar si location cambió de vacío/Unknown a un valor real
+                    should_send = False
+                    send_reason = ""
+                    
+                    if not cp_existing:
+                        should_send = True
+                        send_reason = "nuevo CP"
+                    elif status_changed and previous_status == 'offline' and estado == 'available':
+                        should_send = True
+                        send_reason = "offline→available"
+                    elif location_changed and (previous_location == '' or previous_location == 'Unknown' or previous_location == 'Desconocido'):
+                        should_send = True
+                        send_reason = f"location actualizada: '{previous_location}' → '{localizacion}'"
+                    elif status_changed or location_changed or max_kw_changed or tariff_changed:
+                        should_send = True
+                        send_reason = "datos cambiaron"
+                    
+                    if should_send:
+                        # Nuevo CP o hay cambios, publicar información al Monitor
                         if not cp_existing:
-                            print(f"[CENTRAL] 🆕 Nuevo CP {cp_id} registrado, enviando CP_INFO al Monitor")
+                            print(f"[CENTRAL] 🆕 Nuevo CP {cp_id} registrado, enviando CP_INFO al Monitor (location: '{registration_location}', status: {registration_status})")
+                            # ⚠️ CRÍTICO: Para nuevos CPs, usar los datos del registro directamente
+                            # para evitar race condition donde BD aún no se ha actualizado
+                            central_instance.publish_cp_info_to_monitor_with_data(
+                                cp_id, registration_location, registration_status, max_kw, tarifa_kwh, force=True
+                            )
                         elif status_changed and previous_status == 'offline' and estado == 'available':
-                            print(f"[CENTRAL] ✅ CP {cp_id} se registró (offline→available), enviando CP_INFO al Monitor")
+                            print(f"[CENTRAL] ✅ CP {cp_id} se registró (offline→available), enviando CP_INFO al Monitor (location: '{registration_location}')")
+                            # ⚠️ CRÍTICO: Para reconexión, usar los datos del registro directamente
+                            central_instance.publish_cp_info_to_monitor_with_data(
+                                cp_id, registration_location, registration_status, max_kw, tarifa_kwh, force=True
+                            )
                         else:
-                            print(f"[CENTRAL] 🔄 CP {cp_id} cambió, enviando CP_INFO al Monitor")
-                        central_instance.publish_cp_info_to_monitor(cp_id, force=(status_changed and previous_status == 'offline'))
+                            print(f"[CENTRAL] 🔄 CP {cp_id} cambió ({send_reason}), enviando CP_INFO al Monitor (location: '{localizacion}', status: {estado})")
+                            central_instance.publish_cp_info_to_monitor(cp_id, force=(status_changed and previous_status == 'offline'))
                     else:
                         # Mismo estado y datos, no publicar (evitar bucles)
-                        print(f"[CENTRAL] ℹ️ CP {cp_id} ya registrado sin cambios (status={estado}), omitiendo CP_INFO para evitar bucle")
+                        print(f"[CENTRAL] ℹ️ CP {cp_id} ya registrado sin cambios (status={estado}, location='{stored_location}'), omitiendo CP_INFO para evitar bucle")
                 else:
                     print(f"[CENTRAL] ⚠️ No se pudo verificar CP {cp_id} tras auto-registro")
             except Exception as e:
