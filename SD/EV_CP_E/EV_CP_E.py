@@ -137,8 +137,9 @@ class EV_CP_Engine:
                     auto_offset_reset='latest',  # Solo leer mensajes nuevos después de conectarse
                     group_id=unique_group_id,  # Group ID único por inicio
                     request_timeout_ms=30000,
-                    session_timeout_ms=10000,
-                    consumer_timeout_ms=5000
+                    session_timeout_ms=10000
+                    # ⚠️ NO usar consumer_timeout_ms - esto causaba que el loop terminara después de 5s sin mensajes
+                    # y hacía que el Engine se reiniciara en Docker, causando re-registros infinitos
                 )
                 
                 # Test producer connection - NO enviar mensaje de test al topic para evitar eventos UNKNOWN en Central
@@ -500,8 +501,10 @@ class EV_CP_Engine:
         try:
             # Verificar que el consumer está funcionando
             print(f"[{self.cp_id}]  Kafka consumer ready, entering message loop...")
+            print(f"[{self.cp_id}]  Waiting for commands from Central (infinite wait, no timeout)...")
             for message in self.consumer:
                 if not self.running:
+                    print(f"[{self.cp_id}]  Engine stopping, exiting message loop...")
                     break
                 
                 event = message.value
