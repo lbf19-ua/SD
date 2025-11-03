@@ -547,34 +547,61 @@ async def process_kafka_event(event):
     
     ⚠️ ARQUITECTURA: El Monitor recibe información del CP desde Central vía Kafka
     y la almacena en shared_state.cp_info (NO accede a BD directamente)
+    
+    ⚠️ IMPORTANTE: Cada Monitor SOLO procesa eventos de SU CP asignado (1:1)
     """
     action = event.get('action', '')
     event_type = event.get('event_type', '')
     cp_id = event.get('cp_id') or event.get('engine_id')
     
-    # Debug: Log todos los eventos recibidos
+    # ⚠️ CRÍTICO: Verificar monitor_instance primero
+    if not monitor_instance:
+        # Si no hay instancia del monitor, ignorar todos los eventos
+        return
+    
+    # ⚠️ CRÍTICO: Filtrar por cp_id ANTES de cualquier otro procesamiento
+    # Cada Monitor SOLO procesa eventos de SU CP asignado (relación 1:1)
+    if cp_id and cp_id != monitor_instance.cp_id:
+        # Este evento es para otro CP, ignorarlo completamente
+        # Solo loguear si es un evento importante para debug (opcional)
+        if event_type in ['CP_INFO', 'CP_REGISTRATION']:
+            print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Ignorando evento de otro CP: type={event_type}, cp_id={cp_id} (este Monitor supervisa {monitor_instance.cp_id})")
+        return
+    
+    # Si no hay cp_id en el evento, verificar si es un evento que necesitamos procesar
+    # (algunos eventos no tienen cp_id pero son relevantes)
+    if not cp_id and event_type not in ['MONITOR_AUTH']:
+        # Evento sin cp_id que no es MONITOR_AUTH, ignorar
+        return
+    
+    # Debug: Log solo eventos relevantes para este Monitor
     if event_type in ['CP_INFO', 'CP_REGISTRATION'] or 'cp_info' in action:
-        print(f"[MONITOR-{monitor_instance.cp_id if monitor_instance else 'UNKNOWN'}] 📨 Evento recibido: type={event_type}, action={action}, cp_id={cp_id}")
+        print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Evento recibido: type={event_type}, action={action}, cp_id={cp_id}")
     
     # ⚠️ IGNORAR eventos MONITOR_AUTH (no contienen información del CP)
     if event_type == 'MONITOR_AUTH':
         # Este evento es solo para autenticación, Central enviará CP_INFO después
         return
     
-    # Actualizar información del CP recibida de Central
-    # Solo procesar eventos para el CP que este Monitor supervisa
-    if not monitor_instance:
-        print(f"[MONITOR] ⚠️ monitor_instance no está inicializado")
+    # ⚠️ IGNORAR CP_REGISTRATION directos del Engine - Solo procesar CP_INFO de Central
+    # CP_REGISTRATION es un evento que el Engine envía a Central, no al Monitor
+    # Central procesa CP_REGISTRATION y luego envía CP_INFO al Monitor
+    # Si procesamos CP_REGISTRATION aquí, causamos bucles de actualizaciones
+    if event_type == 'CP_REGISTRATION' and action == 'connect':
+        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Ignorando CP_REGISTRATION directo - Central enviará CP_INFO después")
         return
     
+    # A partir de aquí, solo procesamos eventos del CP de este Monitor
+    # Actualizar información del CP recibida de Central
     if cp_id and cp_id == monitor_instance.cp_id:
         # Este evento es para el CP que este Monitor supervisa
         with shared_state.lock:
             if cp_id not in shared_state.cp_info:
                 shared_state.cp_info[cp_id] = {}
             
-            # Actualizar información del CP desde el evento
-            if event_type == 'CP_INFO' or event_type == 'CP_REGISTRATION' or action == 'connect' or action == 'cp_info_update':
+            # ⚠️ SOLO procesar CP_INFO de Central (no CP_REGISTRATION directos)
+            # Central es la única fuente de verdad para la información del CP
+            if event_type == 'CP_INFO' or action == 'cp_info_update':
                 # Registro o actualización del CP desde Central (único con acceso a BD)
                 cp_data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
                 
@@ -629,9 +656,27 @@ async def process_kafka_event(event):
                 except (ValueError, TypeError):
                     tariff = 0.30
                 
-                print(f"[MONITOR-{cp_id}] ✅ Procesando CP_INFO: status={cp_status}, location={cp_location}, max_power={max_power}, tariff={tariff}")
+                # ⚠️ CRÍTICO: Verificar si el estado realmente cambió antes de actualizar
+                # Esto previene bucles infinitos de actualizaciones innecesarias
+                current_stored_status = shared_state.cp_info[cp_id].get('status') or shared_state.cp_info[cp_id].get('estado')
+                current_stored_location = shared_state.cp_info[cp_id].get('location') or shared_state.cp_info[cp_id].get('localizacion')
+                current_stored_max_power = shared_state.cp_info[cp_id].get('max_power_kw') or shared_state.cp_info[cp_id].get('max_kw')
+                current_stored_tariff = shared_state.cp_info[cp_id].get('tariff_per_kwh') or shared_state.cp_info[cp_id].get('tarifa_kwh')
                 
-                # Guardar en shared_state.cp_info
+                # Verificar si realmente hay cambios
+                status_changed = current_stored_status != cp_status
+                location_changed = current_stored_location != cp_location
+                max_power_changed = abs((current_stored_max_power or 0) - max_power) > 0.01
+                tariff_changed = abs((current_stored_tariff or 0) - tariff) > 0.01
+                
+                if not (status_changed or location_changed or max_power_changed or tariff_changed):
+                    # No hay cambios reales, ignorar este evento para evitar bucles
+                    print(f"[MONITOR-{cp_id}] ℹ️ CP_INFO sin cambios (status={cp_status}), omitiendo actualización para evitar bucle")
+                    return
+                
+                print(f"[MONITOR-{cp_id}] ✅ Procesando CP_INFO: status={cp_status} (cambió: {status_changed}), location={cp_location}, max_power={max_power}, tariff={tariff}")
+                
+                # Guardar en shared_state.cp_info solo si hay cambios
                 shared_state.cp_info[cp_id].update({
                     'cp_id': cp_id,
                     'location': cp_location,
@@ -646,11 +691,9 @@ async def process_kafka_event(event):
                 print(f"[MONITOR-{cp_id}] 💾 CP_INFO actualizado - status: {cp_status}")
                 # No es necesario broadcast inmediato - el broadcast periódico lo hará cada 3 segundos
                 # await broadcast_monitor_data()  # Comentado para evitar saturación
-            elif cp_id and cp_id != monitor_instance.cp_id:
-                # Evento para otro CP, ignorar
-                pass
-            elif ('status' in event or 'estado' in event) and event_type != 'MONITOR_AUTH':
-                # Actualizar estado del CP (solo si no es MONITOR_AUTH)
+            elif ('status' in event or 'estado' in event) and event_type != 'MONITOR_AUTH' and event_type != 'CP_REGISTRATION':
+                # Actualizar estado del CP (solo si no es MONITOR_AUTH o CP_REGISTRATION)
+                # CP_REGISTRATION ya se maneja arriba y se ignora para evitar bucles
                 new_status = event.get('status') or event.get('estado')
                 
                 # ⚠️ FILTRAR estados inválidos (solo aceptar estados válidos del CP)
@@ -659,99 +702,107 @@ async def process_kafka_event(event):
                     # Ignorar estados inválidos, mantener el actual
                     return
                 
+                # ⚠️ CRÍTICO: Verificar si el estado realmente cambió antes de actualizar
+                current_stored_status = shared_state.cp_info[cp_id].get('status') or shared_state.cp_info[cp_id].get('estado')
+                if current_stored_status == new_status:
+                    # Estado no cambió, ignorar para evitar bucles
+                    print(f"[MONITOR-{cp_id}] ℹ️ Estado {new_status} ya está sincronizado, omitiendo actualización para evitar bucle")
+                    return
+                
                 if new_status:
                     shared_state.cp_info[cp_id]['status'] = new_status
                     shared_state.cp_info[cp_id]['estado'] = new_status
-                    print(f"[MONITOR-{cp_id}] 📥 Estado actualizado desde Central: {new_status}")
+                    print(f"[MONITOR-{cp_id}] 📥 Estado actualizado desde Central: {current_stored_status} → {new_status}")
                     # El broadcast periódico actualizará el dashboard automáticamente
     
     # Procesar eventos de carga y errores
+    # ⚠️ IMPORTANTE: Solo procesar si cp_id coincide con el CP de este Monitor
+    # Esto es una verificación adicional aunque ya filtramos arriba
+    if cp_id and cp_id != monitor_instance.cp_id:
+        # Evento para otro CP, no procesar
+        return
+    
+    # Procesar eventos de carga y errores para el CP de este Monitor
     if action == 'charging_started':
-        if cp_id == monitor_instance.cp_id:
-            username = event.get('username')
-            alert = monitor_instance.add_alert(
-                'info',
-                f"✅ Carga iniciada en {cp_id} por {username}"
-            )
-            await broadcast_alert(alert)
-            # Actualizar estado a 'charging'
-            with shared_state.lock:
-                if cp_id in shared_state.cp_info:
-                    shared_state.cp_info[cp_id]['status'] = 'charging'
-                    shared_state.cp_info[cp_id]['estado'] = 'charging'
+        username = event.get('username')
+        alert = monitor_instance.add_alert(
+            'info',
+            f"✅ Carga iniciada en {cp_id} por {username}"
+        )
+        await broadcast_alert(alert)
+        # Actualizar estado a 'charging'
+        with shared_state.lock:
+            if cp_id in shared_state.cp_info:
+                shared_state.cp_info[cp_id]['status'] = 'charging'
+                shared_state.cp_info[cp_id]['estado'] = 'charging'
         
     elif action == 'charging_stopped':
-        if cp_id == monitor_instance.cp_id:
-            username = event.get('username')
-            energy = event.get('energy_kwh', 0)
-            alert = monitor_instance.add_alert(
-                'success',
-                f"⛔ Carga completada en {cp_id}: {energy:.2f} kWh"
-            )
-            await broadcast_alert(alert)
-            # Actualizar estado a 'available'
-            with shared_state.lock:
-                if cp_id in shared_state.cp_info:
-                    shared_state.cp_info[cp_id]['status'] = 'available'
-                    shared_state.cp_info[cp_id]['estado'] = 'available'
+        username = event.get('username')
+        energy = event.get('energy_kwh', 0)
+        alert = monitor_instance.add_alert(
+            'success',
+            f"⛔ Carga completada en {cp_id}: {energy:.2f} kWh"
+        )
+        await broadcast_alert(alert)
+        # Actualizar estado a 'available'
+        with shared_state.lock:
+            if cp_id in shared_state.cp_info:
+                shared_state.cp_info[cp_id]['status'] = 'available'
+                shared_state.cp_info[cp_id]['estado'] = 'available'
         
     elif action == 'fault_detected':
-        if cp_id == monitor_instance.cp_id:
-            alert = monitor_instance.add_alert(
-                'critical',
-                f"🔴 Fallo detectado en {cp_id}"
-            )
-            await broadcast_alert(alert)
-            # Actualizar estado a 'fault'
-            with shared_state.lock:
-                if cp_id in shared_state.cp_info:
-                    shared_state.cp_info[cp_id]['status'] = 'fault'
-                    shared_state.cp_info[cp_id]['estado'] = 'fault'
+        alert = monitor_instance.add_alert(
+            'critical',
+            f"🔴 Fallo detectado en {cp_id}"
+        )
+        await broadcast_alert(alert)
+        # Actualizar estado a 'fault'
+        with shared_state.lock:
+            if cp_id in shared_state.cp_info:
+                shared_state.cp_info[cp_id]['status'] = 'fault'
+                shared_state.cp_info[cp_id]['estado'] = 'fault'
         
     elif action == 'cp_offline':
-        if cp_id == monitor_instance.cp_id:
-            alert = monitor_instance.add_alert(
-                'warning',
-                f"⚠️ {cp_id} fuera de línea"
-            )
-            await broadcast_alert(alert)
-            # Actualizar estado a 'offline'
-            with shared_state.lock:
-                if cp_id in shared_state.cp_info:
-                    shared_state.cp_info[cp_id]['status'] = 'offline'
-                    shared_state.cp_info[cp_id]['estado'] = 'offline'
+        alert = monitor_instance.add_alert(
+            'warning',
+            f"⚠️ {cp_id} fuera de línea"
+        )
+        await broadcast_alert(alert)
+        # Actualizar estado a 'offline'
+        with shared_state.lock:
+            if cp_id in shared_state.cp_info:
+                shared_state.cp_info[cp_id]['status'] = 'offline'
+                shared_state.cp_info[cp_id]['estado'] = 'offline'
         
     elif action == 'cp_error_simulated':
-        if cp_id == monitor_instance.cp_id:
-            error_type = event.get('error_type', 'error')
-            alert = monitor_instance.add_alert(
-                'critical',
-                f"🚨 Admin simuló {error_type} en {cp_id}"
-            )
-            await broadcast_alert(alert)
-            # Actualizar estado según tipo de error
-            with shared_state.lock:
-                if cp_id in shared_state.cp_info:
-                    if error_type == 'fault':
-                        shared_state.cp_info[cp_id]['status'] = 'fault'
-                    elif error_type == 'out_of_service':
-                        shared_state.cp_info[cp_id]['status'] = 'out_of_service'
-                    shared_state.cp_info[cp_id]['estado'] = shared_state.cp_info[cp_id]['status']
-            # El broadcast periódico actualizará el dashboard automáticamente
+        error_type = event.get('error_type', 'error')
+        alert = monitor_instance.add_alert(
+            'critical',
+            f"🚨 Admin simuló {error_type} en {cp_id}"
+        )
+        await broadcast_alert(alert)
+        # Actualizar estado según tipo de error
+        with shared_state.lock:
+            if cp_id in shared_state.cp_info:
+                if error_type == 'fault':
+                    shared_state.cp_info[cp_id]['status'] = 'fault'
+                elif error_type == 'out_of_service':
+                    shared_state.cp_info[cp_id]['status'] = 'out_of_service'
+                shared_state.cp_info[cp_id]['estado'] = shared_state.cp_info[cp_id]['status']
+        # El broadcast periódico actualizará el dashboard automáticamente
         
     elif action == 'cp_error_fixed' or action == 'resume':
-        if cp_id == monitor_instance.cp_id:
-            alert = monitor_instance.add_alert(
-                'success',
-                f"✅ Admin reparó {cp_id}, ahora disponible"
-            )
-            await broadcast_alert(alert)
-            # Actualizar estado a 'available'
-            with shared_state.lock:
-                if cp_id in shared_state.cp_info:
-                    shared_state.cp_info[cp_id]['status'] = 'available'
-                    shared_state.cp_info[cp_id]['estado'] = 'available'
-            # El broadcast periódico actualizará el dashboard automáticamente
+        alert = monitor_instance.add_alert(
+            'success',
+            f"✅ Admin reparó {cp_id}, ahora disponible"
+        )
+        await broadcast_alert(alert)
+        # Actualizar estado a 'available'
+        with shared_state.lock:
+            if cp_id in shared_state.cp_info:
+                shared_state.cp_info[cp_id]['status'] = 'available'
+                shared_state.cp_info[cp_id]['estado'] = 'available'
+        # El broadcast periódico actualizará el dashboard automáticamente
 
 async def broadcast_alert(alert):
     """Broadcast una alerta a todos los clientes WebSocket"""

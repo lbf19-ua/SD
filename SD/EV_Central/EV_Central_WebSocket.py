@@ -173,27 +173,37 @@ class EV_CentralWS:
             import traceback
             traceback.print_exc()
 
-    def publish_cp_info_to_monitor(self, cp_id):
+    def publish_cp_info_to_monitor(self, cp_id, force=False):
         """
-        Publica información del CP al Monitor cuando hay cambios.
+        Publica información del CP al Monitor vía Kafka
+        
+        ⚠️ IMPORTANTE: Solo publica si hay cambios reales o si force=True
+        Esto previene bucles infinitos de actualizaciones innecesarias
+        
         Central es el único que puede acceder a la BD, por lo que envía
         esta información actualizada al Monitor.
         
         ⚠️ PROTECCIÓN: Limita la frecuencia de publicación para evitar bucles.
+        
+        Args:
+            cp_id: ID del CP
+            force: Si es True, fuerza el envío incluso si no hay cambios (usar con cuidado)
         """
-        # ⚠️ PROTECCIÓN: Throttling - no publicar más de una vez por segundo por CP
+        # ⚠️ PROTECCIÓN: Throttling - no publicar más de una vez cada 2 segundos por CP
+        # Aumentado a 2 segundos para dar más tiempo y evitar bucles
         if not hasattr(self, '_last_cp_info_publish'):
             self._last_cp_info_publish = {}
         
-        current_time = time.time()
-        last_publish = self._last_cp_info_publish.get(cp_id, 0)
-        time_since_last = current_time - last_publish
-        
-        if time_since_last < 1.0:  # Mínimo 1 segundo entre publicaciones del mismo CP
-            print(f"[CENTRAL] ⚠️ Throttling: CP_INFO para {cp_id} ya se publicó hace {time_since_last:.2f}s, omitiendo para evitar bucle")
-            return
-        
-        self._last_cp_info_publish[cp_id] = current_time
+        if not force:
+            current_time = time.time()
+            last_publish = self._last_cp_info_publish.get(cp_id, 0)
+            time_since_last = current_time - last_publish
+            
+            if time_since_last < 2.0:  # Mínimo 2 segundos entre publicaciones del mismo CP
+                print(f"[CENTRAL] ⚠️ Throttling: CP_INFO para {cp_id} ya se publicó hace {time_since_last:.2f}s, omitiendo para evitar bucle")
+                return
+            
+            self._last_cp_info_publish[cp_id] = current_time
         
         try:
             # Obtener CP desde BD (la función se llama get_charging_point, no get_charging_point_by_id)
@@ -1535,21 +1545,30 @@ async def broadcast_kafka_event(event):
                 cp_after = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
                 if cp_after:
                     print(f"[CENTRAL] ✅ CP registrado/actualizado: {cp_after['cp_id']} en {cp_after.get('location','')} estado={cp_after.get('estado','')}" )
-                    # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR solo si es nuevo registro o cambió algo
+                    # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR solo si es nuevo registro o cambió realmente
                     # ⚠️ IMPORTANTE: Evitar publicar CP_INFO innecesariamente para prevenir bucles
                     previous_status = cp_existing.get('estado') if cp_existing else None
+                    previous_location = cp_existing.get('localizacion') or cp_existing.get('location') if cp_existing else None
+                    previous_max_kw = cp_existing.get('max_kw') if cp_existing else None
+                    previous_tariff = cp_existing.get('tarifa_kwh') if cp_existing else None
+                    
+                    # Verificar si realmente hay cambios
+                    status_changed = previous_status != estado
+                    location_changed = previous_location != localizacion
+                    max_kw_changed = abs((previous_max_kw or 0) - max_kw) > 0.01 if previous_max_kw else True
+                    tariff_changed = abs((previous_tariff or 0) - tarifa_kwh) > 0.01 if previous_tariff else True
+                    
                     if not cp_existing:
                         # Es un nuevo CP, publicar información al Monitor
+                        print(f"[CENTRAL] 🆕 Nuevo CP {cp_id} registrado, enviando CP_INFO al Monitor")
+                        central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                    elif status_changed or location_changed or max_kw_changed or tariff_changed:
+                        # Hay cambios reales, publicar
+                        print(f"[CENTRAL] 🔄 CP {cp_id} cambió (status: {previous_status}→{estado}), enviando CP_INFO al Monitor")
                         central_instance.publish_cp_info_to_monitor(cp_id)
-                    elif previous_status != estado:
-                        # Cambió de estado, solo publicar si NO venía de 'available' (evitar bucles)
-                        if previous_status != 'available':
-                            central_instance.publish_cp_info_to_monitor(cp_id)
-                        else:
-                            print(f"[CENTRAL] ℹ️ CP {cp_id} ya estaba 'available', omitiendo CP_INFO para evitar bucle")
                     else:
-                        # Mismo estado, no publicar (evitar bucles)
-                        print(f"[CENTRAL] ℹ️ CP {cp_id} ya registrado con mismo estado ({estado}), omitiendo CP_INFO para evitar bucle")
+                        # Mismo estado y datos, no publicar (evitar bucles)
+                        print(f"[CENTRAL] ℹ️ CP {cp_id} ya registrado sin cambios (status={estado}), omitiendo CP_INFO para evitar bucle")
                 else:
                     print(f"[CENTRAL] ⚠️ No se pudo verificar CP {cp_id} tras auto-registro")
             except Exception as e:
@@ -1938,11 +1957,13 @@ async def broadcast_kafka_event(event):
                     print(f"[CENTRAL] ℹ️ Estado {new_status} para CP {cp_id} ya está sincronizado, omitiendo actualización de BD para evitar bucle")
                     # NO publicar CP_INFO porque el estado ya está sincronizado
                     # Solo procesar cancelación de sesiones si hay alguna activa
+                    # NO llamar a publish_cp_info_to_monitor aquí porque causaría bucle
                 else:
-                    # El estado cambió, actualizar BD
+                    # El estado cambió realmente, actualizar BD
                     db.update_charging_point_status(cp_id, new_status)
-                    print(f"[CENTRAL] ✅ CP {cp_id} marcado como {new_status}")
+                    print(f"[CENTRAL] ✅ CP {cp_id} marcado como {new_status} (era {current_status})")
                     # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR solo si el estado realmente cambió
+                    # NO usar force=True aquí para respetar throttling
                     central_instance.publish_cp_info_to_monitor(cp_id)
             except Exception as e:
                 print(f"[CENTRAL] ⚠️ Error verificando/actualizando estado del CP: {e}")
