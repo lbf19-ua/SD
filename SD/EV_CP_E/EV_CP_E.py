@@ -118,7 +118,7 @@ class EV_CP_Engine:
                     bootstrap_servers=self.kafka_broker,
                     value_serializer=lambda v: json.dumps(v).encode('utf-8'),
                     api_version=(0, 10, 1),
-                    request_timeout_ms=10000,
+                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms (10s por defecto)
                     retries=3
                 )
                 
@@ -131,7 +131,8 @@ class EV_CP_Engine:
                     auto_offset_reset='earliest',  # Cambiar a 'earliest' para recibir todos los mensajes
                     group_id=f'engine_group_{self.cp_id}',
                     api_version=(0, 10, 1),
-                    request_timeout_ms=10000
+                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms (10s por defecto)
+                    session_timeout_ms=10000  # 10s - timeout de sesión del grupo de consumidores
                 )
                 
                 # Test producer connection

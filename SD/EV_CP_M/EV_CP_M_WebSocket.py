@@ -98,7 +98,7 @@ class EV_MonitorWS:
                     bootstrap_servers=self.kafka_broker,
                     value_serializer=lambda v: json.dumps(v).encode('utf-8'),
                     api_version=(0, 10, 1),  # Versión de API compatible
-                    request_timeout_ms=10000,  # Timeout de 10 segundos
+                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms (10s por defecto)
                     retries=3
                 )
                 # Intentar enviar un mensaje de prueba para verificar la conexión
@@ -465,7 +465,8 @@ async def kafka_listener():
                     auto_offset_reset='earliest',  # Cambiar a 'earliest' para recibir todos los mensajes
                     group_id=f'ev_monitor_ws_group_{cp_id_for_group}',  # Group ID único por CP
                     api_version=(0, 10, 1),
-                    request_timeout_ms=10000,
+                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms (10s por defecto)
+                    session_timeout_ms=10000,  # 10s - timeout de sesión del grupo de consumidores
                     consumer_timeout_ms=10000
                 )
                 
