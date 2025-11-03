@@ -432,13 +432,13 @@ def update_charging_point_status(cp_id: str, new_status: str) -> bool:
         success = cursor.rowcount > 0
         
         if success:
-            print(f"[DB] ✅ CP {cp_id} status updated to '{new_status}'")
+            print(f"[DB] OK CP {cp_id} status updated to '{new_status}'")
         else:
-            print(f"[DB] ⚠️  CP {cp_id} not found")
+            print(f"[DB] ADVERTENCIA CP {cp_id} not found")
         
         return success
     except Exception as e:
-        print(f"[DB] ❌ Error updating CP status: {e}")
+        print(f"[DB] ERROR updating CP status: {e}")
         conn.rollback()
         return False
     finally:
@@ -457,10 +457,10 @@ def set_all_cps_status_offline() -> int:
             WHERE active = 1 
         """)
         conn.commit()
-        print(f"[DB] ✅ Reset {cursor.rowcount} CPs to offline")
+        print(f"[DB] OK Reset {cursor.rowcount} CPs to offline")
         return cursor.rowcount
     except Exception as e:
-        print(f"[DB] ❌ Error setting all CPs offline: {e}")
+        print(f"[DB] ERROR setting all CPs offline: {e}")
         conn.rollback()
         return 0
     finally:
@@ -482,7 +482,7 @@ def set_cps_with_active_sessions_to_charging() -> int:
         conn.commit()
         return cursor.rowcount
     except Exception as e:
-        print(f"[DB] ❌ Error setting CPs with active sessions to 'charging': {e}")
+        print(f"[DB] ERROR setting CPs with active sessions to 'charging': {e}")
         conn.rollback()
         return 0
     finally:
@@ -530,10 +530,10 @@ def terminate_all_active_sessions(mark_cp_offline: bool = True) -> tuple[int, in
 
         conn.commit()
         if sessions_closed or cps_updated:
-            print(f"[DB] 🔌 Terminated active sessions: {sessions_closed}, CPs set offline: {cps_updated}")
+            print(f"[DB] INFO Terminated active sessions: {sessions_closed}, CPs set offline: {cps_updated}")
         return sessions_closed, cps_updated
     except Exception as e:
-        print(f"[DB] ❌ Error terminating active sessions on shutdown: {e}")
+        print(f"[DB] ERROR terminating active sessions on shutdown: {e}")
         conn.rollback()
         return 0, 0
     finally:
@@ -566,7 +566,7 @@ def find_and_reserve_available_cp(max_attempts: int = 10) -> str:
             
             result = cursor.fetchone()
             if not result:
-                print(f"[DB] ⚠️ No available CPs to reserve")
+                print(f"[DB] ADVERTENCIA No available CPs to reserve")
                 return None
             
             cp_id = result[0]
@@ -582,23 +582,23 @@ def find_and_reserve_available_cp(max_attempts: int = 10) -> str:
             
             if cursor.rowcount > 0:
                 conn.commit()
-                print(f"[DB] ✅ CP {cp_id} found and reserved atomically")
+                print(f"[DB] OK CP {cp_id} found and reserved atomically")
                 return cp_id
             else:
                 # Otro proceso lo reservó primero, intentar con el siguiente
-                print(f"[DB] ⚠️ CP {cp_id} was taken, retry {attempt + 1}/{max_attempts}")
+                print(f"[DB] ADVERTENCIA CP {cp_id} was taken, retry {attempt + 1}/{max_attempts}")
                 conn.rollback()
                 continue
                 
         except Exception as e:
-            print(f"[DB] ❌ Error finding/reserving CP: {e}")
+            print(f"[DB] ERROR finding/reserving CP: {e}")
             conn.rollback()
             return None
         finally:
             conn.close()
     
     # Si llegamos aquí, se agotaron los intentos
-    print(f"[DB] ❌ Failed to reserve CP after {max_attempts} attempts")
+    print(f"[DB] ERROR Failed to reserve CP after {max_attempts} attempts")
     return None
 
 def reserve_charging_point(cp_id: str, timeout_seconds: int = 5) -> bool:
@@ -622,13 +622,13 @@ def reserve_charging_point(cp_id: str, timeout_seconds: int = 5) -> bool:
         success = cursor.rowcount > 0
         if success:
             conn.commit()
-            print(f"[DB] ✅ CP {cp_id} reserved successfully")
+            print(f"[DB] OK CP {cp_id} reserved successfully")
         else:
-            print(f"[DB] ⚠️ CP {cp_id} could not be reserved (unavailable)")
+            print(f"[DB] ADVERTENCIA CP {cp_id} could not be reserved (unavailable)")
         return success
             
     except Exception as e:
-        print(f"[DB] ❌ Error reserving CP: {e}")
+        print(f"[DB] ERROR reserving CP: {e}")
         conn.rollback()
         return False
     finally:
@@ -652,13 +652,13 @@ def release_charging_point(cp_id: str, set_estado: str = 'available') -> bool:
         success = cursor.rowcount > 0
         if success:
             conn.commit()
-            print(f"[DB] ✅ CP {cp_id} released to {set_estado}")
+            print(f"[DB] OK CP {cp_id} released to {set_estado}")
         else:
-            print(f"[DB] ⚠️ CP {cp_id} was not in reserved state")
+            print(f"[DB] ADVERTENCIA CP {cp_id} was not in reserved state")
         return success
             
     except Exception as e:
-        print(f"[DB] ❌ Error releasing CP: {e}")
+        print(f"[DB] ERROR releasing CP: {e}")
         conn.rollback()
         return False
     finally:
@@ -944,7 +944,7 @@ def show_all_users():
     print(f"{'ID':<5} {'Nombre':<20} {'Email':<30} {'Role':<10} {'Balance':>10} {'Active':<7}")
     print("-" * 80)
     for user in users:
-        active_str = "✓" if user['active'] else "✗"
+        active_str = "SI" if user['active'] else "NO"
         print(f"{user['id']:<5} {user['nombre']:<20} {user['email']:<30} {user['role']:<10} €{user['balance']:>8.2f} {active_str:<7}")
     print(f"\nTotal usuarios: {len(users)}")
 
@@ -957,7 +957,7 @@ def show_all_charging_points():
     print(f"{'CP ID':<10} {'Localizacion':<35} {'Estado':<12} {'Potencia':>8} {'Tarifa':>10}")
     print("-" * 80)
     for cp in cps:
-        estado_emoji = "🟢" if cp['estado'] == 'available' else "🔴" if cp['estado'] == 'charging' else "🟡"
+        estado_emoji = "available" if cp['estado'] == 'available' else "charging" if cp['estado'] == 'charging' else "offline"
         print(f"{cp['cp_id']:<10} {cp['localizacion']:<35} {estado_emoji} {cp['estado']:<10} {cp['max_kw']:>6.1f}kW €{cp['tarifa_kwh']:>5.2f}/kWh")
     print(f"\nTotal puntos de carga: {len(cps)}")
 
@@ -984,7 +984,7 @@ def show_all_sessions():
         start_dt = datetime.fromtimestamp(session['start_time']).strftime('%Y-%m-%d %H:%M')
         energy = session['energia_kwh'] if session['energia_kwh'] else 0
         cost = session['coste'] if session['coste'] else 0
-        estado_emoji = "✓" if session['estado'] == 'completed' else "⏳"
+        estado_emoji = "COMPLETADA" if session['estado'] == 'completed' else "PENDIENTE"
         print(f"{session['id']:<5} {session['nombre']:<18} {session['cp_id']:<10} {start_dt:<20} {energy:>8.2f}kWh €{cost:>7.2f} {estado_emoji} {session['estado']:<8}")
     print(f"\nTotal sesiones mostradas: {len(sessions)}")
 
@@ -993,7 +993,7 @@ def show_user_history(nombre):
     """Muestra el historial de un usuario específico"""
     user = get_user_by_nombre(nombre)
     if not user:
-        print(f"❌ Usuario '{nombre}' no encontrado")
+        print(f"ERROR Usuario '{nombre}' no encontrado")
         return
     
     print_header(f"HISTORIAL DE {nombre.upper()}")
@@ -1080,26 +1080,26 @@ def show_statistics():
     conn.close()
     
     # Mostrar estadísticas
-    print("\n📊 USUARIOS")
+    print("\nUSUARIOS")
     print(f"  Total drivers: {total_drivers}")
     print(f"  Drivers activos: {active_drivers}")
     
-    print("\n🔌 PUNTOS DE CARGA")
+    print("\nPUNTOS DE CARGA")
     print(f"  Total: {total_cps}")
-    print(f"  Disponibles: {available_cps} (🟢)")
-    print(f"  En uso: {charging_cps} (🔴)")
+    print(f"  Disponibles: {available_cps} (available)")
+    print(f"  En uso: {charging_cps} (charging)")
     
-    print("\n⚡ SESIONES DE CARGA")
+    print("\nSESIONES DE CARGA")
     print(f"  Total: {total_sessions}")
     print(f"  Activas: {active_sessions}")
     print(f"  Completadas: {completed_sessions}")
     
-    print("\n💰 ENERGÍA Y COSTOS")
+    print("\nENERGIA Y COSTOS")
     print(f"  Energía total despachada: {total_energy:.2f} kWh")
     print(f"  Energía promedio por sesión: {avg_energy:.2f} kWh")
     print(f"  Ingresos totales: €{total_revenue:.2f}")
     
-    print("\n🏆 TOP 5 USUARIOS (por gasto)")
+    print("\nTOP 5 USUARIOS (por gasto)")
     print(f"  {'nombre':<20} {'Sesiones':>10} {'Energía':>12} {'Total Gastado':>15}")
     print("  " + "-" * 60)
     for user in top_users:
@@ -1141,10 +1141,10 @@ def main_menu():
             print()
             show_statistics()
         elif choice == '6':
-            print("\n  👋 ¡Hasta luego!")
+            print("\n  Hasta luego!")
             break
         else:
-            print("\n  ❌ Opción no válida")
+            print("\n  ERROR Opcion no valida")
         
         input("\n  Presiona ENTER para continuar...")
     # Inicializa la BD, realiza unas pruebas e imprime un resumen.
@@ -1206,8 +1206,8 @@ def main_menu():
         conn.close()
 
         print("\n" + "=" * 60)
-        print("  ✅ Base de datos inicializada correctamente")
-        print(f"  📁 Ubicación: {DB_PATH}")
+        print("  OK Base de datos inicializada correctamente")
+        print(f"  Ubicacion: {DB_PATH}")
         print("=" * 60)
         print("\n  Puedes ahora ejecutar EV_Central.py")
 
@@ -1217,12 +1217,12 @@ def main_menu():
         if len(sys.argv) > 1 and sys.argv[1] in ("init", "--init", "setup"):
             run_init_db()
         else:
-            print("\n🔋 EV Charging System - Consulta de Base de Datos")
-            print(f"📁 Base de datos: {DB_PATH}")
+            print("\nEV Charging System - Consulta de Base de Datos")
+            print(f"Base de datos: {DB_PATH}")
         
             # Verificar si existe la BD
             if not DB_PATH.exists():
-                print("\n❌ La base de datos no existe. Ejecuta 'python database.py init' primero.")
+                print("\nERROR La base de datos no existe. Ejecuta 'python database.py init' primero.")
             else:
                 main_menu()
 

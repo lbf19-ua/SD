@@ -44,7 +44,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      # ⚠️ Lee desde .env (OBLIGATORIO para despliegue en 3 PCs)
+  # ATENCION: Lee desde .env (OBLIGATORIO para despliegue en 3 PCs)
       - KAFKA_BROKER=${KAFKA_BROKER}  # Debe estar en .env: IP_PC2:9092
       - CENTRAL_IP=${PC2_IP}  # Debe estar en .env: IP real de PC2
       - DRIVER_PORT=8001

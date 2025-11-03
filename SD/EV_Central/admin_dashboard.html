@@ -264,17 +264,17 @@
                 <div class="value" id="totalUsers">0</div>
             </div>
             <div class="stat-card">
-                <div class="icon">🔌</div>
+                <div class="icon">PC</div>
                 <div class="label">Puntos de Carga</div>
                 <div class="value" id="totalCPs">0</div>
             </div>
             <div class="stat-card">
-                <div class="icon">⚡</div>
+                <div class="icon">POT</div>
                 <div class="label">Sesiones Activas</div>
                 <div class="value" id="activeSessions">0</div>
             </div>
             <div class="stat-card">
-                <div class="icon">💰</div>
+                <div class="icon">EUR</div>
                 <div class="label">Ingresos Hoy</div>
                 <div class="value" id="todayRevenue">€0</div>
             </div>
@@ -284,7 +284,7 @@
         <div class="grid-2col">
             <!-- Active Sessions Table -->
             <div class="data-table">
-                <h2>⚡ Sesiones Activas</h2>
+                <h2>Sesiones Activas</h2>
                 <table id="sessionsTable">
                     <thead>
                         <tr>
@@ -305,7 +305,7 @@
 
             <!-- Charging Points Status -->
             <div class="data-table">
-                <h2>🔌 Estado de Puntos de Carga</h2>
+                <h2>Estado de Puntos de Carga</h2>
                 <table id="cpTable">
                     <thead>
                         <tr>
@@ -347,7 +347,7 @@
 
         <!-- Event Stream -->
         <div class="data-table">
-            <h2>📡 Stream de Eventos en Tiempo Real</h2>
+            <h2>Stream de Eventos en Tiempo Real</h2>
             <div class="event-stream" id="eventStream">
                 <div class="event-line">Sistema iniciado. Esperando eventos...</div>
             </div>
@@ -371,10 +371,10 @@
             
             <div style="display: flex; gap: 10px; margin-bottom: 20px;">
                 <button onclick="simulateError()" style="flex: 1; padding: 12px; background: #dc3545; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
-                    ⚠️ Simular Error
+                    Simular Error
                 </button>
                 <button onclick="fixError()" style="flex: 1; padding: 12px; background: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
-                    ✅ Corregir Error
+                    Corregir Error
                 </button>
                 <button onclick="refreshCPs()" style="padding: 12px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold;">
                     🔄 Actualizar
@@ -496,9 +496,9 @@
                 case 'dashboard_data':
                 case 'initial_data':  // Manejar también el mensaje inicial
                     dashboardData = data.data;
-                    console.log('[FRONTEND] 📊 Dashboard data recibido:', dashboardData);
-                    console.log('[FRONTEND] 📊 Sesiones activas:', dashboardData.active_sessions);
-                    console.log('[FRONTEND] 📊 Número de sesiones:', dashboardData.active_sessions?.length || 0);
+                    console.log('[FRONTEND] Dashboard data recibido:', dashboardData);
+                    console.log('[FRONTEND] Sesiones activas:', dashboardData.active_sessions);
+                    console.log('[FRONTEND] Numero de sesiones:', dashboardData.active_sessions?.length || 0);
                     updateDashboard();
                     // Actualizar lista de CPs en panel de simulación
                     if (dashboardData.charging_points) {
@@ -514,54 +514,54 @@
                     break;
 
                 case 'error_simulated':
-                    addEventLog(`⚠️ Error simulado: ${data.message}`);
+                    addEventLog(`ADVERTENCIA: Error simulado: ${data.message}`);
                     showRefreshIndicator();
                     break;
 
                 case 'error_fixed':
-                    addEventLog(`✅ Error corregido: ${data.message}`);
+                    addEventLog(`OK: Error corregido: ${data.message}`);
                     showRefreshIndicator();
                     break;
 
                 case 'session_update':
-                    addEventLog(`📊 Actualización de sesión: ${data.username} - ${data.energy.toFixed(2)} kWh`);
+                    addEventLog(`Actualizacion de sesion: ${data.username} - ${data.energy.toFixed(2)} kWh`);
                     showRefreshIndicator();
                     break;
 
                 case 'session_started':
-                    addEventLog(`✅ Nueva sesión iniciada: ${data.username} en ${data.cp_id}`);
+                    addEventLog(`Nueva sesion iniciada: ${data.username} en ${data.cp_id}`);
                     showRefreshIndicator();
                     break;
 
                 case 'session_ended':
-                    addEventLog(`⛔ Sesión finalizada: ${data.username} - Total: €${data.cost.toFixed(2)}`);
+                    addEventLog(`Sesion finalizada: ${data.username} - Total: €${data.cost.toFixed(2)}`);
                     showRefreshIndicator();
                     break;
 
                 case 'cp_status_change':
-                    addEventLog(`🔌 Estado CP ${data.cp_id}: ${data.status}`);
+                    addEventLog(`Estado CP ${data.cp_id}: ${data.status}`);
                     showRefreshIndicator();
                     break;
 
                 case 'cp_error':
-                    addEventLog(`⚠️ ${data.message}`);
+                    addEventLog(`ADVERTENCIA: ${data.message}`);
                     showRefreshIndicator();
                     break;
 
                 case 'cp_fixed':
-                    addEventLog(`✅ ${data.message}`);
+                    addEventLog(`OK: ${data.message}`);
                     showRefreshIndicator();
                     break;
 
                 case 'register_cp_success':
-                    addEventLog(`✅ ${data.message}`);
+                    addEventLog(`OK: ${data.message}`);
                     showRegisterMessage(data.message, 'success');
                     clearRegisterForm();
                     showRefreshIndicator();
                     break;
 
                 case 'register_cp_error':
-                    addEventLog(`❌ Error al registrar CP: ${data.message}`);
+                    addEventLog(`ERROR al registrar CP: ${data.message}`);
                     showRegisterMessage(data.message, 'error');
                     break;
 
@@ -573,10 +573,10 @@
                     // Evento genérico de Kafka - mostrar en el stream
                     const icon = {
                         'DRIVER_LOGIN': '👤',
-                        'CHARGING_REQUEST': '🔌',
-                        'CHARGING_STARTED': '⚡',
-                        'CHARGING_STOPPED': '⛔',
-                        'CP_STATUS_UPDATE': '📊'
+                        'CHARGING_REQUEST': 'SOLIC',
+                        'CHARGING_STARTED': 'CARGA',
+                        'CHARGING_STOPPED': 'PARADA',
+                        'CP_STATUS_UPDATE': 'ESTADO'
                     }[data.event_type] || '📨';
                     addEventLog(`${icon} ${data.message}`);
                     break;
@@ -685,11 +685,11 @@
 
             if (!dashboardData || !dashboardData.active_sessions || dashboardData.active_sessions.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No hay sesiones activas</td></tr>';
-                console.log('[FRONTEND] ⚠️ No hay sesiones activas para mostrar');
+                console.log('[FRONTEND] No hay sesiones activas para mostrar');
                 return;
             }
 
-            console.log(`[FRONTEND] ✅ Mostrando ${dashboardData.active_sessions.length} sesión(es) activa(s)`);
+            console.log(`[FRONTEND] Mostrando ${dashboardData.active_sessions.length} sesion(es) activa(s)`);
             dashboardData.active_sessions.forEach(session => {
                 const row = document.createElement('tr');
                 row.innerHTML = `
@@ -780,7 +780,7 @@
                     cp_id: cpId,
                     error_type: errorType
                 }));
-                addEventLog(`⚠️ Simulando error "${errorType}" en ${cpId}`);
+                addEventLog(`Simulando error "${errorType}" en ${cpId}`);
             }
         }
         
@@ -797,7 +797,7 @@
                     type: 'fix_error',
                     cp_id: cpId
                 }));
-                addEventLog(`✅ Corrigiendo error en ${cpId}`);
+                addEventLog(`Corrigiendo error en ${cpId}`);
             }
         }
         
