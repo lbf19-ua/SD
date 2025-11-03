@@ -173,10 +173,27 @@ class EV_CP_Engine:
         Args:
             event_type: Tipo de evento
             data: Datos adicionales del evento
+        
+        ⚠️ PROTECCIÓN: Limita la frecuencia de publicación de cp_status_change para evitar bucles.
         """
         if not self.producer:
             print(f"[{self.cp_id}] ⚠️  Cannot publish event: Kafka producer not initialized")
             return
+        
+        # ⚠️ PROTECCIÓN: Throttling para cp_status_change - no publicar más de una vez por segundo
+        if event_type == 'cp_status_change':
+            if not hasattr(self, '_last_status_change_publish'):
+                self._last_status_change_publish = 0
+            
+            current_time = time.time()
+            time_since_last = current_time - self._last_status_change_publish
+            
+            if time_since_last < 1.0:  # Mínimo 1 segundo entre cambios de estado
+                status = data.get('status') if data else 'unknown'
+                print(f"[{self.cp_id}] ⚠️ Throttling: cp_status_change a '{status}' ya se publicó hace {time_since_last:.2f}s, omitiendo para evitar bucle")
+                return
+            
+            self._last_status_change_publish = current_time
         
         try:
             event = {
