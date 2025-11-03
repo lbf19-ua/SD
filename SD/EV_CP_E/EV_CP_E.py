@@ -507,206 +507,222 @@ class EV_CP_Engine:
                     print(f"[{self.cp_id}]  Engine stopping, exiting message loop...")
                     break
                 
-                event = message.value
-                event_type = event.get('event_type', '')
-                action = event.get('action', '')
-                
-                # Filtrar solo eventos relevantes para este CP
-                event_cp_id = event.get('cp_id')
-                
-                # Debug: Log todos los eventos recibidos
-                print(f"[{self.cp_id}]  Evento recibido: type={event_type}, action={action}, cp_id={event_cp_id}")
-                
-                # Procesar eventos globales o específicos para este CP
-                if event_cp_id and event_cp_id != self.cp_id:
-                    print(f"[{self.cp_id}]   Ignorando evento para otro CP: {event_cp_id}")
-                    continue  # No es para nosotros
-                
-                print(f"[{self.cp_id}]  Procesando evento: {event_type or action}")
-                
-                # ============================================================
-                # RESPUESTA DE AUTORIZACIÓN
-                # ============================================================
-                if event_type == 'AUTHORIZATION_RESPONSE':
-                    authorized = event.get('authorized', False)
-                    response_cp_id = event.get('cp_id')
+                try:
+                    event = message.value
+                    event_type = event.get('event_type', '')
+                    action = event.get('action', '')
                     
-                    if response_cp_id == self.cp_id and authorized:
-                        print(f"[{self.cp_id}]  Authorization granted by Central")
-                        # El estado cambiará a 'charging' cuando Central publique charging_started
-                
-                # ============================================================
-                # INICIO DE CARGA (Central ya autorizó)
-                # ============================================================
-                elif action == 'charging_started':
-                    target_cp = event.get('cp_id')
-                    if target_cp == self.cp_id:
-                        username = event.get('username')
-                        user_id = event.get('user_id')
+                    # Filtrar solo eventos relevantes para este CP
+                    event_cp_id = event.get('cp_id')
+                    
+                    # Debug: Log todos los eventos recibidos
+                    print(f"[{self.cp_id}]  Evento recibido: type={event_type}, action={action}, cp_id={event_cp_id}")
+                    
+                    # Procesar eventos globales o específicos para este CP
+                    if event_cp_id and event_cp_id != self.cp_id:
+                        print(f"[{self.cp_id}]   Ignorando evento para otro CP: {event_cp_id}")
+                        continue  # No es para nosotros
+                    
+                    print(f"[{self.cp_id}]  Procesando evento: {event_type or action}")
+                    
+                    # ============================================================
+                    # RESPUESTA DE AUTORIZACIÓN
+                    # ============================================================
+                    if event_type == 'AUTHORIZATION_RESPONSE':
+                        authorized = event.get('authorized', False)
+                        response_cp_id = event.get('cp_id')
                         
-                        with self.lock:
-                            if self.status not in ['available', 'reserved']:
-                                print(f"[{self.cp_id}]   Cannot start charging: status is {self.status}")
-                                continue
+                        if response_cp_id == self.cp_id and authorized:
+                            print(f"[{self.cp_id}]  Authorization granted by Central")
+                            # El estado cambiará a 'charging' cuando Central publique charging_started
+                    
+                    # ============================================================
+                    # INICIO DE CARGA (Central ya autorizó)
+                    # ============================================================
+                    elif action == 'charging_started':
+                        target_cp = event.get('cp_id')
+                        if target_cp == self.cp_id:
+                            username = event.get('username')
+                            user_id = event.get('user_id')
                             
-                            # Crear sesión
-                            self.current_session = {
-                                'username': username,
-                                'user_id': user_id,
-                                'start_time': time.time(),
-                                'energy_kwh': 0.0,
-                                'cost': 0.0
-                            }
-                        
-                        # Cambiar a charging (fuera del lock para evitar deadlock)
-                        self.change_status('charging', f'Charging started for user {username}')
-                        
-                        # Iniciar simulación de carga
-                        self.start_charging_simulation(user_id, username)
-                
-                # ============================================================
-                # DETENER CARGA
-                # ============================================================
-                elif action == 'charging_stopped':
-                    target_cp = event.get('cp_id')
-                    if target_cp == self.cp_id:
-                        with self.lock:
-                            if self.status != 'charging' or not self.current_session:
-                                print(f"[{self.cp_id}]   Not charging, ignoring stop command")
-                                continue
+                            with self.lock:
+                                if self.status not in ['available', 'reserved']:
+                                    print(f"[{self.cp_id}]   Cannot start charging: status is {self.status}")
+                                    continue
+                                
+                                # Crear sesión
+                                self.current_session = {
+                                    'username': username,
+                                    'user_id': user_id,
+                                    'start_time': time.time(),
+                                    'energy_kwh': 0.0,
+                                    'cost': 0.0
+                                }
                             
-                            # Detener simulación
-                            self.stop_charging_flag.set()
+                            # Cambiar a charging (fuera del lock para evitar deadlock)
+                            self.change_status('charging', f'Charging started for user {username}')
                             
-                            # Esperar a que termine el thread
-                            if self.charging_thread and self.charging_thread.is_alive():
-                                self.charging_thread.join(timeout=2)
-                            
-                            # Obtener datos finales
-                            final_energy = self.current_session.get('energy_kwh', 0.0)
-                            final_cost = self.current_session.get('cost', 0.0)
-                            username = self.current_session.get('username')
-                            
-                            # Limpiar sesión
-                            self.current_session = None
-                        
-                        # Cambiar a available (fuera del lock para evitar deadlock)
-                        self.change_status('available', 'Charging completed')
-                        
-                        print(f"[{self.cp_id}]  Charging session completed")
-                        print(f"[{self.cp_id}]    User: {username}")
-                        print(f"[{self.cp_id}]    Energy: {final_energy:.2f} kWh")
-                        print(f"[{self.cp_id}]    Cost: €{final_cost:.2f}")
-                
-                # ============================================================
-                # SIMULACIÓN DE ERROR (desde Admin)
-                # ============================================================
-                elif event_type == 'CP_ERROR_SIMULATED' or action == 'cp_error_simulated':
-                    target_cp = event.get('cp_id')
-                    if target_cp == self.cp_id:
-                        error_type = event.get('error_type', 'fault')
-                        new_status = event.get('new_status', 'fault')
-                        
-                        print(f"[{self.cp_id}]  Simulating error: {error_type}")
-                        
-                        # Si hay carga activa, detenerla
-                        with self.lock:
-                            if self.status == 'charging' and self.current_session:
-                                self.stop_charging_flag.set()
-                                if self.charging_thread and self.charging_thread.is_alive():
-                                    self.charging_thread.join(timeout=2)
-                                self.current_session = None
-                        
-                        # Cambiar estado
-                        self.change_status(new_status, f'Admin simulated error: {error_type}')
-                        
-                        # Cambiar health status para que Monitor detecte
-                        if new_status == 'fault':
-                            self.health_status = 'KO'
-                
-                # ============================================================
-                # REPARACIÓN (desde Admin)
-                # ============================================================
-                elif event_type == 'CP_ERROR_FIXED' or action == 'cp_error_fixed':
-                    target_cp = event.get('cp_id')
-                    if target_cp == self.cp_id:
-                        print(f"[{self.cp_id}]  Error fixed by Admin")
-                        
-                        # Restaurar health status
-                        self.health_status = 'OK'
-                        
-                        # Cambiar a available
-                        self.change_status('available', 'Error fixed by admin')
-                
-                # ============================================================
-                # REQUISITO 13a: PARAR CP (desde Admin)
-                # ============================================================
-                elif event_type == 'CP_STOP' or action == 'stop':
-                    target_cp = event.get('cp_id')
-                    if target_cp == self.cp_id:
-                        reason = event.get('reason', 'Stopped by admin')
-                        print(f"[{self.cp_id}]  STOP command received from Central")
-                        print(f"[{self.cp_id}]    Reason: {reason}")
-                        
-                        # Si hay carga activa, detenerla
-                        with self.lock:
-                            if self.status == 'charging' and self.current_session:
-                                print(f"[{self.cp_id}]   Interrupting active charging session")
+                            # Iniciar simulación de carga
+                            self.start_charging_simulation(user_id, username)
+                    
+                    # ============================================================
+                    # DETENER CARGA
+                    # ============================================================
+                    elif action == 'charging_stopped':
+                        target_cp = event.get('cp_id')
+                        if target_cp == self.cp_id:
+                            with self.lock:
+                                if self.status != 'charging' or not self.current_session:
+                                    print(f"[{self.cp_id}]   Not charging, ignoring stop command")
+                                    continue
+                                
+                                # Detener simulación
                                 self.stop_charging_flag.set()
                                 
-                                # Esperar a que termine
+                                # Esperar a que termine el thread
                                 if self.charging_thread and self.charging_thread.is_alive():
                                     self.charging_thread.join(timeout=2)
                                 
+                                # Obtener datos finales
+                                final_energy = self.current_session.get('energy_kwh', 0.0)
+                                final_cost = self.current_session.get('cost', 0.0)
+                                username = self.current_session.get('username')
+                                
+                                # Limpiar sesión
                                 self.current_session = None
-                        
-                        # Cambiar a out_of_service (FUERA DE SERVICIO - ROJO)
-                        self.change_status('out_of_service', reason)
-                        print(f"[{self.cp_id}]  CP is now OUT OF SERVICE")
-                
-                # ============================================================
-                # REQUISITO 13b: REANUDAR CP (desde Admin)
-                # ============================================================
-                elif event_type == 'CP_RESUME' or action == 'resume':
-                    target_cp = event.get('cp_id')
-                    if target_cp == self.cp_id:
-                        reason = event.get('reason', 'Resumed by admin')
-                        print(f"[{self.cp_id}]   RESUME command received from Central")
-                        print(f"[{self.cp_id}]    Reason: {reason}")
-                        
-                        # Cambiar a available (ACTIVADO - VERDE)
-                        self.change_status('available', reason)
-                        print(f"[{self.cp_id}]  CP is now AVAILABLE")
-                
-                # ============================================================
-                # REQUISITO 7: ENCHUFAR VEHÍCULO (desde CLI remoto)
-                # ============================================================
-                elif event_type == 'CP_PLUG_IN' or action == 'plug_in':
-                    target_cp = event.get('cp_id')
-                    if target_cp == self.cp_id:
-                        print(f"[{self.cp_id}]  PLUG_IN command received (from remote CLI)")
-                        self.simulate_plug_in()
-                
-                # ============================================================
-                # REQUISITO 9: DESENCHUFAR VEHÍCULO (desde CLI remoto)
-                # ============================================================
-                elif event_type == 'CP_UNPLUG' or action == 'unplug':
-                    target_cp = event.get('cp_id')
-                    if target_cp == self.cp_id:
-                        print(f"[{self.cp_id}] UNPLUG command received (from remote CLI)")
-                        # Ejecutar simulate_unplug que detiene la carga y envía ticket
-                        result = self.simulate_unplug()
-                        if result:
-                            print(f"[{self.cp_id}]  Desenchufado completado - Ticket enviado al conductor")
-                        else:
-                            print(f"[{self.cp_id}]   No había sesión activa para desenchufar")
+                            
+                            # Cambiar a available (fuera del lock para evitar deadlock)
+                            self.change_status('available', 'Charging completed')
+                            
+                            print(f"[{self.cp_id}]  Charging session completed")
+                            print(f"[{self.cp_id}]    User: {username}")
+                            print(f"[{self.cp_id}]    Energy: {final_energy:.2f} kWh")
+                            print(f"[{self.cp_id}]    Cost: €{final_cost:.2f}")
+                    
+                    # ============================================================
+                    # SIMULACIÓN DE ERROR (desde Admin)
+                    # ============================================================
+                    elif event_type == 'CP_ERROR_SIMULATED' or action == 'cp_error_simulated':
+                        target_cp = event.get('cp_id')
+                        if target_cp == self.cp_id:
+                            error_type = event.get('error_type', 'fault')
+                            new_status = event.get('new_status', 'fault')
+                            
+                            print(f"[{self.cp_id}]  Simulating error: {error_type}")
+                            
+                            # Si hay carga activa, detenerla
+                            with self.lock:
+                                if self.status == 'charging' and self.current_session:
+                                    self.stop_charging_flag.set()
+                                    if self.charging_thread and self.charging_thread.is_alive():
+                                        self.charging_thread.join(timeout=2)
+                                    self.current_session = None
+                            
+                            # Cambiar estado
+                            self.change_status(new_status, f'Admin simulated error: {error_type}')
+                            
+                            # Cambiar health status para que Monitor detecte
+                            if new_status == 'fault':
+                                self.health_status = 'KO'
+                    
+                    # ============================================================
+                    # REPARACIÓN (desde Admin)
+                    # ============================================================
+                    elif event_type == 'CP_ERROR_FIXED' or action == 'cp_error_fixed':
+                        target_cp = event.get('cp_id')
+                        if target_cp == self.cp_id:
+                            print(f"[{self.cp_id}]  Error fixed by Admin")
+                            
+                            # Restaurar health status
+                            self.health_status = 'OK'
+                            
+                            # Cambiar a available
+                            self.change_status('available', 'Error fixed by admin')
+                    
+                    # ============================================================
+                    # REQUISITO 13a: PARAR CP (desde Admin)
+                    # ============================================================
+                    elif event_type == 'CP_STOP' or action == 'stop':
+                        target_cp = event.get('cp_id')
+                        if target_cp == self.cp_id:
+                            reason = event.get('reason', 'Stopped by admin')
+                            print(f"[{self.cp_id}]  STOP command received from Central")
+                            print(f"[{self.cp_id}]    Reason: {reason}")
+                            
+                            # Si hay carga activa, detenerla
+                            with self.lock:
+                                if self.status == 'charging' and self.current_session:
+                                    print(f"[{self.cp_id}]   Interrupting active charging session")
+                                    self.stop_charging_flag.set()
+                                    
+                                    # Esperar a que termine
+                                    if self.charging_thread and self.charging_thread.is_alive():
+                                        self.charging_thread.join(timeout=2)
+                                    
+                                    self.current_session = None
+                            
+                            # Cambiar a out_of_service (FUERA DE SERVICIO - ROJO)
+                            self.change_status('out_of_service', reason)
+                            print(f"[{self.cp_id}]  CP is now OUT OF SERVICE")
+                    
+                    # ============================================================
+                    # REQUISITO 13b: REANUDAR CP (desde Admin)
+                    # ============================================================
+                    elif event_type == 'CP_RESUME' or action == 'resume':
+                        target_cp = event.get('cp_id')
+                        if target_cp == self.cp_id:
+                            reason = event.get('reason', 'Resumed by admin')
+                            print(f"[{self.cp_id}]   RESUME command received from Central")
+                            print(f"[{self.cp_id}]    Reason: {reason}")
+                            
+                            # Cambiar a available (ACTIVADO - VERDE)
+                            self.change_status('available', reason)
+                            print(f"[{self.cp_id}]  CP is now AVAILABLE")
+                    
+                    # ============================================================
+                    # REQUISITO 7: ENCHUFAR VEHÍCULO (desde CLI remoto)
+                    # ============================================================
+                    elif event_type == 'CP_PLUG_IN' or action == 'plug_in':
+                        target_cp = event.get('cp_id')
+                        if target_cp == self.cp_id:
+                            print(f"[{self.cp_id}]  PLUG_IN command received (from remote CLI)")
+                            self.simulate_plug_in()
+                    
+                    # ============================================================
+                    # REQUISITO 9: DESENCHUFAR VEHÍCULO (desde CLI remoto)
+                    # ============================================================
+                    elif event_type == 'CP_UNPLUG' or action == 'unplug':
+                        target_cp = event.get('cp_id')
+                        if target_cp == self.cp_id:
+                            print(f"[{self.cp_id}] UNPLUG command received (from remote CLI)")
+                            # Ejecutar simulate_unplug que detiene la carga y envía ticket
+                            result = self.simulate_unplug()
+                            if result:
+                                print(f"[{self.cp_id}]  Desenchufado completado - Ticket enviado al conductor")
+                            else:
+                                print(f"[{self.cp_id}]   No había sesión activa para desenchufar")
+                    
+                except Exception as event_error:
+                    print(f"[{self.cp_id}]  ⚠️ Error procesando evento {event_type or action}: {event_error}")
+                    import traceback
+                    traceback.print_exc()
+                    # Continuar con el siguiente mensaje en lugar de terminar
+                    continue
                 
         except KeyboardInterrupt:
             print(f"\n[{self.cp_id}]   Interrupted by user")
         except Exception as e:
-            print(f"[{self.cp_id}]  Error in command listener: {e}")
+            print(f"[{self.cp_id}]  ⚠️ Error crítico en command listener (reintentando en 5s): {e}")
             import traceback
             traceback.print_exc()
+            # ⚠️ CRÍTICO: Si hay un error crítico, esperar un poco y reintentar en lugar de terminar
+            # Esto previene que Docker reinicie el contenedor constantemente
+            print(f"[{self.cp_id}]  ⏳ Esperando 5 segundos antes de reintentar...")
+            time.sleep(5)
+            # Reintentar el loop si el Engine sigue corriendo
+            if self.running:
+                print(f"[{self.cp_id}]  🔄 Reintentando escuchar comandos...")
+                self.listen_for_commands()  # Llamada recursiva para reintentar
     
     def simulate_plug_in(self):
         """
