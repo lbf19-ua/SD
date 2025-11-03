@@ -53,15 +53,19 @@ except ImportError:
     sys.exit(1)
 
 
-def send_command(cp_id, command, kafka_broker='localhost:9092'):
+def send_command(cp_id, command, kafka_broker=None):
     """
     Envía un comando al CP vía Kafka
     
     Args:
         cp_id: ID del Charging Point
         command: Comando a enviar (plug, unplug, fault, recover, status)
-        kafka_broker: Dirección del broker Kafka
+        kafka_broker: Dirección del broker Kafka (default: KAFKA_BROKER_DEFAULT)
     """
+    # Usar broker por defecto si no se especifica
+    if kafka_broker is None:
+        kafka_broker = KAFKA_BROKER_DEFAULT
+    
     command_map = {
         'plug': 'plug_in',
         'p': 'plug_in',
@@ -84,10 +88,14 @@ def send_command(cp_id, command, kafka_broker='localhost:9092'):
     action = command_map[cmd_normalized]
     
     try:
-        # Conectar a Kafka
+        # Conectar a Kafka sin api_version explícito (auto-detección)
+        print(f"📡 Conectando a Kafka broker: {kafka_broker}")
         producer = KafkaProducer(
             bootstrap_servers=kafka_broker,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            request_timeout_ms=30000,
+            retries=3,
+            acks='all'  # Esperar confirmación de todos los replicas
         )
         
         # Crear evento según el comando
@@ -106,10 +114,21 @@ def send_command(cp_id, command, kafka_broker='localhost:9092'):
             }
             
             # Enviar a través del topic de eventos de Central
-            producer.send(KAFKA_TOPICS['central_events'], event)
+            topic = KAFKA_TOPICS['central_events']
+            print(f"📤 Enviando comando '{action}' al topic '{topic}' para CP {cp_id}...")
+            
+            # Enviar evento
+            future = producer.send(topic, event)
+            
+            # Esperar confirmación
+            record_metadata = future.get(timeout=10)
+            
             producer.flush()
             
-            print(f"✅ Comando '{action}' enviado a {cp_id}")
+            print(f"✅ Comando '{action}' enviado exitosamente a {cp_id}")
+            print(f"   📍 Topic: {record_metadata.topic}")
+            print(f"   📍 Partition: {record_metadata.partition}")
+            print(f"   📍 Offset: {record_metadata.offset}")
             
             if action == 'unplug':
                 print(f"   ℹ️  El CP procesará el desenchufado y enviará el ticket al conductor")
@@ -119,15 +138,24 @@ def send_command(cp_id, command, kafka_broker='localhost:9092'):
         
     except Exception as e:
         print(f"❌ Error enviando comando: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
-def interactive_menu(cp_id, kafka_broker='localhost:9092'):
+def interactive_menu(cp_id, kafka_broker=None):
     """
     Menú interactivo para controlar el CP
     """
+    # Usar broker por defecto si no se especifica
+    if kafka_broker is None:
+        kafka_broker = KAFKA_BROKER_DEFAULT
+    
     print(f"\n{'='*80}")
     print(f"  🎮 CP CONTROL MENU - {cp_id}")
+    print(f"{'='*80}")
+    print(f"  📡 Kafka Broker: {kafka_broker}")
+    print(f"  📋 Topic: {KAFKA_TOPICS['central_events']}")
     print(f"{'='*80}")
     print("  Commands available:")
     print("    [P] Plug in    - Simulate vehicle connection")

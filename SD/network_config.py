@@ -2,10 +2,10 @@
 PC1_IP = "localhost"
 
 # PC2
-PC2_IP = "localhost"
+PC2_IP = "192.168.1.235"
 
 # PC3
-PC3_IP = "localhost"
+PC3_IP = "192.168.1.230"
 
 CENTRAL_PORT = 5000
 KAFKA_PORT = 9092

@@ -108,16 +108,13 @@ services:
     ports:
       - "8080:8080"  # Kafka UI Web Interface
     environment:
-      # Configuración de Kafka Cluster
+      # Configuración de Kafka Cluster - Formato correcto para Kafka UI
+      # IMPORTANTE: El formato correcto para la versión más reciente de Kafka UI
       KAFKA_CLUSTERS_0_NAME: "EV Charging Kafka Cluster"
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker:29092
-      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: "local"
-      # Configuración de seguridad (deshabilitada para desarrollo local)
-      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: PLAINTEXT
-      # Configuración de autenticación (sin autenticación para desarrollo)
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "broker:29092"
+      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: "PLAINTEXT"
       # Configuración avanzada
       DYNAMIC_CONFIG_ENABLED: "true"
-      # Métricas (opcional)
       METRICS_ENABLED: "true"
     networks:
       - ev-network

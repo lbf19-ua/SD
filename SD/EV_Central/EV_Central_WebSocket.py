@@ -185,18 +185,29 @@ class EV_CentralWS:
             # Obtener información completa del CP desde BD (ya estandarizado)
             cp_info = self._standardize_cp(cp_row)
             
-            # Extraer datos del cp_info ya estandarizado
-            location = cp_info.get('location') or ''
+            # Extraer datos del cp_info ya estandarizado con fallbacks
+            location = cp_info.get('location') or cp_info.get('localizacion') or ''
             if not location or location.strip() == '':
-                location = 'Unknown'
+                # Si no hay location en BD, intentar obtenerla de los datos originales
+                location = cp_row.get('localizacion') or cp_row.get('location') or 'Unknown'
+                if location.strip() == '':
+                    location = 'Unknown'
             
-            status = cp_info.get('status') or 'offline'
+            status = cp_info.get('status') or cp_info.get('estado') or 'offline'
             status = self._normalize_status(status)
+            if not status or status.strip() == '':
+                status = 'offline'
             
-            max_power = cp_info.get('max_power_kw') or 22.0
-            tariff = cp_info.get('tariff_per_kwh') or 0.30
+            max_power = cp_info.get('max_power_kw') or cp_info.get('max_kw') or 22.0
+            if not max_power or max_power == 0:
+                max_power = 22.0
             
-            # Publicar evento CP_INFO al Monitor
+            tariff = cp_info.get('tariff_per_kwh') or cp_info.get('tarifa_kwh') or 0.30
+            if not tariff or tariff == 0:
+                tariff = 0.30
+            
+            # Publicar evento CP_INFO al Monitor con TODA la información necesaria
+            # Incluir tanto en 'data' como en el nivel raíz para asegurar que el Monitor lo reciba
             self.publish_event('CP_INFO', {
                 'action': 'cp_info_update',
                 'cp_id': cp_id,
@@ -204,19 +215,24 @@ class EV_CentralWS:
                     'cp_id': cp_id,
                     'location': location,
                     'localizacion': location,
-                    'max_power_kw': max_power,
-                    'max_kw': max_power,
-                    'tariff_per_kwh': tariff,
-                    'tarifa_kwh': tariff,
+                    'max_power_kw': float(max_power),
+                    'max_kw': float(max_power),
+                    'tariff_per_kwh': float(tariff),
+                    'tarifa_kwh': float(tariff),
                     'status': status,
                     'estado': status
                 },
+                # También incluir en el nivel raíz como fallback
                 'status': status,
                 'estado': status,
                 'location': location,
-                'localizacion': location
+                'localizacion': location,
+                'max_power_kw': float(max_power),
+                'max_kw': float(max_power),
+                'tariff_per_kwh': float(tariff),
+                'tarifa_kwh': float(tariff)
             })
-            print(f"[CENTRAL] 📡 Información del CP {cp_id} enviada al Monitor: location={location}, status={status}")
+            print(f"[CENTRAL] 📡 CP_INFO enviado al Monitor - CP: {cp_id}, Location: {location}, Status: {status}, Max Power: {max_power} kW, Tariff: €{tariff}/kWh")
         except Exception as e:
             print(f"[CENTRAL] ⚠️ Error publicando info del CP {cp_id} al Monitor: {e}")
             import traceback
@@ -934,9 +950,15 @@ async def kafka_listener():
                     *KAFKA_TOPICS_CONSUME,
                     bootstrap_servers=KAFKA_BROKER,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                    auto_offset_reset='latest',  # Solo mensajes nuevos
+                    auto_offset_reset='latest',  # Solo mensajes nuevos (después de conectarse)
                     group_id='ev_central_ws_group',
-                    enable_auto_commit=True  # Guardar progreso
+                    enable_auto_commit=True,  # Guardar progreso
+                    # NO especificar api_version - dejar que detecte automáticamente la versión del broker
+                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms
+                    session_timeout_ms=10000,  # 10s - timeout de sesión del grupo de consumidores
+                    max_poll_records=100,  # Procesar hasta 100 mensajes por poll
+                    fetch_min_bytes=1,  # Recibir mensajes aunque sean pequeños
+                    fetch_max_wait_ms=500  # Esperar máximo 500ms antes de devolver mensajes disponibles
                 )
                 # Test connection
                 consumer.topics()
@@ -959,239 +981,295 @@ async def kafka_listener():
             print("[KAFKA] ❌ Cannot continue without Kafka connection")
             return
         
+        print(f"[KAFKA] ✅ Consumer configured and ready. Entering message loop...")
+        print(f"[KAFKA] 📋 Listening to topics: {KAFKA_TOPICS_CONSUME}")
+        print(f"[KAFKA] 🔄 Consumer is now waiting for messages...")
+        
+        message_count = 0
+        last_heartbeat = time.time()
+        
         try:
             
             # ========================================================================
             # BUCLE INFINITO - La Central NUNCA deja de escuchar
             # ========================================================================
-            for message in consumer:
-                event = message.value
-                print(f"[KAFKA] 📨 Received event: {event.get('event_type', 'UNKNOWN')} from topic: {message.topic}")
-                
-                # ====================================================================
-                # REQUISITO a) Registro de Charging Points (Auto-registro)
-                # ====================================================================
-                # Cuando un CP se conecta o envía CP_REGISTRATION, se registra
-                # automáticamente en la base de datos
-                # --------------------------------------------------------------------
+            while True:
                 try:
-                    et = event.get('event_type', '')
-                    action = event.get('action', '')
-                    cp_id = event.get('cp_id') or event.get('engine_id')
+                    # Poll con timeout para poder detectar si el consumer está vivo
+                    # Aumentar max_records para procesar múltiples mensajes
+                    msg_pack = consumer.poll(timeout_ms=2000, max_records=100)
                     
-                    if cp_id and (et == 'CP_REGISTRATION' or action == 'connect'):
-                        data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
-                        localizacion = data.get('localizacion') or data.get('location') or 'Desconocido'
-                        max_kw = data.get('max_kw') or data.get('max_power_kw') or 22.0
-                        tarifa_kwh = data.get('tarifa_kwh') or data.get('tariff_per_kwh') or data.get('price_eur_kwh') or 0.30
-                        if hasattr(db, 'register_or_update_charging_point'):
-                            db.register_or_update_charging_point(cp_id, localizacion, max_kw=max_kw, tarifa_kwh=tarifa_kwh, estado='available')
-                            print(f"[CENTRAL] 💾 CP registrado/actualizado (auto-registro): {cp_id}")
-                            # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR
-                            central_instance.publish_cp_info_to_monitor(cp_id)
+                    # Heartbeat periódico cada 30 segundos para verificar que el bucle está activo
+                    current_time = time.time()
+                    if current_time - last_heartbeat > 30:
+                        print(f"[KAFKA] 💓 Consumer alive and waiting for messages (last message #{message_count})")
+                        last_heartbeat = current_time
                     
-                    # Auto-crear CP si llega evento pero no existe
-                    if cp_id and action == 'cp_status_change':
-                        try:
-                            cp_row = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
-                            if not cp_row:
-                                status = event.get('status', 'available')
-                                if hasattr(db, 'register_or_update_charging_point'):
-                                    db.register_or_update_charging_point(cp_id, 'Desconocido', max_kw=22.0, tarifa_kwh=0.30, estado=status)
-                                    print(f"[CENTRAL] 💾 CP auto-creado por status_change: {cp_id}")
-                        except Exception as ie:
-                            print(f"[CENTRAL] ⚠️ Error auto-creando CP por status_change: {ie}")
-                except Exception as e:
-                    print(f"[CENTRAL] ⚠️ Error persistiendo registro de CP: {e}")
-                
-                # ====================================================================
-                # MONITOR AUTH: Cuando un Monitor se autentica, enviar información del CP
-                # ====================================================================
-                if et == 'MONITOR_AUTH' or action == 'authenticate':
-                    cp_id = event.get('cp_id')
-                    if cp_id:
-                        print(f"[CENTRAL] 🔐 Monitor autenticado para CP {cp_id}, enviando información del CP...")
-                        # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR (información inicial)
-                        central_instance.publish_cp_info_to_monitor(cp_id)
-                
-                # ====================================================================
-                # REQUISITO b) Autorización de suministros
-                # ====================================================================
-                # La Central procesa dos tipos de eventos para suministros:
-                # 1) Petición de autorización: validación del punto de carga
-                # 2) Inicio de carga: registro de la sesión una vez autorizada
-                # --------------------------------------------------------------------
-                if et == 'AUTHORIZATION_REQUEST':
-                    try:
-                        cp_id = event.get('cp_id')
-                        client_id = event.get('client_id')
-                        username = event.get('username')
-                        
-                        print(f"[CENTRAL] 🔍 DEBUG - cp_id recibido: {cp_id!r} (tipo: {type(cp_id).__name__})")
-                        
-                        if not client_id:
-                            raise ValueError("Client ID es requerido")
-                        
-                        # Si no se especifica CP, buscar y reservar automáticamente (atómico)
-                        if not cp_id or cp_id == 'None' or cp_id == 'null':
-                            print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, buscando CP disponible...")
-                            
-                            # Buscar y reservar atomicamente para evitar condiciones de carrera
-                            cp_id = db.find_and_reserve_available_cp()
-                            
-                            if not cp_id:
-                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                    'client_id': client_id,
-                                    'cp_id': None,
-                                    'authorized': False,
-                                    'reason': 'No hay CPs disponibles'
-                                })
+                    # Verificar si hay mensajes
+                    if not msg_pack:
+                        # No hay mensajes, continuar el bucle
+                        continue
+                    
+                    # Procesar mensajes recibidos
+                    for topic_partition, messages in msg_pack.items():
+                        for message in messages:
+                            message_count += 1
+                            try:
+                                event = message.value
+                                print(f"[KAFKA] 📨 Received event #{message_count}: {event.get('event_type', 'UNKNOWN')} from topic: {message.topic}")
+                            except Exception as e:
+                                print(f"[KAFKA] ⚠️ Error deserializing message: {e}")
                                 continue
                             
-                            print(f"[CENTRAL] 🎯 CP {cp_id} asignado y reservado automáticamente para {username}")
+                            # Procesar el evento
+                            print(f"[KAFKA] 📨 Processing event: {event.get('event_type', 'UNKNOWN')} from topic: {message.topic}")
                             
-                            # Ya está reservado, enviar respuesta positiva al Driver
-                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                'client_id': client_id,
-                                'cp_id': cp_id, 
-                                'authorized': True
-                            })
+                            # ====================================================================
+                            # REQUISITO a) Registro de Charging Points (Auto-registro)
+                            # ====================================================================
+                            # Cuando un CP se conecta o envía CP_REGISTRATION, se registra
+                            # automáticamente en la base de datos
+                            # --------------------------------------------------------------------
+                            try:
+                                et = event.get('event_type', '')
+                                action = event.get('action', '')
+                                cp_id = event.get('cp_id') or event.get('engine_id')
+                                
+                                if cp_id and (et == 'CP_REGISTRATION' or action == 'connect'):
+                                    data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
+                                    localizacion = data.get('localizacion') or data.get('location') or 'Desconocido'
+                                    max_kw = data.get('max_kw') or data.get('max_power_kw') or 22.0
+                                    tarifa_kwh = data.get('tarifa_kwh') or data.get('tariff_per_kwh') or data.get('price_eur_kwh') or 0.30
+                                    if hasattr(db, 'register_or_update_charging_point'):
+                                        db.register_or_update_charging_point(cp_id, localizacion, max_kw=max_kw, tarifa_kwh=tarifa_kwh, estado='available')
+                                        print(f"[CENTRAL] 💾 CP registrado/actualizado (auto-registro): {cp_id}")
+                                        # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR
+                                        central_instance.publish_cp_info_to_monitor(cp_id)
+                                
+                                # Auto-crear CP si llega evento pero no existe
+                                if cp_id and action == 'cp_status_change':
+                                    try:
+                                        cp_row = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+                                        if not cp_row:
+                                            status = event.get('status', 'available')
+                                            if hasattr(db, 'register_or_update_charging_point'):
+                                                db.register_or_update_charging_point(cp_id, 'Desconocido', max_kw=22.0, tarifa_kwh=0.30, estado=status)
+                                                print(f"[CENTRAL] 💾 CP auto-creado por status_change: {cp_id}")
+                                    except Exception as ie:
+                                        print(f"[CENTRAL] ⚠️ Error auto-creando CP por status_change: {ie}")
+                            except Exception as e:
+                                print(f"[CENTRAL] ⚠️ Error persistiendo registro de CP: {e}")
                             
-                            # Obtener user_id si no está en el evento
-                            user_id = event.get('user_id')
-                            if not user_id and username:
+                            # ====================================================================
+                            # MONITOR AUTH: Cuando un Monitor se autentica, enviar información del CP
+                            # ====================================================================
+                            et = event.get('event_type', '')
+                            if et == 'MONITOR_AUTH' or event.get('action', '') == 'authenticate':
+                                cp_id = event.get('cp_id')
+                                if cp_id:
+                                    print(f"[CENTRAL] 🔐 Monitor autenticado para CP {cp_id}, enviando información del CP...")
+                                    # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR (información inicial)
+                                    central_instance.publish_cp_info_to_monitor(cp_id)
+                            
+                            # ====================================================================
+                            # REQUISITO b) Autorización de suministros
+                            # ====================================================================
+                            # La Central procesa dos tipos de eventos para suministros:
+                            # 1) Petición de autorización: validación del punto de carga
+                            # 2) Inicio de carga: registro de la sesión una vez autorizada
+                            # --------------------------------------------------------------------
+                            if et == 'AUTHORIZATION_REQUEST':
                                 try:
-                                    user = db.get_user_by_username(username)
-                                    if user:
-                                        user_id = user.get('id')
-                                        print(f"[CENTRAL] 🔍 DEBUG: user_id encontrado para {username}: {user_id}")
-                                except Exception as e:
-                                    print(f"[CENTRAL] ⚠️ Error buscando user_id para {username}: {e}")
-                            
-                            # Crear sesión de carga directamente (no enviar evento a Kafka)
-                            if user_id and cp_id:
-                                try:
-                                    correlation_id = event.get('correlation_id')
-                                    session_id = db.create_charging_session(user_id, cp_id, correlation_id)
-                                    if session_id:
-                                        print(f"[CENTRAL] ✅ Sesión {session_id} creada para usuario {username} en CP {cp_id}")
+                                    cp_id = event.get('cp_id')
+                                    client_id = event.get('client_id')
+                                    username = event.get('username')
+                                    
+                                    print(f"[CENTRAL] 🔍 DEBUG - cp_id recibido: {cp_id!r} (tipo: {type(cp_id).__name__})")
+                                    
+                                    if not client_id:
+                                        raise ValueError("Client ID es requerido")
+                                    
+                                    # Si no se especifica CP, buscar y reservar automáticamente (atómico)
+                                    if not cp_id or cp_id == 'None' or cp_id == 'null':
+                                        print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, buscando CP disponible...")
+                                        
+                                        # Buscar y reservar atomicamente para evitar condiciones de carrera
+                                        cp_id = db.find_and_reserve_available_cp()
+                                        
+                                        if not cp_id:
+                                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                                'client_id': client_id,
+                                                'cp_id': None,
+                                                'authorized': False,
+                                                'reason': 'No hay CPs disponibles'
+                                            })
+                                            continue
+                                        
+                                        print(f"[CENTRAL] 🎯 CP {cp_id} asignado y reservado automáticamente para {username}")
+                                        
+                                        # Ya está reservado, enviar respuesta positiva al Driver
+                                        central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                            'client_id': client_id,
+                                            'cp_id': cp_id, 
+                                            'authorized': True
+                                        })
+                                        
+                                        # Obtener user_id si no está en el evento
+                                        user_id = event.get('user_id')
+                                        if not user_id and username:
+                                            try:
+                                                user = db.get_user_by_username(username)
+                                                if user:
+                                                    user_id = user.get('id')
+                                                    print(f"[CENTRAL] 🔍 DEBUG: user_id encontrado para {username}: {user_id}")
+                                            except Exception as e:
+                                                print(f"[CENTRAL] ⚠️ Error buscando user_id para {username}: {e}")
+                                        
+                                        # Crear sesión de carga directamente (no enviar evento a Kafka)
+                                        if user_id and cp_id:
+                                            try:
+                                                correlation_id = event.get('correlation_id')
+                                                session_id = db.create_charging_session(user_id, cp_id, correlation_id)
+                                                if session_id:
+                                                    print(f"[CENTRAL] ✅ Sesión {session_id} creada para usuario {username} en CP {cp_id}")
+                                                else:
+                                                    print(f"[CENTRAL] ⚠️ Error: session_id es None")
+                                            except Exception as e:
+                                                print(f"[CENTRAL] ❌ Error creando sesión: {e}")
+                                                import traceback
+                                                traceback.print_exc()
+                                        
+                                        # Enviar comando al CP_E para que inicie la carga físicamente
+                                        # El CP_E escucha central-events y procesará este comando
+                                        central_instance.publish_event('charging_started', {
+                                            'action': 'charging_started',
+                                            'cp_id': cp_id,
+                                            'username': username,
+                                            'user_id': user_id,
+                                            'client_id': client_id
+                                        })
+                                        print(f"[CENTRAL] 📤 Comando charging_started enviado a CP_E {cp_id} (user_id={user_id})")
                                     else:
-                                        print(f"[CENTRAL] ⚠️ Error: session_id es None")
-                                except Exception as e:
-                                    print(f"[CENTRAL] ❌ Error creando sesión: {e}")
-                                    import traceback
-                                    traceback.print_exc()
-                            
-                            # Enviar comando al CP_E para que inicie la carga físicamente
-                            # El CP_E escucha central-events y procesará este comando
-                            central_instance.publish_event('charging_started', {
-                                'action': 'charging_started',
-                                'cp_id': cp_id,
-                                'username': username,
-                                'user_id': user_id,
-                                'client_id': client_id
-                            })
-                            print(f"[CENTRAL] 📤 Comando charging_started enviado a CP_E {cp_id} (user_id={user_id})")
-                        else:
-                            # Si se especifica un CP concreto, verificar y reservar
-                            print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, cp={cp_id}, client={client_id}")
-                            
-                            # Verificar estado del punto de carga
-                            cp = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
-                            if not cp:
-                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                    'client_id': client_id,
-                                    'cp_id': cp_id,
-                                    'authorized': False,
-                                    'reason': 'CP no encontrado'
-                                })
-                                continue
-                                
-                            current_status = cp.get('status') or cp.get('estado')
-                            print(f"[CENTRAL] 📊 CP {cp_id} tiene estado: {current_status}")
-                            
-                            # Solo rechazar si está en estado 'fault', 'out_of_service', 'charging' o 'reserved'
-                            if current_status in ('fault', 'out_of_service', 'charging', 'reserved'):
-                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                    'client_id': client_id,
-                                    'cp_id': cp_id,
-                                    'authorized': False,
-                                    'reason': f'CP no disponible (estado: {current_status})'
-                                })
-                                continue
-                            
-                            # Intentar reservar el punto de carga específico
-                            if db.reserve_charging_point(cp_id):
-                                print(f"[CENTRAL] ✅ CP {cp_id} reservado para cliente {client_id}")
-                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                    'client_id': client_id,
-                                    'cp_id': cp_id, 
-                                    'authorized': True
-                                })
-                                
-                                # Obtener user_id si no está en el evento
-                                user_id = event.get('user_id')
-                                if not user_id and username:
-                                    try:
-                                        user = db.get_user_by_username(username)
-                                        if user:
-                                            user_id = user.get('id')
-                                    except Exception as e:
-                                        print(f"[CENTRAL] ⚠️ Error buscando user_id para {username}: {e}")
-                                
-                                # Crear sesión de carga directamente (no enviar evento a Kafka)
-                                if user_id and cp_id:
-                                    try:
-                                        correlation_id = event.get('correlation_id')
-                                        session_id = db.create_charging_session(user_id, cp_id, correlation_id)
-                                        if session_id:
-                                            print(f"[CENTRAL] ✅ Sesión {session_id} creada para usuario {username} en CP {cp_id}")
+                                        # Si se especifica un CP concreto, verificar y reservar
+                                        print(f"[CENTRAL] 🔐 Solicitud de autorización: usuario={username}, cp={cp_id}, client={client_id}")
+                                        
+                                        # Verificar estado del punto de carga
+                                        cp = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+                                        if not cp:
+                                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                                'client_id': client_id,
+                                                'cp_id': cp_id,
+                                                'authorized': False,
+                                                'reason': 'CP no encontrado'
+                                            })
+                                            continue
+                                            
+                                        current_status = cp.get('status') or cp.get('estado')
+                                        print(f"[CENTRAL] 📊 CP {cp_id} tiene estado: {current_status}")
+                                        
+                                        # Solo rechazar si está en estado 'fault', 'out_of_service', 'charging' o 'reserved'
+                                        if current_status in ('fault', 'out_of_service', 'charging', 'reserved'):
+                                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                                'client_id': client_id,
+                                                'cp_id': cp_id,
+                                                'authorized': False,
+                                                'reason': f'CP no disponible (estado: {current_status})'
+                                            })
+                                            continue
+                                        
+                                        # Intentar reservar el punto de carga específico
+                                        if db.reserve_charging_point(cp_id):
+                                            print(f"[CENTRAL] ✅ CP {cp_id} reservado para cliente {client_id}")
+                                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                                'client_id': client_id,
+                                                'cp_id': cp_id, 
+                                                'authorized': True
+                                            })
+                                            
+                                            # Obtener user_id si no está en el evento
+                                            user_id = event.get('user_id')
+                                            if not user_id and username:
+                                                try:
+                                                    user = db.get_user_by_username(username)
+                                                    if user:
+                                                        user_id = user.get('id')
+                                                except Exception as e:
+                                                    print(f"[CENTRAL] ⚠️ Error buscando user_id para {username}: {e}")
+                                            
+                                            # Crear sesión de carga directamente (no enviar evento a Kafka)
+                                            if user_id and cp_id:
+                                                try:
+                                                    correlation_id = event.get('correlation_id')
+                                                    session_id = db.create_charging_session(user_id, cp_id, correlation_id)
+                                                    if session_id:
+                                                        print(f"[CENTRAL] ✅ Sesión {session_id} creada para usuario {username} en CP {cp_id}")
+                                                    else:
+                                                        print(f"[CENTRAL] ⚠️ Error: session_id es None")
+                                                except Exception as e:
+                                                    print(f"[CENTRAL] ❌ Error creando sesión: {e}")
+                                                    import traceback
+                                                    traceback.print_exc()
+                                            
+                                            # Enviar comando al CP_E para que inicie la carga físicamente
+                                            central_instance.publish_event('charging_started', {
+                                                'action': 'charging_started',
+                                                'cp_id': cp_id,
+                                                'username': username,
+                                                'user_id': user_id,
+                                                'client_id': client_id
+                                            })
+                                            print(f"[CENTRAL] 📤 Comando charging_started enviado a CP_E {cp_id} (user_id={user_id})")
                                         else:
-                                            print(f"[CENTRAL] ⚠️ Error: session_id es None")
-                                    except Exception as e:
-                                        print(f"[CENTRAL] ❌ Error creando sesión: {e}")
-                                        import traceback
-                                        traceback.print_exc()
-                                
-                                # Enviar comando al CP_E para que inicie la carga físicamente
-                                central_instance.publish_event('charging_started', {
-                                    'action': 'charging_started',
-                                    'cp_id': cp_id,
-                                    'username': username,
-                                    'user_id': user_id,
-                                    'client_id': client_id
-                                })
-                                print(f"[CENTRAL] 📤 Comando charging_started enviado a CP_E {cp_id} (user_id={user_id})")
-                            else:
-                                central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                    'client_id': client_id,
-                                    'cp_id': cp_id,
-                                    'authorized': False,
-                                    'reason': 'No se pudo reservar el CP'
-                                })
-                    except Exception as e:
-                        print(f"[CENTRAL] ⚠️ Error procesando autorización: {e}")
-                        if client_id and cp_id:
-                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
-                                'client_id': client_id,
-                                'cp_id': cp_id,
-                                'authorized': False,
-                                'reason': f'Error interno: {str(e)}'
-                            })
-                
-                # Los eventos 'charging_started' son peticiones ya autorizadas por
-                # el Driver (que valida usuario, balance, disponibilidad).
-                # La Central actualiza el estado del CP y registra la sesión.
-                # --------------------------------------------------------------------
-                
-                # Programar el broadcast en el event loop
-                asyncio.run_coroutine_threadsafe(
-                    broadcast_kafka_event(event),
-                    loop
-                )
+                                            central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                                'client_id': client_id,
+                                                'cp_id': cp_id,
+                                                'authorized': False,
+                                                'reason': 'No se pudo reservar el CP'
+                                            })
+                                except Exception as e:
+                                    print(f"[CENTRAL] ⚠️ Error procesando autorización: {e}")
+                                    if client_id and cp_id:
+                                        central_instance.publish_event('AUTHORIZATION_RESPONSE', {
+                                            'client_id': client_id,
+                                            'cp_id': cp_id,
+                                            'authorized': False,
+                                            'reason': f'Error interno: {str(e)}'
+                                        })
+                            
+                            # Los eventos 'charging_started' son peticiones ya autorizadas por
+                            # el Driver (que valida usuario, balance, disponibilidad).
+                            # La Central actualiza el estado del CP y registra la sesión.
+                            # --------------------------------------------------------------------
+                            
+                            # Programar el broadcast en el event loop
+                            asyncio.run_coroutine_threadsafe(
+                                broadcast_kafka_event(event),
+                                loop
+                            )
+                            
+                except Exception as poll_error:
+                    # Errores de polling no deberían detener el bucle
+                    print(f"[KAFKA] ⚠️ Error during poll: {poll_error}")
+                    import traceback
+                    traceback.print_exc()
+                    time.sleep(1)  # Esperar un poco antes de reintentar
+                    continue
                 
         except Exception as e:
             print(f"[KAFKA] ⚠️  Consumer error during loop: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"[KAFKA] 🔄 Attempting to reconnect consumer...")
+            # Cerrar consumer actual
+            try:
+                consumer.close()
+            except:
+                pass
+            # Reintentar conexión
+            time.sleep(5)
+            # Re-ejecutar consume_kafka (recursión limitada)
+            print(f"[KAFKA] 🔄 Restarting consumer...")
+            consume_kafka()
     
     # Ejecutar el consumidor de Kafka en un thread separado (daemon = siempre activo)
     kafka_thread = threading.Thread(target=consume_kafka, daemon=True)

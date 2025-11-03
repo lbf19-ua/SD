@@ -540,28 +540,46 @@ async def process_kafka_event(event):
                 
                 # Extraer datos del evento CP_INFO
                 # Los datos están en event.data según la estructura que envía Central
-                cp_location = cp_data.get('location') or cp_data.get('localizacion') or ''
-                if not cp_location or cp_location.strip() == '':
-                    # Fallback: buscar en el nivel raíz del evento
-                    cp_location = event.get('location') or event.get('localizacion') or ''
+                # Pero también pueden estar en el nivel raíz como fallback
+                
+                # Extraer ubicación: primero del data, luego del nivel raíz del evento
+                cp_location = (cp_data.get('location') or cp_data.get('localizacion') or 
+                             event.get('location') or event.get('localizacion') or '')
                 if not cp_location or cp_location.strip() == '':
                     cp_location = 'Unknown'
                 
-                # Extraer estado: primero del data, luego del nivel raíz
-                cp_status = cp_data.get('status') or cp_data.get('estado') or ''
-                if not cp_status:
-                    # Fallback: buscar en el nivel raíz del evento
-                    cp_status = event.get('status') or event.get('estado') or 'offline'
+                # Extraer estado: primero del data, luego del nivel raíz del evento
+                cp_status = (cp_data.get('status') or cp_data.get('estado') or 
+                           event.get('status') or event.get('estado') or 'offline')
                 
                 # Normalizar estado (filtrar estados inválidos)
                 valid_statuses = ['available', 'charging', 'offline', 'fault', 'out_of_service']
                 if cp_status and cp_status.lower() not in valid_statuses:
                     cp_status = 'available'  # Estado por defecto si no es válido
                 else:
-                    cp_status = cp_status.lower()
+                    cp_status = cp_status.lower() if cp_status else 'offline'
                 
-                max_power = cp_data.get('max_power_kw') or cp_data.get('max_kw') or 22.0
-                tariff = cp_data.get('tariff_per_kwh') or cp_data.get('tarifa_kwh') or 0.30
+                # Extraer max_power: primero del data, luego del nivel raíz del evento
+                max_power = (cp_data.get('max_power_kw') or cp_data.get('max_kw') or 
+                           event.get('max_power_kw') or event.get('max_kw') or 22.0)
+                # Asegurar que es numérico
+                try:
+                    max_power = float(max_power) if max_power else 22.0
+                    if max_power <= 0:
+                        max_power = 22.0
+                except (ValueError, TypeError):
+                    max_power = 22.0
+                
+                # Extraer tariff: primero del data, luego del nivel raíz del evento
+                tariff = (cp_data.get('tariff_per_kwh') or cp_data.get('tarifa_kwh') or 
+                         event.get('tariff_per_kwh') or event.get('tarifa_kwh') or 0.30)
+                # Asegurar que es numérico
+                try:
+                    tariff = float(tariff) if tariff else 0.30
+                    if tariff <= 0:
+                        tariff = 0.30
+                except (ValueError, TypeError):
+                    tariff = 0.30
                 
                 print(f"[MONITOR-{cp_id}] ✅ Procesando CP_INFO: status={cp_status}, location={cp_location}, max_power={max_power}, tariff={tariff}")
                 
