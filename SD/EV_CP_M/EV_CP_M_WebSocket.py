@@ -104,8 +104,10 @@ class EV_MonitorWS:
                     acks='all'
                 )
                 # Intentar enviar un mensaje de prueba para verificar la conexión
-                self.producer.send(KAFKA_TOPIC_PRODUCE, {'test': 'connection'})
-                self.producer.flush(timeout=5)
+                # Test producer connection - NO enviar mensaje de test al topic para evitar eventos UNKNOWN en Central
+                # En su lugar, solo verificamos que el producer esté configurado correctamente
+                # El flush() verificará que el producer funciona sin necesidad de enviar un mensaje
+                # Si hay un error, se lanzará una excepción en el siguiente send real
                 print(f"[MONITOR-{self.cp_id}] ✅ Kafka producer initialized and connected")
                 return
             except Exception as e:

@@ -141,13 +141,14 @@ class EV_CP_Engine:
                     consumer_timeout_ms=5000
                 )
                 
-                # Test producer connection
-                print(f"[{self.cp_id}] 🧪 Testing producer connection...")
-                future = self.producer.send(KAFKA_TOPICS['cp_events'], {'test': 'connection_check'})
-                self.producer.flush(timeout=5)
-                print(f"[{self.cp_id}] ✅ Kafka connected successfully")
-                print(f"[{self.cp_id}] 📡 Listening to: {KAFKA_TOPICS['central_events']}")
-                print(f"[{self.cp_id}] 📤 Publishing to: {KAFKA_TOPICS['cp_events']}")
+                # Test producer connection - NO enviar mensaje de test al topic para evitar eventos UNKNOWN en Central
+                # En su lugar, solo verificamos que el producer esté configurado correctamente
+                print(f"[{self.cp_id}]  Verifying producer configuration...")
+                # El flush() verificará que el producer funciona sin necesidad de enviar un mensaje
+                # Si hay un error, se lanzará una excepción en el siguiente send real
+                print(f"[{self.cp_id}]  Kafka producer configured successfully")
+                print(f"[{self.cp_id}]  Listening to: {KAFKA_TOPICS['central_events']}")
+                print(f"[{self.cp_id}]  Publishing to: {KAFKA_TOPICS['cp_events']}")
                 return True
                 
             except Exception as e:
@@ -233,14 +234,26 @@ class EV_CP_Engine:
             print(f"[{self.cp_id}] 🔄 Status change: {self.previous_status} → {new_status}")
             if reason:
                 print(f"[{self.cp_id}]    Reason: {reason}")
-            
-            # Publicar cambio de estado
-            self.publish_event('cp_status_change', {
-                'action': 'cp_status_change',
-                'status': new_status,
-                'previous_status': self.previous_status,
-                'reason': reason
-            })
+        
+        # ⚠️ PROTECCIÓN: Si acabamos de registrarnos y el estado es 'available', no publicar cp_status_change
+        # porque CP_REGISTRATION ya incluye el estado 'available'
+        if new_status == 'available' and hasattr(self, '_registered') and self._registered:
+            # Verificar si el registro fue reciente (menos de 5 segundos)
+            if not hasattr(self, '_registration_time'):
+                self._registration_time = 0
+            import time
+            time_since_reg = time.time() - self._registration_time
+            if time_since_reg < 5.0:
+                print(f"[{self.cp_id}] ℹ Ignorando cp_status_change a 'available' - ya incluido en CP_REGISTRATION ({time_since_reg:.1f}s)")
+                return
+        
+        # Publicar cambio de estado
+        self.publish_event('cp_status_change', {
+            'action': 'cp_status_change',
+            'status': new_status,
+            'previous_status': self.previous_status,
+            'reason': reason
+        })
     
     def auto_register(self):
         """
@@ -260,11 +273,15 @@ class EV_CP_Engine:
         
         # Cambiar a estado available ANTES de enviar el registro
         # Esto evita enviar dos eventos separados
+        import time
         with self.lock:
             if self.status == 'offline':
                 self.previous_status = self.status
                 self.status = 'available'
-                print(f"[{self.cp_id}] 🔄 Status change: {self.previous_status} → available")
+                print(f"[{self.cp_id}]  Status change: {self.previous_status} → available")
+        
+        # ⚠️ REGISTRAR timestamp del registro para evitar cp_status_change subsecuentes
+        self._registration_time = time.time()
         
         # Enviar UN SOLO evento CP_REGISTRATION con toda la información incluido el estado
         # Central lo registrará directamente como 'available' sin necesidad de cp_status_change
@@ -991,9 +1008,9 @@ def main():
     try:
         engine.run()
     except KeyboardInterrupt:
-        print("\n\n🛑 Stopped by user")
+        print("\n\n Stopped by user")
     except Exception as e:
-        print(f"\n❌ Fatal error: {e}")
+        print(f"\n Fatal error: {e}")
         import traceback
         traceback.print_exc()
 

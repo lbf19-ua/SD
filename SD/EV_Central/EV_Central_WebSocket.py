@@ -189,8 +189,8 @@ class EV_CentralWS:
             cp_id: ID del CP
             force: Si es True, fuerza el envío incluso si no hay cambios (usar con cuidado)
         """
-        # ⚠️ PROTECCIÓN: Throttling - no publicar más de una vez cada 2 segundos por CP
-        # Aumentado a 2 segundos para dar más tiempo y evitar bucles
+        # ⚠️ PROTECCIÓN: Throttling - no publicar más de una vez cada 3 segundos por CP
+        # Aumentado a 3 segundos para dar más tiempo y evitar bucles
         if not hasattr(self, '_last_cp_info_publish'):
             self._last_cp_info_publish = {}
         
@@ -199,11 +199,21 @@ class EV_CentralWS:
             last_publish = self._last_cp_info_publish.get(cp_id, 0)
             time_since_last = current_time - last_publish
             
-            if time_since_last < 2.0:  # Mínimo 2 segundos entre publicaciones del mismo CP
+            if time_since_last < 3.0:  # Mínimo 3 segundos entre publicaciones del mismo CP
                 print(f"[CENTRAL] ⚠️ Throttling: CP_INFO para {cp_id} ya se publicó hace {time_since_last:.2f}s, omitiendo para evitar bucle")
                 return
             
             self._last_cp_info_publish[cp_id] = current_time
+        
+        # ⚠️ PROTECCIÓN ADICIONAL: Verificar que el CP existe en BD antes de publicar
+        try:
+            cp_check = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+            if not cp_check:
+                print(f"[CENTRAL] ⚠️ CP {cp_id} no existe en BD, omitiendo CP_INFO")
+                return
+        except Exception as e:
+            print(f"[CENTRAL] ⚠️ Error verificando CP {cp_id} antes de publicar CP_INFO: {e}")
+            return
         
         try:
             # Obtener CP desde BD (la función se llama get_charging_point, no get_charging_point_by_id)
@@ -1077,13 +1087,20 @@ async def kafka_listener():
                             message_count += 1
                             try:
                                 event = message.value
-                                print(f"[KAFKA] 📨 Received event #{message_count}: {event.get('event_type', 'UNKNOWN')} from topic: {message.topic}")
+                                event_type = event.get('event_type', 'UNKNOWN')
+                                cp_id = event.get('cp_id') or event.get('engine_id') or 'N/A'
+                                message_id = event.get('message_id', 'N/A')[:8] if event.get('message_id') else 'N/A'
+                                timestamp = event.get('timestamp', 'N/A')
+                                source = event.get('source', 'N/A')
+                                
+                                print(f"[KAFKA] 📨 Received event #{message_count}: {event_type} | CP: {cp_id} | msg_id: {message_id} | topic: {message.topic} | source: {source} | timestamp: {timestamp}")
                             except Exception as e:
                                 print(f"[KAFKA] ⚠️ Error deserializing message: {e}")
                                 continue
                             
-                            # Procesar el evento
-                            print(f"[KAFKA] 📨 Processing event: {event.get('event_type', 'UNKNOWN')} from topic: {message.topic}")
+                            # Procesar el evento (solo imprimir tipo para evitar duplicación)
+                            event_type = event.get('event_type', 'UNKNOWN')
+                            # NO volver a imprimir aquí - ya se imprimió arriba
                             
                             # ⚠️ IMPORTANTE: Todo el procesamiento de eventos se hace en broadcast_kafka_event()
                             # para evitar procesamiento duplicado. Este listener solo consume y pasa eventos.
@@ -1918,6 +1935,18 @@ async def broadcast_kafka_event(event):
                 # NO llamar a publish_cp_info_to_monitor aquí porque ya está sincronizado
                 # Esto previene bucles infinitos cuando el estado no cambió realmente
                 return
+            
+            # ⚠️ PROTECCIÓN ADICIONAL: Si el estado es 'available' y hubo un registro reciente, ignorar
+            # Esto evita que cp_status_change a 'available' después de CP_REGISTRATION cause bucles
+            if status == 'available':
+                if not hasattr(shared_state, 'recent_registrations'):
+                    shared_state.recent_registrations = {}
+                recent_reg_time = shared_state.recent_registrations.get(cp_id, 0)
+                if recent_reg_time > 0:
+                    time_since_reg = time.time() - recent_reg_time
+                    if time_since_reg < 5.0:  # Si se registró hace menos de 5 segundos
+                        print(f"[CENTRAL] ℹ️ Ignorando cp_status_change a 'available' para CP {cp_id} - ya registrado recientemente ({time_since_reg:.1f}s)")
+                        return
             
             # Solo si el estado cambió realmente, actualizar BD
             print(f"[CENTRAL] 🔄 Sincronizando estado BD: {cp_id} → {current_status} → {status} (cambio reportado por Engine)")
