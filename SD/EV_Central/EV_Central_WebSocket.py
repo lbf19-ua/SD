@@ -6,67 +6,7 @@ import threading
 import time
 import argparse
 from pathlib import Path
-from datetime import datetime, timedelta
-
-"""
-================================================================================
-EV_Central - Sistema Central de Gestión de Puntos de Recarga
-================================================================================
-
-CUMPLIMIENTO DE REQUISITOS:
-
-a) REGISTRO Y ALTA DE NUEVOS PUNTOS DE RECARGA
-   La Central está SIEMPRE a la espera de peticiones de registro mediante:
-   
-   1. WebSocket (Registro Manual):
-      - Líneas 358-423: Handler 'register_cp'
-      - Dashboard administrativo permite dar de alta CPs manualmente
-      - Validaciones: campos requeridos, duplicados
-      - Confirmación inmediata al cliente
-   
-   2. Kafka (Auto-registro):
-      - Líneas 486-603: kafka_listener() con bucle infinito
-      - Escucha topic 'cp-events' permanentemente
-      - Al recibir CP_REGISTRATION o 'connect', auto-registra el CP
-      - Thread daemon que nunca se detiene
-   
-   3. Procesamiento en tiempo real:
-      - Líneas 604-700: broadcast_kafka_event()
-      - Actualiza estado del CP inmediatamente
-      - Persiste en base de datos
-      - Broadcast a todos los clientes conectados
-
-b) AUTORIZACIÓN DE SUMINISTRO
-   La Central procesa peticiones de autorización mediante:
-   
-   1. Validación multi-nivel (en EV_Driver_WebSocket.py):
-      - Usuario existe y activo
-      - No tiene sesión activa previa
-      - Balance suficiente (mín €5.00)
-      - Disponibilidad de Charging Points
-   
-   2. Recepción de eventos autorizados:
-      - Kafka consumer recibe eventos 'charging_started'
-      - Solo llegan aquí peticiones YA autorizadas por Driver
-      - Central actualiza estado CP a 'charging'
-      - Registra sesión activa en BD
-   
-   3. Seguimiento de sesión:
-      - Actualización continua vía Kafka
-      - Finalización con cálculo de costo
-      - Actualización de balance usuario
-
-ARQUITECTURA:
-- WebSocket: Comunicación en tiempo real con dashboards
-- Kafka: Sistema de mensajería asíncrono distribuido
-- SQLite: Base de datos para persistencia
-- Asyncio: Operaciones concurrentes y no bloqueantes
-- Threading: Consumer Kafka en thread daemon permanente
-
-La Central NUNCA deja de escuchar. El bucle de Kafka es infinito y corre
-en un thread daemon que se mantiene activo durante toda la ejecución.
-================================================================================
-"""
+from datetime import datetim
 
 # WebSocket y HTTP server
 try:
@@ -148,13 +88,6 @@ class EV_CentralWS:
         return True
 
     def publish_event(self, event_type, data):
-        """
-        Publica un evento a Kafka en el topic central_events.
-        Este método es usado para enviar información del CP al Monitor.
-        
-        ⚠️ IMPORTANTE: Si el evento es CP_INFO, debe incluir cp_id en el nivel raíz
-        para que el Monitor pueda filtrar correctamente eventos de otros CPs
-        """
         if not self.ensure_producer():
             return
         
@@ -206,23 +139,6 @@ class EV_CentralWS:
             traceback.print_exc()
 
     def publish_cp_info_to_monitor(self, cp_id, force=False):
-        """
-        Publica información del CP al Monitor vía Kafka
-        
-        ⚠️ IMPORTANTE: Solo publica si hay cambios reales o si force=True
-        Esto previene bucles infinitos de actualizaciones innecesarias
-        
-        Central es el único que puede acceder a la BD, por lo que envía
-        esta información actualizada al Monitor.
-        
-        ⚠️ PROTECCIÓN: Limita la frecuencia de publicación para evitar bucles.
-        
-        Args:
-            cp_id: ID del CP
-            force: Si es True, fuerza el envío incluso si no hay cambios (usar con cuidado)
-        """
-        # ⚠️ PROTECCIÓN: Throttling - no publicar más de una vez cada 3 segundos por CP
-        # Aumentado a 3 segundos para dar más tiempo y evitar bucles
         if not hasattr(self, '_last_cp_info_publish'):
             self._last_cp_info_publish = {}
         
@@ -337,7 +253,6 @@ class EV_CentralWS:
         return status
 
     def _standardize_cp(self, cp_row: dict) -> dict:
-        """Transforma filas de BD español a claves que espera UI."""
         # Extraer ubicación con múltiples variantes posibles
         # La BD usa 'localizacion' (español), convertir a 'location' (inglés)
         location = cp_row.get('localizacion') or cp_row.get('location') or ''
@@ -2322,9 +2237,11 @@ async def main():
             if hasattr(db, 'terminate_all_active_sessions'):
                 sess, cps = db.terminate_all_active_sessions(mark_cp_offline=True)
                 print(f"[CENTRAL] � Inicio: sesiones activas terminadas: {sess}, CPs marcados offline: {cps}")
-            # 2) Marcar TODOS los CPs como offline por defecto
-            updated = db.set_all_cps_status_offline() if hasattr(db, 'set_all_cps_status_offline') else 0
-            print(f"[CENTRAL] � CPs marcados como 'offline' al inicio: {updated}")
+            # 2) ⚠️ NO marcar TODOS los CPs como offline por defecto (COMENTADO para evitar bucles)
+            # Los Engines mantendrán su estado actual y solo se re-registrarán si detectan que Central no los conoce
+            # updated = db.set_all_cps_status_offline() if hasattr(db, 'set_all_cps_status_offline') else 0  # COMENTADO: evitar bucles
+            # updated = 0  # No marcar CPs como offline (COMENTADO completamente)
+            print(f"[CENTRAL] ℹ️ Central iniciado - CPs existentes mantendrán su estado actual para evitar desconexiones masivas")
         except Exception as e:
             print(f"[CENTRAL] ⚠️ No se pudo limpiar estado al inicio: {e}")
     
