@@ -1331,6 +1331,31 @@ async def broadcast_kafka_event(event):
     if event.get('source') == 'CENTRAL':
         return  # Central no debe procesar sus propios eventos
     
+    # ⚠️ FILTRO: Ignorar eventos que Central genera y que no debe procesar
+    event_type = event.get('event_type', '')
+    action = event.get('action', '')
+    
+    # Eventos que Central publica pero no debe procesar cuando los recibe
+    events_to_ignore = [
+        'CP_INFO',                    # Central lo publica para Monitor
+        'AUTHORIZATION_RESPONSE',    # Central lo publica para Driver
+        'CHARGING_TICKET',           # Central lo publica para Driver
+        'MONITOR_AUTH_RESPONSE',     # Central lo publica para Monitor
+        'CP_STOP',                   # Comandos que Central envía (no procesar respuestas)
+        'CP_RESUME',                 # Comandos que Central envía
+        'CP_ERROR_SIMULATED',        # Comandos que Central envía
+        'CP_ERROR_FIXED',            # Comandos que Central envía
+        'CP_PLUG_IN',                # Comandos que Central envía
+        'CP_UNPLUG',                 # Comandos que Central envía
+        'charging_started',           # Ya procesado en consume_kafka antes de broadcast
+        'CHARGING_TIMEOUT',          # Eventos internos que no necesitan procesamiento adicional
+        'CHARGING_INTERRUPTED'       # Eventos que Central genera
+    ]
+    
+    if event_type in events_to_ignore or action in events_to_ignore:
+        print(f"[CENTRAL] ⚠️ Ignorando evento {event_type or action} - es un evento que Central genera o ya procesó")
+        return
+    
     # ⚠️ DEDUPLICACIÓN: Ignorar eventos ya procesados por message_id
     message_id = event.get('message_id')
     if message_id:
@@ -1455,22 +1480,31 @@ async def broadcast_kafka_event(event):
                     # Fallback: intentar solo actualizar estado
                     db.update_charging_point_status(cp_id, estado)
                 
+                # ⚠️ REGISTRAR timestamp del registro para ignorar cp_status_change subsecuentes
+                if not hasattr(shared_state, 'recent_registrations'):
+                    shared_state.recent_registrations = {}
+                import time
+                shared_state.recent_registrations[cp_id] = time.time()
+                
                 # Confirmar existencia y enviar CP_INFO solo una vez
                 cp_after = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
                 if cp_after:
                     print(f"[CENTRAL] ✅ CP registrado/actualizado: {cp_after['cp_id']} en {cp_after.get('location','')} estado={cp_after.get('estado','')}" )
                     # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR solo si es nuevo registro o cambió algo
-                    # ⚠️ IMPORTANTE: No publicar CP_INFO aquí si el CP ya estaba 'available'
-                    # porque cp_status_change lo hará después y evitaríamos duplicados
+                    # ⚠️ IMPORTANTE: Evitar publicar CP_INFO innecesariamente para prevenir bucles
                     previous_status = cp_existing.get('estado') if cp_existing else None
-                    if not cp_existing or previous_status != estado:
-                        # Solo publicar si es nuevo CP o si cambió de estado (no de 'available' a 'available')
-                        if previous_status != 'available':  # Solo publicar si no venía de 'available'
+                    if not cp_existing:
+                        # Es un nuevo CP, publicar información al Monitor
+                        central_instance.publish_cp_info_to_monitor(cp_id)
+                    elif previous_status != estado:
+                        # Cambió de estado, solo publicar si NO venía de 'available' (evitar bucles)
+                        if previous_status != 'available':
                             central_instance.publish_cp_info_to_monitor(cp_id)
                         else:
-                            print(f"[CENTRAL] ℹ️ CP {cp_id} ya estaba 'available', cp_status_change publicará CP_INFO si es necesario")
+                            print(f"[CENTRAL] ℹ️ CP {cp_id} ya estaba 'available', omitiendo CP_INFO para evitar bucle")
                     else:
-                        print(f"[CENTRAL] ℹ️ CP {cp_id} ya registrado con mismo estado, omitiendo CP_INFO")
+                        # Mismo estado, no publicar (evitar bucles)
+                        print(f"[CENTRAL] ℹ️ CP {cp_id} ya registrado con mismo estado ({estado}), omitiendo CP_INFO para evitar bucle")
                 else:
                     print(f"[CENTRAL] ⚠️ No se pudo verificar CP {cp_id} tras auto-registro")
             except Exception as e:
@@ -1768,6 +1802,20 @@ async def broadcast_kafka_event(event):
                 print(f"[CENTRAL] ⚠️ cp_status_change sin 'status', ignorando")
                 return
             
+            # ⚠️ PROTECCIÓN: Ignorar cp_status_change que viene justo después de CP_REGISTRATION
+            # porque el registro ya incluye el estado 'available'
+            # Verificar si este CP se registró recientemente (últimos 5 segundos)
+            if not hasattr(shared_state, 'recent_registrations'):
+                shared_state.recent_registrations = {}  # {cp_id: timestamp}
+            
+            import time
+            current_time = time.time()
+            recent_reg_time = shared_state.recent_registrations.get(cp_id, 0)
+            
+            if current_time - recent_reg_time < 5.0 and status == 'available':
+                print(f"[CENTRAL] ℹ️ Ignorando cp_status_change a 'available' para CP {cp_id} - ya registrado recientemente ({current_time - recent_reg_time:.1f}s)")
+                return
+            
             # Asegurar CP existe antes de actualizar
             try:
                 if not db.get_charging_point_by_id(cp_id) and hasattr(db, 'register_or_update_charging_point'):
@@ -1781,12 +1829,12 @@ async def broadcast_kafka_event(event):
             current_status = cp_current.get('estado') or cp_current.get('status') if cp_current else None
             
             # ⚠️ CRÍTICO: Solo actualizar BD si el estado realmente cambió
-            # NO publicar CP_INFO aquí porque podría causar bucles
-            # El Monitor ya recibe el cp_status_change del Engine directamente o de CP_INFO publicado solo cuando es necesario
+            # NO publicar CP_INFO cuando el estado ya está sincronizado para evitar bucles infinitos
+            # El Monitor ya recibe el cp_status_change del Engine directamente
             if current_status == status:
-                print(f"[CENTRAL] ℹ️ Estado {status} para CP {cp_id} ya está sincronizado en BD, solo informando al Monitor")
-                # Informar al Monitor SOLO si realmente cambió (throttling ya está en publish_cp_info_to_monitor)
-                central_instance.publish_cp_info_to_monitor(cp_id)
+                print(f"[CENTRAL] ℹ️ Estado {status} para CP {cp_id} ya está sincronizado en BD, omitiendo actualización para evitar bucle")
+                # NO llamar a publish_cp_info_to_monitor aquí porque ya está sincronizado
+                # Esto previene bucles infinitos cuando el estado no cambió realmente
                 return
             
             # Solo si el estado cambió realmente, actualizar BD
@@ -1816,13 +1864,25 @@ async def broadcast_kafka_event(event):
             
             # Cambiar estado del CP a 'offline' o 'fault'
             new_status = 'offline' if event_type == 'ENGINE_OFFLINE' else 'fault'
+            
+            # ⚠️ PROTECCIÓN: Verificar si el estado ya está sincronizado para evitar procesamiento innecesario
             try:
-                db.update_charging_point_status(cp_id, new_status)
-                print(f"[CENTRAL] ✅ CP {cp_id} marcado como {new_status}")
-                # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
-                central_instance.publish_cp_info_to_monitor(cp_id)
+                cp_current = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+                current_status = cp_current.get('estado') or cp_current.get('status') if cp_current else None
+                
+                # Si el estado ya está sincronizado, solo procesar la cancelación de sesiones si es necesario
+                if current_status == new_status:
+                    print(f"[CENTRAL] ℹ️ Estado {new_status} para CP {cp_id} ya está sincronizado, omitiendo actualización de BD para evitar bucle")
+                    # NO publicar CP_INFO porque el estado ya está sincronizado
+                    # Solo procesar cancelación de sesiones si hay alguna activa
+                else:
+                    # El estado cambió, actualizar BD
+                    db.update_charging_point_status(cp_id, new_status)
+                    print(f"[CENTRAL] ✅ CP {cp_id} marcado como {new_status}")
+                    # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR solo si el estado realmente cambió
+                    central_instance.publish_cp_info_to_monitor(cp_id)
             except Exception as e:
-                print(f"[CENTRAL] ⚠️ Error actualizando estado del CP: {e}")
+                print(f"[CENTRAL] ⚠️ Error verificando/actualizando estado del CP: {e}")
             
             # Buscar y cancelar sesión activa en este CP
             try:
@@ -1913,48 +1973,9 @@ async def broadcast_kafka_event(event):
                 print(f"[CENTRAL] ❌ Error authenticating monitor {monitor_id}: {e}")
         
         # ========================================================================
-        # REQUISITO 10: Monitor detecta avería y notifica a Central
+        # NOTA: ENGINE_FAILURE y ENGINE_OFFLINE ya se procesan arriba (línea ~1839)
+        # Esta sección duplicada fue eliminada para evitar procesamiento doble
         # ========================================================================
-        elif event_type in ['ENGINE_FAILURE', 'ENGINE_OFFLINE'] or action in ['report_engine_failure', 'report_engine_offline']:
-            failure_type = event.get('failure_type', 'unknown')
-            consecutive_failures = event.get('consecutive_failures', 0)
-            
-            print(f"[CENTRAL] 🚨 AVERÍA DETECTADA en {cp_id} por Monitor")
-            print(f"[CENTRAL]    Tipo: {failure_type}, Fallos consecutivos: {consecutive_failures}")
-            
-            # Cambiar estado del CP a 'fault' (AVERIADO)
-            if cp_id:
-                db.update_charging_point_status(cp_id, 'fault')
-                print(f"[CENTRAL] 🔴 CP {cp_id} marcado como 'fault' en BD")
-                # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
-                central_instance.publish_cp_info_to_monitor(cp_id)
-                
-                # Si hay sesión activa en este CP, finalizarla inmediatamente
-                try:
-                    sesiones_activas = db.get_active_sessions() if hasattr(db, 'get_active_sessions') else []
-                    for sesion in sesiones_activas:
-                        if sesion.get('cp_id') == cp_id:
-                            session_id = sesion.get('id')
-                            username = sesion.get('username')
-                            print(f"[CENTRAL] ⚠️ Finalizando sesión {session_id} por avería en {cp_id}")
-                            
-                            # Finalizar con 0 kWh (avería interrumpió la carga)
-                            result = db.end_charging_sesion(session_id, 0.0)
-                            if result:
-                                print(f"[CENTRAL] ✅ Sesión {session_id} finalizada por avería")
-                                
-                                # Notificar al conductor
-                                central_instance.publish_event('CHARGING_INTERRUPTED', {
-                                    'username': username,
-                                    'cp_id': cp_id,
-                                    'reason': 'CP_FAILURE',
-                                    'message': f'La carga se interrumpió por avería en {cp_id}',
-                                    'timestamp': time.time()
-                                })
-                                print(f"[CENTRAL] 📢 Conductor {username} notificado de interrupción")
-                            break
-                except Exception as e:
-                    print(f"[CENTRAL] ❌ Error finalizando sesión por avería: {e}")
 
     # ========================================================================
     # BROADCAST A CLIENTES WEBSOCKET (solo si hay clientes conectados)

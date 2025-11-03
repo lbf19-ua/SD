@@ -258,8 +258,19 @@ class EV_CP_Engine:
         # Marcar que ya nos registramos para evitar re-registros
         self._registered = True
         
+        # Cambiar a estado available ANTES de enviar el registro
+        # Esto evita enviar dos eventos separados
+        with self.lock:
+            if self.status == 'offline':
+                self.previous_status = self.status
+                self.status = 'available'
+                print(f"[{self.cp_id}] 🔄 Status change: {self.previous_status} → available")
+        
+        # Enviar UN SOLO evento CP_REGISTRATION con toda la información incluido el estado
+        # Central lo registrará directamente como 'available' sin necesidad de cp_status_change
         self.publish_event('CP_REGISTRATION', {
             'action': 'connect',
+            'status': 'available',  # Incluir estado directamente en el registro
             'data': {
                 'location': self.location,
                 'localizacion': self.location,
@@ -267,31 +278,13 @@ class EV_CP_Engine:
                 'max_power_kw': self.max_power_kw,
                 'tarifa_kwh': self.tariff_per_kwh,
                 'tariff_per_kwh': self.tariff_per_kwh,
-                'price_eur_kwh': self.tariff_per_kwh
+                'price_eur_kwh': self.tariff_per_kwh,
+                'status': 'available',  # También en data para compatibilidad
+                'estado': 'available'
             }
         })
         
-        # Esperar un poco antes de cambiar estado para evitar eventos simultáneos
-        time.sleep(0.5)
-        
-        # Cambiar a estado available solo si aún estamos en offline
-        with self.lock:
-            if self.status == 'offline':
-                self.previous_status = self.status
-                self.status = 'available'
-                print(f"[{self.cp_id}] 🔄 Status change: {self.previous_status} → available")
-                
-                # Publicar cambio de estado
-                self.publish_event('cp_status_change', {
-                    'action': 'cp_status_change',
-                    'status': 'available',
-                    'previous_status': 'offline',
-                    'reason': 'Auto-registration completed'
-                })
-            else:
-                print(f"[{self.cp_id}] ℹ️ Status already changed to {self.status}, skipping status change event")
-        
-        print(f"[{self.cp_id}] ✅ Registration request sent to Central")
+        print(f"[{self.cp_id}] ✅ Registration request sent to Central (status: available)")
     
     def start_health_check_server(self):
         """
