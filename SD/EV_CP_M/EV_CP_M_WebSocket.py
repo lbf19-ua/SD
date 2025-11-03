@@ -928,6 +928,51 @@ async def broadcast_monitor_data():
     for client in disconnected_clients:
         shared_state.connected_clients.discard(client)
 
+async def send_heartbeats():
+    """
+    ============================================================================
+    HEARTBEATS PERIÓDICOS A CENTRAL
+    ============================================================================
+    Envía un heartbeat cada 10 segundos para que Central sepa que el Monitor
+    está activo. Si Central no recibe heartbeats durante 30 segundos, marca
+    el Monitor como KO.
+    ============================================================================
+    """
+    await asyncio.sleep(5)  # Esperar 5 segundos después del inicio
+    
+    while True:
+        try:
+            await asyncio.sleep(10)  # Cada 10 segundos
+            
+            if monitor_instance.producer:
+                # Obtener estado actual del Engine desde health_status
+                engine_status = 'OK'
+                with shared_state.lock:
+                    if shared_state.health_status:
+                        engine_status = shared_state.health_status.get('last_status', 'UNKNOWN')
+                        if shared_state.health_status.get('consecutive_failures', 0) > 0:
+                            engine_status = 'KO'
+                
+                event = {
+                    'message_id': generate_message_id(),
+                    'event_type': 'MONITOR_HEARTBEAT',
+                    'action': 'monitor_heartbeat',
+                    'cp_id': monitor_instance.cp_id,
+                    'monitor_id': f'MONITOR-{monitor_instance.cp_id}',
+                    'engine_status': engine_status,  # Estado del Engine según este Monitor
+                    'timestamp': current_timestamp()
+                }
+                
+                monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                monitor_instance.producer.flush()
+                # Solo imprimir cada 6 heartbeats (cada minuto) para reducir logs
+                if int(time.time()) % 60 < 10:
+                    print(f"[MONITOR-{monitor_instance.cp_id}] Heartbeat sent to Central (Engine: {engine_status})")
+        except Exception as e:
+            print(f"[MONITOR-{monitor_instance.cp_id}]  Error sending heartbeat: {e}")
+            await asyncio.sleep(5)  # Esperar menos si hay error
+
+
 async def tcp_health_check():
     """
     ============================================================================
@@ -1151,6 +1196,20 @@ async def tcp_health_check():
                         await broadcast_alert(alert)
                         # Reset el timestamp del último fallo reportado cuando se recupera
                         last_reported_failure = None
+                        
+                        # Reportar recuperación a Central
+                        if monitor_instance.producer:
+                            event = {
+                                'message_id': generate_message_id(),
+                                'event_type': 'ENGINE_OK',
+                                'action': 'report_engine_ok',
+                                'cp_id': monitor_instance.cp_id,
+                                'timestamp': current_timestamp(),
+                                'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                            }
+                            monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                            monitor_instance.producer.flush()
+                            print(f"[MONITOR-{monitor_instance.cp_id}] 📤 ENGINE_OK reported to Central (recovered)")
                     
                     consecutive_failures = 0
                     
@@ -1387,13 +1446,17 @@ async def main():
         # Iniciar listener de Kafka para recibir actualizaciones en tiempo real
         kafka_task = asyncio.create_task(kafka_listener())
         
+        # Iniciar heartbeats periódicos a Central
+        heartbeat_task = asyncio.create_task(send_heartbeats())
+        
         print(f"\nAll services started successfully!")
         print(f"TCP monitoring active for {monitor_instance.cp_id}")
         print(f"Engine at {monitor_instance.engine_host}:{monitor_instance.engine_port}")
-        print(f"📡 Kafka listener active for real-time updates\n")
+        print(f"Kafka listener active for real-time updates")
+        print(f"Heartbeats to Central every 10 seconds\n")
         
         # Mantener el servidor corriendo
-        await asyncio.gather(broadcast_task, health_check_task, kafka_task)
+        await asyncio.gather(broadcast_task, health_check_task, kafka_task, heartbeat_task)
         
     except Exception as e:
         print(f"\nError starting server: {e}")

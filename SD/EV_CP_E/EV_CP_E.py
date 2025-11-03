@@ -47,6 +47,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from network_config import ENGINE_CONFIG, KAFKA_BROKER as KAFKA_BROKER_DEFAULT, KAFKA_TOPICS
 from event_utils import generate_message_id, current_timestamp
 
+KAFKA_TOPIC_PRODUCE = KAFKA_TOPICS['cp_events']
+
 
 class EV_CP_Engine:
     """
@@ -82,6 +84,9 @@ class EV_CP_Engine:
         self.current_session = None
         self.charging_thread = None
         self.stop_charging_flag = threading.Event()
+        
+        # Persistencia de sesiones (para recuperación tras crash)
+        self.session_file = f'/tmp/cp_{cp_id}_session.json' if os.path.exists('/tmp') else f'cp_{cp_id}_session.json'
         
         # Health check
         self.health_status = 'OK'  # OK o KO
@@ -452,6 +457,16 @@ class EV_CP_Engine:
             # Potencia de carga simulada (entre 80-95% de la máxima)
             charging_power = self.max_power_kw * random.uniform(0.80, 0.95)
             
+            # Guardar sesión inicial para persistencia
+            session_data = {
+                'username': username,
+                'user_id': user_id,
+                'start_time': start_time,
+                'charging_power': charging_power,
+                'cp_id': self.cp_id
+            }
+            self._save_session(session_data)
+            
             while not self.stop_charging_flag.is_set():
                 time.sleep(1)  # Actualizar cada segundo
                 
@@ -465,6 +480,14 @@ class EV_CP_Engine:
                     if self.current_session:
                         self.current_session['energy_kwh'] = energy_kwh
                         self.current_session['cost'] = cost
+                        self.current_session['start_time'] = start_time
+                        self.current_session['charging_power'] = charging_power
+                
+                # Guardar sesión periódicamente (cada 5 segundos)
+                if int(time.time()) % 5 == 0:
+                    session_data['energy_kwh'] = energy_kwh
+                    session_data['cost'] = cost
+                    self._save_session(session_data)
                 
                 # REQUISITO 8: Publicar actualización CADA SEGUNDO
                 self.publish_event('charging_progress', {
@@ -479,10 +502,100 @@ class EV_CP_Engine:
             # Carga detenida
             print(f"[{self.cp_id}]  Charging stopped for {username}")
             print(f"[{self.cp_id}]    Energy: {energy_kwh:.2f} kWh | Cost: €{cost:.2f}")
+            
+            # Eliminar archivo de sesión al finalizar
+            self._delete_session()
         
         self.stop_charging_flag.clear()
         self.charging_thread = threading.Thread(target=charging_loop, daemon=True)
         self.charging_thread.start()
+    
+    def _save_session(self, session_data):
+        """Guarda la sesión actual en disco para recuperación tras crash"""
+        try:
+            import json
+            with open(self.session_file, 'w') as f:
+                json.dump(session_data, f)
+        except Exception as e:
+            print(f"[{self.cp_id}] ⚠️ Error guardando sesión: {e}")
+    
+    def _load_session(self):
+        """Carga la sesión desde disco si existe"""
+        try:
+            import json
+            if os.path.exists(self.session_file):
+                with open(self.session_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"[{self.cp_id}] ⚠️ Error cargando sesión: {e}")
+        return None
+    
+    def _delete_session(self):
+        """Elimina el archivo de sesión"""
+        try:
+            if os.path.exists(self.session_file):
+                os.remove(self.session_file)
+        except Exception as e:
+            print(f"[{self.cp_id}] ⚠️ Error eliminando sesión: {e}")
+    
+    def recover_session(self):
+        """
+        Recupera una sesión pendiente tras un crash.
+        Si hay una sesión guardada, envía el estado final a Central.
+        """
+        session_data = self._load_session()
+        if not session_data:
+            return False
+        
+        try:
+            username = session_data.get('username')
+            user_id = session_data.get('user_id')
+            start_time = session_data.get('start_time')
+            charging_power = session_data.get('charging_power', self.max_power_kw * 0.85)
+            energy_kwh = session_data.get('energy_kwh', 0.0)
+            
+            if not start_time:
+                # No hay tiempo de inicio válido, eliminar sesión corrupta
+                self._delete_session()
+                return False
+            
+            # Calcular energía final si no está guardada
+            if energy_kwh == 0.0:
+                elapsed_hours = (time.time() - start_time) / 3600.0
+                energy_kwh = elapsed_hours * charging_power
+            
+            cost = energy_kwh * self.tariff_per_kwh
+            
+            print(f"[{self.cp_id}] 🔄 Recuperando sesión tras crash:")
+            print(f"[{self.cp_id}]    Usuario: {username}")
+            print(f"[{self.cp_id}]    Energía: {energy_kwh:.2f} kWh")
+            print(f"[{self.cp_id}]    Coste: €{cost:.2f}")
+            
+            # Enviar evento de finalización a Central
+            if self.producer:
+                event = {
+                    'message_id': generate_message_id(),
+                    'event_type': 'charging_completed',
+                    'action': 'charging_completed',
+                    'cp_id': self.cp_id,
+                    'username': username,
+                    'user_id': user_id,
+                    'energy_kwh': energy_kwh,
+                    'cost': cost,
+                    'reason': 'engine_recovered',
+                    'timestamp': current_timestamp()
+                }
+                self.producer.send(KAFKA_TOPICS['cp_events'], event)
+                self.producer.flush()
+                print(f"[{self.cp_id}] 📤 Estado final enviado a Central")
+            
+            # Eliminar archivo de sesión
+            self._delete_session()
+            return True
+        except Exception as e:
+            print(f"[{self.cp_id}] ⚠️ Error recuperando sesión: {e}")
+            self._delete_session()
+            return False
     
     def listen_for_commands(self):
         """
@@ -944,6 +1057,9 @@ class EV_CP_Engine:
         """
         Método principal - inicia todos los servicios
         """
+        # 0. Recuperar sesión pendiente si existe (tras crash)
+        self.recover_session()
+        
         # 1. Conectar a Kafka - reintentar indefinidamente si falla (para Docker)
         # Esto evita que el contenedor se reinicie constantemente
         print(f"[{self.cp_id}] Esperando conexión a Kafka...")
@@ -966,8 +1082,13 @@ class EV_CP_Engine:
         print(f"[{self.cp_id}]  Ready to charge vehicles\n")
         
         # 4. Iniciar menú CLI interactivo (opcional)
+        # ⚠️ NOTA: El menú CLI integrado está desactivado por defecto.
+        # Para usar el menú en una terminal separada, ejecutar:
+        #   python EV_CP_E/cp_control.py CP_XXX --interactive
         cli_thread = None
         if hasattr(self, 'enable_cli') and self.enable_cli:
+            print(f"[{self.cp_id}] ⚠️ CLI menu activado en esta terminal")
+            print(f"[{self.cp_id}] ℹ️  Para usar el menú en terminal separada: python EV_CP_E/cp_control.py {self.cp_id} --interactive")
             cli_thread = self.start_cli_menu()
         
         # 5. Escuchar comandos (bloqueante)
