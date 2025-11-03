@@ -6,11 +6,20 @@
 # Este PC ejecuta:
 #   - EV_Driver WebSocket Dashboard (puerto 8001)
 #
-# REQUISITOS PREVIOS:
+# REQUISITOS PREVIOS (DESPLIEGUE EN 3 PCs):
 #   1. PC2 debe estar ejecutando Kafka y EV_Central
-#   2. Editar network_config.py con las IPs reales
-#   3. Copiar ev_charging.db desde PC2
-#   4. Abrir puerto del firewall (PowerShell como admin):
+#   2. Obtener la IP real de PC2 (ejecutar en PC2):
+#      Windows: ipconfig | findstr IPv4
+#      Linux:   hostname -I
+#      Ejemplo: 192.168.1.100
+#   3. Editar network_config.py con la IP real:
+#      PC2_IP = "192.168.1.100"  # IP real de PC2
+#   4. OBLIGATORIO: Crear archivo .env en PC1 con:
+#      PC2_IP=192.168.1.100          # IP real de PC2
+#      KAFKA_BROKER=192.168.1.100:9092  # IP real de PC2:9092
+#      KAFKA_PORT=9092
+#   5. Copiar ev_charging.db desde PC2
+#   6. Abrir puerto del firewall (PowerShell como admin):
 #      New-NetFirewallRule -DisplayName "EV Driver" -Direction Inbound -LocalPort 8001 -Protocol TCP -Action Allow
 #
 # INICIAR:
@@ -35,10 +44,9 @@ services:
     ports:
       - "8001:8001"
     environment:
-      # ⚠️ Para localhost: usar nombre del servicio Kafka (broker:29092)
-      # ⚠️ Para red local: usar IP real de PC2 (ej: 192.168.1.235:9092)
-      - KAFKA_BROKER=broker:29092  # Para localhost (misma red Docker)
-      - CENTRAL_IP=localhost
+      # ⚠️ Lee desde .env (OBLIGATORIO para despliegue en 3 PCs)
+      - KAFKA_BROKER=${KAFKA_BROKER}  # Debe estar en .env: IP_PC2:9092
+      - CENTRAL_IP=${PC2_IP}  # Debe estar en .env: IP real de PC2
       - DRIVER_PORT=8001
       - PYTHONUNBUFFERED=1
     volumes:
@@ -57,7 +65,7 @@ services:
 # ==============================================================================
 networks:
   ev-network:
-    external: true
+    driver: bridge
     name: ev-network
 
 # ==============================================================================

@@ -37,21 +37,23 @@
 # ============================================================================
 #
 # ============================================================================
-# CONFIGURACIÓN: Lee variables desde archivo .env
+# CONFIGURACIÓN: Lee variables desde archivo .env (OBLIGATORIO)
 # ============================================================================
-# ⚠️ IMPORTANTE PARA 3 PCs EN RED LOCAL:
-# - Cada PC tiene su propio Docker daemon (redes Docker NO se comparten)
-# - Los contenedores en PC3 NO pueden usar "broker:29092" (nombre Docker)
-# - Deben usar la IP real del host de PC2: "192.168.1.XXX:9092"
+# ⚠️ DESPLIEGUE EN 3 PCs DIFERENTES - CONFIGURACIÓN REQUERIDA:
 #
-# PASOS PARA CONFIGURAR:
-#   1. Obtener IP de PC2: ipconfig | findstr IPv4 (en PC2)
-#   2. Copiar .env.example a .env: copy .env.example .env
-#   3. Editar .env con la IP real de PC2:
-#      PC2_IP=192.168.1.XXX          # IP real de PC2 en la red local
-#      KAFKA_BROKER=192.168.1.XXX:9092  # IP real de PC2:9092
+# Paso 1: En PC2, obtener la IP real:
+#   Windows: ipconfig | findstr IPv4
+#   Linux:   hostname -I
+#   Ejemplo: 192.168.1.100
 #
-# Docker Compose leerá automáticamente .env y usará estas variables
+# Paso 2: Crear archivo .env en PC3 con:
+#   PC2_IP=192.168.1.100          # IP real de PC2
+#   KAFKA_BROKER=192.168.1.100:9092  # IP real de PC2:9092
+#   KAFKA_PORT=9092
+#
+# Paso 3: Ejecutar docker-compose - Docker leerá automáticamente .env
+#
+# NOTA: Si no existe .env, el despliegue FALLARÁ (esto asegura configuración correcta)
 # ============================================================================
 
 services:
@@ -69,7 +71,7 @@ services:
       - CP_ID=CP_001
       - LOCATION=Parking Norte
       - HEALTH_PORT=5100
-      - KAFKA_BROKER=${KAFKA_BROKER:-broker:29092}  # Lee desde .env o usa broker:29092 por defecto
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db
@@ -100,7 +102,7 @@ services:
       - ENGINE_HOST=ev-cp-engine-001
       - ENGINE_PORT=5100
       - MONITOR_PORT=5500
-      - KAFKA_BROKER=${KAFKA_BROKER:-broker:29092}  # Lee desde .env o usa broker:29092 por defecto
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db:ro
@@ -111,7 +113,7 @@ services:
     networks:
       - ev-network
     restart: unless-stopped
-    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_001", "--engine-host", "ev-cp-engine-001", "--engine-port", "5100", "--monitor-port", "5500", "--kafka-broker", "${KAFKA_BROKER:-broker:29092}"]
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_001", "--engine-host", "ev-cp-engine-001", "--engine-port", "5100", "--monitor-port", "5500", "--kafka-broker", "${KAFKA_BROKER}"]
 
   # ==========================================================================
   # CP_002 - ENGINE
@@ -127,7 +129,7 @@ services:
       - CP_ID=CP_002
       - LOCATION=Parking Sur
       - HEALTH_PORT=5101
-      - KAFKA_BROKER=${KAFKA_BROKER:-broker:29092}  # Lee desde .env o usa broker:29092 por defecto
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db
@@ -158,7 +160,7 @@ services:
       - ENGINE_HOST=ev-cp-engine-002
       - ENGINE_PORT=5101
       - MONITOR_PORT=5501
-      - KAFKA_BROKER=${KAFKA_BROKER:-broker:29092}  # Lee desde .env o usa broker:29092 por defecto
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db:ro
@@ -169,7 +171,7 @@ services:
     networks:
       - ev-network
     restart: unless-stopped
-    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_002", "--engine-host", "ev-cp-engine-002", "--engine-port", "5101", "--monitor-port", "5501", "--kafka-broker", "${KAFKA_BROKER:-broker:29092}"]
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_002", "--engine-host", "ev-cp-engine-002", "--engine-port", "5101", "--monitor-port", "5501", "--kafka-broker", "${KAFKA_BROKER}"]
 
   # ==========================================================================
   # CP_003 - ENGINE
@@ -185,7 +187,7 @@ services:
       - CP_ID=CP_003
       - LOCATION=Parking Este
       - HEALTH_PORT=5102
-      - KAFKA_BROKER=${KAFKA_BROKER:-broker:29092}  # Lee desde .env o usa broker:29092 por defecto
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db
@@ -216,7 +218,7 @@ services:
       - ENGINE_HOST=ev-cp-engine-003
       - ENGINE_PORT=5102
       - MONITOR_PORT=5502
-      - KAFKA_BROKER=${KAFKA_BROKER:-broker:29092}  # Lee desde .env o usa broker:29092 por defecto
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db:ro
@@ -227,7 +229,7 @@ services:
     networks:
       - ev-network
     restart: unless-stopped
-    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_003", "--engine-host", "ev-cp-engine-003", "--engine-port", "5102", "--monitor-port", "5502", "--kafka-broker", "${KAFKA_BROKER:-broker:29092}"]
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_003", "--engine-host", "ev-cp-engine-003", "--engine-port", "5102", "--monitor-port", "5502", "--kafka-broker", "${KAFKA_BROKER}"]
 
   # ==========================================================================
   # CP_004 - ENGINE (añadido dinámicamente)
@@ -245,7 +247,7 @@ services:
       - MAX_POWER=50.0
       - TARIFF=0.35
       - HEALTH_PORT=5103
-      - KAFKA_BROKER=${KAFKA_BROKER:-broker:29092}  # Lee desde .env o usa broker:29092 por defecto
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db
@@ -276,7 +278,7 @@ services:
       - ENGINE_HOST=ev-cp-engine-004
       - ENGINE_PORT=5103
       - MONITOR_PORT=5503
-      - KAFKA_BROKER=${KAFKA_BROKER:-broker:29092}  # Lee desde .env o usa broker:29092 por defecto
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
       - PYTHONUNBUFFERED=1
     volumes:
       - ./ev_charging.db:/app/ev_charging.db:ro
@@ -287,7 +289,7 @@ services:
     networks:
       - ev-network
     restart: unless-stopped
-    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_004", "--engine-host", "ev-cp-engine-004", "--engine-port", "5103", "--monitor-port", "5503", "--kafka-broker", "${KAFKA_BROKER:-broker:29092}"]
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_004", "--engine-host", "ev-cp-engine-004", "--engine-port", "5103", "--monitor-port", "5503", "--kafka-broker", "${KAFKA_BROKER}"]
 
 # ==============================================================================
 # Redes
