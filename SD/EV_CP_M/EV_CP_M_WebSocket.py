@@ -94,12 +94,13 @@ class EV_MonitorWS:
         print(f"[MONITOR-{self.cp_id}] 🔌 Connecting to Kafka at {self.kafka_broker}...")
         for attempt in range(max_retries):
             try:
+                # Producer sin api_version explícito (auto-detección)
                 self.producer = KafkaProducer(
                     bootstrap_servers=self.kafka_broker,
                     value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                    api_version=(0, 10, 1),  # Versión de API compatible
-                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms (10s por defecto)
-                    retries=3
+                    request_timeout_ms=30000,
+                    retries=3,
+                    acks='all'
                 )
                 # Intentar enviar un mensaje de prueba para verificar la conexión
                 self.producer.send(KAFKA_TOPIC_PRODUCE, {'test': 'connection'})
@@ -220,11 +221,18 @@ class EV_MonitorWS:
             # ⚠️ Normalizar estado para asegurar que sea un estado válido del CP
             raw_status = cp.get('status') or cp.get('estado', 'offline')
             valid_statuses = ['available', 'charging', 'offline', 'fault', 'out_of_service']
-            if raw_status.lower() not in valid_statuses:
-                # Si el estado no es válido, usar 'offline' por defecto
-                cp_status = 'offline'
+            if raw_status:
+                raw_status_lower = raw_status.lower().strip()
+                if raw_status_lower in valid_statuses:
+                    cp_status = raw_status_lower
+                else:
+                    # Estado inválido, usar 'offline' por defecto
+                    print(f"[MONITOR-{self.cp_id}] ⚠️ Estado inválido en get_monitor_data: '{raw_status}', usando 'offline'")
+                    cp_status = 'offline'
             else:
-                cp_status = raw_status.lower()
+                cp_status = 'offline'
+            
+            print(f"[MONITOR-{self.cp_id}] 📊 get_monitor_data - Estado extraído de shared_state.cp_info: raw_status='{raw_status}', cp_status='{cp_status}'")
             if cp_status == 'charging':
                 current_power = max_power * random.uniform(0.85, 0.95)
             
@@ -458,16 +466,16 @@ async def kafka_listener():
                 print(f"[KAFKA] 🔗 Using broker: {kafka_broker_to_use}")
                 # Usar cp_id de monitor_instance si está disponible, sino usar MONITORED_CP_ID global
                 cp_id_for_group = monitor_instance.cp_id if monitor_instance else MONITORED_CP_ID or 'default'
+                # Consumer sin api_version explícito (auto-detección)
                 consumer = KafkaConsumer(
                     *KAFKA_TOPICS_CONSUME,
-                    bootstrap_servers=kafka_broker_to_use,  # Usar kafka_broker de la instancia
+                    bootstrap_servers=kafka_broker_to_use,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                    auto_offset_reset='earliest',  # Cambiar a 'earliest' para recibir todos los mensajes
-                    group_id=f'ev_monitor_ws_group_{cp_id_for_group}',  # Group ID único por CP
-                    api_version=(0, 10, 1),
-                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms (10s por defecto)
-                    session_timeout_ms=10000,  # 10s - timeout de sesión del grupo de consumidores
-                    consumer_timeout_ms=10000
+                    auto_offset_reset='earliest',
+                    group_id=f'ev_monitor_ws_group_{cp_id_for_group}',
+                    request_timeout_ms=30000,
+                    session_timeout_ms=10000,
+                    consumer_timeout_ms=5000
                 )
                 
                 print(f"[KAFKA] ✅ Consumer connected, listening to {KAFKA_TOPICS_CONSUME}")
@@ -554,10 +562,18 @@ async def process_kafka_event(event):
                 
                 # Normalizar estado (filtrar estados inválidos)
                 valid_statuses = ['available', 'charging', 'offline', 'fault', 'out_of_service']
-                if cp_status and cp_status.lower() not in valid_statuses:
-                    cp_status = 'available'  # Estado por defecto si no es válido
+                if cp_status:
+                    cp_status_lower = cp_status.lower().strip()
+                    if cp_status_lower in valid_statuses:
+                        cp_status = cp_status_lower
+                    else:
+                        # Estado inválido: NO usar 'available' por defecto, mantener 'offline' o el último estado conocido
+                        print(f"[MONITOR-{cp_id}] ⚠️ Estado inválido recibido: '{cp_status}', manteniendo estado actual o usando 'offline'")
+                        # Si ya hay un estado guardado, mantenerlo; si no, usar 'offline'
+                        existing_status = shared_state.cp_info.get(cp_id, {}).get('status') or shared_state.cp_info.get(cp_id, {}).get('estado')
+                        cp_status = existing_status if existing_status and existing_status.lower() in valid_statuses else 'offline'
                 else:
-                    cp_status = cp_status.lower() if cp_status else 'offline'
+                    cp_status = 'offline'
                 
                 # Extraer max_power: primero del data, luego del nivel raíz del evento
                 max_power = (cp_data.get('max_power_kw') or cp_data.get('max_kw') or 
@@ -582,6 +598,7 @@ async def process_kafka_event(event):
                     tariff = 0.30
                 
                 print(f"[MONITOR-{cp_id}] ✅ Procesando CP_INFO: status={cp_status}, location={cp_location}, max_power={max_power}, tariff={tariff}")
+                print(f"[MONITOR-{cp_id}] 📋 Estado extraído del evento - data.status={cp_data.get('status')}, data.estado={cp_data.get('estado')}, event.status={event.get('status')}, event.estado={event.get('estado')}")
                 
                 # Guardar en shared_state.cp_info
                 shared_state.cp_info[cp_id].update({
@@ -595,7 +612,7 @@ async def process_kafka_event(event):
                     'status': cp_status,
                     'estado': cp_status
                 })
-                print(f"[MONITOR-{cp_id}] 💾 CP_INFO guardado en shared_state.cp_info: {shared_state.cp_info[cp_id]}")
+                print(f"[MONITOR-{cp_id}] 💾 CP_INFO guardado en shared_state.cp_info - status final: {shared_state.cp_info[cp_id].get('status')}")
                 # Actualizar dashboard inmediatamente
                 await broadcast_monitor_data()
             elif cp_id and cp_id != monitor_instance.cp_id:

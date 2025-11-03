@@ -114,25 +114,27 @@ class EV_CP_Engine:
             try:
                 # Productor para enviar eventos
                 print(f"[{self.cp_id}] 📤 Initializing producer...")
+                # Producer sin api_version explícito (auto-detección)
                 self.producer = KafkaProducer(
                     bootstrap_servers=self.kafka_broker,
                     value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                    api_version=(0, 10, 1),
-                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms (10s por defecto)
-                    retries=3
+                    request_timeout_ms=30000,
+                    retries=3,
+                    acks='all'
                 )
                 
                 # Consumidor para recibir comandos de Central
                 print(f"[{self.cp_id}] 📥 Initializing consumer...")
+                # Consumer sin api_version explícito (auto-detección)
                 self.consumer = KafkaConsumer(
                     KAFKA_TOPICS['central_events'],
                     bootstrap_servers=self.kafka_broker,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                    auto_offset_reset='earliest',  # Cambiar a 'earliest' para recibir todos los mensajes
+                    auto_offset_reset='earliest',
                     group_id=f'engine_group_{self.cp_id}',
-                    api_version=(0, 10, 1),
-                    request_timeout_ms=30000,  # 30s - debe ser mayor que session_timeout_ms (10s por defecto)
-                    session_timeout_ms=10000  # 10s - timeout de sesión del grupo de consumidores
+                    request_timeout_ms=30000,
+                    session_timeout_ms=10000,
+                    consumer_timeout_ms=5000
                 )
                 
                 # Test producer connection

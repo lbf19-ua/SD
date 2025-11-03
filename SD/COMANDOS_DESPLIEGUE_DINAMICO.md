@@ -41,7 +41,13 @@ docker run -d --name ev-cp-engine-005 `
 
 ## 📊 Crear una nueva instancia de MONITOR (para CP_005)
 
+**⚠️ IMPORTANTE**: El Monitor debe usar el **nombre del contenedor** del Engine como hostname, NO `localhost`.
+
 ```powershell
+# 1. PRIMERO: Asegúrate de que el Engine ya está corriendo
+docker ps --filter "name=ev-cp-engine-005"
+
+# 2. Crear el Monitor usando el nombre del contenedor del Engine como hostname
 docker run -d --name ev-cp-monitor-005 `
   --network ev-network `
   -p 5504:5504 `
@@ -51,19 +57,22 @@ docker run -d --name ev-cp-monitor-005 `
   -e MONITOR_PORT=5504 `
   -e KAFKA_BROKER=192.168.1.235:9092 `
   -e PYTHONUNBUFFERED=1 `
-  -v ${PWD}/ev_charging.db:/app/ev_charging.db:ro `
-  -v ${PWD}/network_config.py:/app/network_config.py:ro `
-  -v ${PWD}/database.py:/app/database.py:ro `
-  -v ${PWD}/event_utils.py:/app/event_utils.py:ro `
-  -v ${PWD}/EV_CP_M/monitor_dashboard.html:/app/monitor_dashboard.html:ro `
+  -v "${PWD}\ev_charging.db:/app/ev_charging.db:ro" `
+  -v "${PWD}\network_config.py:/app/network_config.py:ro" `
+  -v "${PWD}\database.py:/app/database.py:ro" `
+  -v "${PWD}\event_utils.py:/app/event_utils.py:ro" `
+  -v "${PWD}\EV_CP_M\monitor_dashboard.html:/app/monitor_dashboard.html:ro" `
   --restart unless-stopped `
-  ev-cp-monitor-001 `
+  sd-ev-cp-monitor-001 `
   python -u EV_CP_M_WebSocket.py --cp-id CP_005 --engine-host ev-cp-engine-005 --engine-port 5104 --monitor-port 5504 --kafka-broker 192.168.1.235:9092
 ```
 
-**⚠️ Nota**: 
-- Cambia `192.168.1.235` por la IP real de PC2.
-- El Monitor necesita que el Engine ya esté corriendo (debería estar en la misma red Docker).
+**⚠️ Notas importantes**: 
+- **`--engine-host ev-cp-engine-005`**: Debe ser el nombre EXACTO del contenedor del Engine (`ev-cp-engine-XXX`)
+- **IMPORTANTE**: Ambos contenedores (Engine y Monitor) deben estar en la misma red Docker (`ev-network`)
+- Cambia `192.168.1.235` por la IP real de PC2
+- El Engine debe estar corriendo ANTES de crear el Monitor
+- Verifica que el Engine tenga el servidor TCP escuchando: `docker logs ev-cp-engine-005 | Select-String "Health check server"`
 
 ---
 

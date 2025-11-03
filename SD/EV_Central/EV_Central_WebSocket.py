@@ -573,6 +573,9 @@ async def websocket_handler_http(request):
                         })
                         print(f"[CENTRAL] 📢 Publicado CP_ERROR_SIMULATED en Kafka para {cp_id}")
                         
+                        # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR
+                        central_instance.publish_cp_info_to_monitor(cp_id)
+                        
                         # Enviar confirmación
                         await ws.send_str(json.dumps({
                             'type': 'error_simulated',
@@ -605,6 +608,9 @@ async def websocket_handler_http(request):
                             'message': f'Error corregido en {cp_id}'
                         })
                         print(f"[CENTRAL] 📢 Publicado CP_ERROR_FIXED en Kafka para {cp_id}")
+                        
+                        # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR
+                        central_instance.publish_cp_info_to_monitor(cp_id)
                         
                         # Enviar confirmación
                         await ws.send_str(json.dumps({
@@ -663,6 +669,9 @@ async def websocket_handler_http(request):
                                         'new_status': 'out_of_service',
                                         'reason': 'Stopped by admin'
                                     })
+                                    
+                                    # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR
+                                    central_instance.publish_cp_info_to_monitor(cp_id_item)
                             
                             await ws.send_str(json.dumps({
                                 'type': 'stop_cp_success',
@@ -741,6 +750,9 @@ async def websocket_handler_http(request):
                                         'new_status': 'available',
                                         'reason': 'Resumed by admin'
                                     })
+                                    
+                                    # 📡 PUBLICAR INFORMACIÓN DEL CP AL MONITOR
+                                    central_instance.publish_cp_info_to_monitor(cp_id_item)
                             
                             await ws.send_str(json.dumps({
                                 'type': 'resume_cp_success',
@@ -1497,9 +1509,11 @@ async def broadcast_kafka_event(event):
             
             # Liberar el CP (cambiar a 'available')
             try:
-                if cp_id:
-                    db.update_charging_point_status(cp_id, 'available')
-                    print(f"[CENTRAL] ✅ CP {cp_id} liberado después de timeout")
+                    if cp_id:
+                        db.update_charging_point_status(cp_id, 'available')
+                        print(f"[CENTRAL] ✅ CP {cp_id} liberado después de timeout")
+                        # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
+                        central_instance.publish_cp_info_to_monitor(cp_id)
             except Exception as e:
                 print(f"[CENTRAL] ⚠️ Error liberando CP {cp_id}: {e}")
         
@@ -1560,16 +1574,22 @@ async def broadcast_kafka_event(event):
                         print(f"[CENTRAL] ⚠️ No se encontró sesión activa para user_id={user_id}")
                         if cp_id:
                             db.update_charging_point_status(cp_id, 'available')
+                            # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
+                            central_instance.publish_cp_info_to_monitor(cp_id)
                 else:
                     print(f"[CENTRAL] ⚠️ No se pudo obtener user_id para {username}")
                     if cp_id:
                         db.update_charging_point_status(cp_id, 'available')
+                        # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
+                        central_instance.publish_cp_info_to_monitor(cp_id)
             except Exception as e:
                 print(f"[CENTRAL] ❌ Error procesando charging_completed: {e}")
                 import traceback
                 traceback.print_exc()
                 if cp_id:
                     db.update_charging_point_status(cp_id, 'available')
+                    # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
+                    central_instance.publish_cp_info_to_monitor(cp_id)
         
         # ========================================================================
         # 📊 ACTUALIZACIÓN DE PROGRESO DE CARGA (del CP_E)
@@ -1615,10 +1635,14 @@ async def broadcast_kafka_event(event):
                 except Exception as e:
                     print(f"[CENTRAL] ⚠️ Error asegurando CP en cp_status_change: {e}")
                 db.update_charging_point_status(cp_id, status)
+                # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
+                central_instance.publish_cp_info_to_monitor(cp_id)
         elif action in ['cp_error_simulated', 'cp_error_fixed']:
             new_status = event.get('new_status') or event.get('status')
             if new_status:
                 db.update_charging_point_status(cp_id, new_status)
+                # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
+                central_instance.publish_cp_info_to_monitor(cp_id)
         
         # ========================================================================
         # 🚨 FALLOS DEL ENGINE REPORTADOS POR EL MONITOR
@@ -1636,6 +1660,8 @@ async def broadcast_kafka_event(event):
             try:
                 db.update_charging_point_status(cp_id, new_status)
                 print(f"[CENTRAL] ✅ CP {cp_id} marcado como {new_status}")
+                # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
+                central_instance.publish_cp_info_to_monitor(cp_id)
             except Exception as e:
                 print(f"[CENTRAL] ⚠️ Error actualizando estado del CP: {e}")
             
@@ -1741,6 +1767,8 @@ async def broadcast_kafka_event(event):
             if cp_id:
                 db.update_charging_point_status(cp_id, 'fault')
                 print(f"[CENTRAL] 🔴 CP {cp_id} marcado como 'fault' en BD")
+                # 📡 PUBLICAR CAMBIO DE ESTADO AL MONITOR
+                central_instance.publish_cp_info_to_monitor(cp_id)
                 
                 # Si hay sesión activa en este CP, finalizarla inmediatamente
                 try:
