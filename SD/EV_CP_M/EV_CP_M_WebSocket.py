@@ -551,32 +551,57 @@ async def process_kafka_event(event):
     y la almacena en shared_state.cp_info (NO accede a BD directamente)
     
     ⚠️ IMPORTANTE: Cada Monitor SOLO procesa eventos de SU CP asignado (1:1)
-    """
-    action = event.get('action', '')
-    event_type = event.get('event_type', '')
-    cp_id = event.get('cp_id') or event.get('engine_id')
     
+    ⚠️ CRÍTICO: Filtrar INMEDIATAMENTE eventos de otros CPs ANTES de cualquier procesamiento o log
+    """
     # ⚠️ CRÍTICO: Verificar monitor_instance primero
     if not monitor_instance:
         # Si no hay instancia del monitor, ignorar todos los eventos
         return
     
-    # ⚠️ CRÍTICO: Filtrar por cp_id ANTES de cualquier otro procesamiento
-    # Cada Monitor SOLO procesa eventos de SU CP asignado (relación 1:1)
-    if cp_id and cp_id != monitor_instance.cp_id:
-        # Este evento es para otro CP, ignorarlo completamente
-        # Solo loguear si es un evento importante para debug (opcional)
-        if event_type in ['CP_INFO', 'CP_REGISTRATION']:
-            print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Ignorando evento de otro CP: type={event_type}, cp_id={cp_id} (este Monitor supervisa {monitor_instance.cp_id})")
-        return
+    # ⚠️ CRÍTICO: Extraer cp_id INMEDIATAMENTE para filtrar eventos de otros CPs
+    # El Engine y Central pueden enviar eventos con cp_id o engine_id, verificar ambos
+    # También verificar dentro de data si está ahí
+    cp_id = event.get('cp_id') or event.get('engine_id')
     
-    # Si no hay cp_id en el evento, verificar si es un evento que necesitamos procesar
-    # (algunos eventos no tienen cp_id pero son relevantes)
-    if not cp_id and event_type not in ['MONITOR_AUTH']:
-        # Evento sin cp_id que no es MONITOR_AUTH, ignorar
-        return
+    # Si no está en el nivel raíz, buscar en data
+    if not cp_id:
+        cp_data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
+        cp_id = cp_data.get('cp_id') or cp_data.get('engine_id')
     
-    # Debug: Log solo eventos relevantes para este Monitor
+    event_type = event.get('event_type', '')
+    action = event.get('action', '')
+    
+    # ⚠️ FILTRADO TEMPRANO: Ignorar eventos de otros CPs ANTES de cualquier otro procesamiento
+    # Esto evita procesar eventos que no corresponden a este Monitor
+    if cp_id:
+        # Normalizar cp_id (asegurar que es string y está en mayúsculas/estilo correcto)
+        cp_id_str = str(cp_id).strip()
+        monitor_cp_id_str = str(monitor_instance.cp_id).strip()
+        
+        # Si el evento tiene cp_id, verificar inmediatamente si corresponde a este Monitor
+        if cp_id_str != monitor_cp_id_str:
+            # Evento de otro CP - ignorar completamente sin procesar ni loguear
+            # Solo loguear si es CP_INFO para debug (reducir ruido en logs)
+            if event_type == 'CP_INFO' and action == 'cp_info_update':
+                # Log ocasionalmente para debug (cada 10 eventos para no saturar)
+                import random
+                if random.random() < 0.1:  # 10% de probabilidad de loguear
+                    print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ CP_INFO de otro CP ignorado: cp_id={cp_id_str} (este Monitor supervisa {monitor_cp_id_str})")
+            return
+    
+    # Si llegamos aquí, el evento es de nuestro CP O no tiene cp_id
+    # Para eventos sin cp_id, solo procesar si son relevantes (MONITOR_AUTH, etc.)
+    if not cp_id:
+        if event_type == 'MONITOR_AUTH':
+            # Evento de autenticación, ignorar (ya procesado en otro lugar)
+            return
+        else:
+            # Evento sin cp_id que no es MONITOR_AUTH, ignorar
+            return
+    
+    # A partir de aquí, solo procesamos eventos de nuestro CP (cp_id == monitor_instance.cp_id)
+    # Log solo eventos relevantes para este Monitor
     if event_type in ['CP_INFO', 'CP_REGISTRATION'] or 'cp_info' in action:
         print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Evento recibido: type={event_type}, action={action}, cp_id={cp_id}")
     
@@ -589,13 +614,20 @@ async def process_kafka_event(event):
     # CP_REGISTRATION es un evento que el Engine envía a Central, no al Monitor
     # Central procesa CP_REGISTRATION y luego envía CP_INFO al Monitor
     # Si procesamos CP_REGISTRATION aquí, causamos bucles de actualizaciones
-    if event_type == 'CP_REGISTRATION' and action == 'connect':
+    if event_type == 'CP_REGISTRATION':
         print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Ignorando CP_REGISTRATION directo - Central enviará CP_INFO después")
         return
     
-    # A partir de aquí, solo procesamos eventos del CP de este Monitor
+    # ⚠️ VERIFICACIÓN FINAL: Asegurar que el cp_id coincide con nuestro CP
+    # Aunque ya filtramos arriba, esta es una verificación de seguridad adicional
+    if cp_id != monitor_instance.cp_id:
+        # No debería llegar aquí si el filtrado está funcionando correctamente
+        # Pero si llega, ignorarlo inmediatamente
+        return
+    
+    # A partir de aquí, solo procesamos eventos del CP de este Monitor (cp_id == monitor_instance.cp_id)
     # Actualizar información del CP recibida de Central
-    if cp_id and cp_id == monitor_instance.cp_id:
+    if cp_id == monitor_instance.cp_id:
         # Este evento es para el CP que este Monitor supervisa
         with shared_state.lock:
             if cp_id not in shared_state.cp_info:
@@ -603,7 +635,10 @@ async def process_kafka_event(event):
             
             # ⚠️ SOLO procesar CP_INFO de Central (no CP_REGISTRATION directos)
             # Central es la única fuente de verdad para la información del CP
-            if event_type == 'CP_INFO' or action == 'cp_info_update':
+            # Verificar tanto event_type como action para asegurar que capturamos todos los casos
+            is_cp_info_event = (event_type == 'CP_INFO') or (action == 'cp_info_update')
+            
+            if is_cp_info_event:
                 # Registro o actualización del CP desde Central (único con acceso a BD)
                 cp_data = event.get('data', {}) if isinstance(event.get('data'), dict) else {}
                 
@@ -717,10 +752,17 @@ async def process_kafka_event(event):
                     print(f"[MONITOR-{cp_id}] 📥 Estado actualizado desde Central: {current_stored_status} → {new_status}")
                     # El broadcast periódico actualizará el dashboard automáticamente
     
-    # Procesar eventos de carga y errores
-    # ⚠️ IMPORTANTE: Solo procesar si cp_id coincide con el CP de este Monitor
-    # Esto es una verificación adicional aunque ya filtramos arriba
-    if cp_id and cp_id != monitor_instance.cp_id:
+    # ⚠️ VERIFICACIÓN ADICIONAL: Asegurar que cp_id coincide antes de procesar eventos de carga/errores
+    # Aunque ya filtramos arriba, esta es una verificación de seguridad final
+    if not cp_id:
+        # Evento sin cp_id, no procesar eventos de carga/errores
+        return
+    
+    # Normalizar cp_id para comparación
+    cp_id_str = str(cp_id).strip()
+    monitor_cp_id_str = str(monitor_instance.cp_id).strip()
+    
+    if cp_id_str != monitor_cp_id_str:
         # Evento para otro CP, no procesar
         return
     
@@ -895,10 +937,30 @@ async def tcp_health_check():
     
     # ⚠️ IMPORTANTE: Esperar al inicio para que el Engine esté completamente listo
     # El Engine necesita tiempo para iniciar Kafka, registrarse y abrir el servidor TCP
-    initial_wait_time = 10  # Esperar 10 segundos antes de empezar health checks
+    initial_wait_time = 15  # Aumentado a 15 segundos para dar más tiempo al Engine
     print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Waiting {initial_wait_time}s for Engine to be ready...")
+    
+    # Intentar verificar que el Engine está disponible antes de empezar
+    print(f"[MONITOR-{monitor_instance.cp_id}] 🔍 Verifying Engine connectivity to {monitor_instance.engine_host}:{monitor_instance.engine_port}...")
     await asyncio.sleep(initial_wait_time)
-    print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Starting health checks")
+    
+    # Intentar una conexión de prueba antes de empezar health checks continuos
+    try:
+        test_reader, test_writer = await asyncio.wait_for(
+            asyncio.open_connection(monitor_instance.engine_host, monitor_instance.engine_port),
+            timeout=2.0
+        )
+        test_writer.write(b"STATUS?\n")
+        await test_writer.drain()
+        test_response = await asyncio.wait_for(test_reader.readuntil(b'\n'), timeout=2.0)
+        test_writer.close()
+        await test_writer.wait_closed()
+        print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Engine connectivity verified! Response: {test_response.decode().strip()}")
+    except Exception as test_error:
+        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️  Warning: Could not verify Engine connectivity: {test_error}")
+        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️  Will continue health checks anyway (Engine may still be starting)...")
+    
+    print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Starting continuous health checks")
     
     while True:
         try:
@@ -910,9 +972,10 @@ async def tcp_health_check():
                 # Aumentar timeout para dar más tiempo a la conexión
                 # print(f"[MONITOR-{monitor_instance.cp_id}] 🔍 Attempting to connect to {monitor_instance.engine_host}:{monitor_instance.engine_port}")
                 try:
+                    # Intentar conectar al Engine
                     reader, writer = await asyncio.wait_for(
                         asyncio.open_connection(monitor_instance.engine_host, monitor_instance.engine_port),
-                        timeout=3.0  # Timeout razonable para conexión TCP
+                        timeout=5.0  # Aumentado a 5 segundos para dar más tiempo
                     )
                     # Solo imprimir cada 10 conexiones exitosas para reducir ruido
                     # print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Connected to Engine")
@@ -1057,6 +1120,8 @@ async def tcp_health_check():
                             f"✅ {monitor_instance.cp_id} recuperado tras {consecutive_failures} fallos"
                         )
                         await broadcast_alert(alert)
+                        # Reset el timestamp del último fallo reportado cuando se recupera
+                        last_reported_failure = None
                     
                     consecutive_failures = 0
                     

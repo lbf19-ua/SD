@@ -151,6 +151,9 @@ class EV_CentralWS:
         """
         Publica un evento a Kafka en el topic central_events.
         Este método es usado para enviar información del CP al Monitor.
+        
+        ⚠️ IMPORTANTE: Si el evento es CP_INFO, debe incluir cp_id en el nivel raíz
+        para que el Monitor pueda filtrar correctamente eventos de otros CPs
         """
         if not self.ensure_producer():
             return
@@ -164,10 +167,39 @@ class EV_CentralWS:
                 **data
             }
             
+            # ⚠️ VERIFICACIÓN: Para eventos CP_INFO, asegurar que cp_id está presente
+            if event_type == 'CP_INFO':
+                cp_id_in_data = data.get('cp_id')
+                if not cp_id_in_data:
+                    print(f"[CENTRAL] ❌ ERROR: CP_INFO event missing cp_id in data! event_type={event_type}, data keys={list(data.keys())}")
+                    # Intentar obtener cp_id de data.data si existe
+                    nested_data = data.get('data', {})
+                    if isinstance(nested_data, dict):
+                        cp_id_nested = nested_data.get('cp_id')
+                        if cp_id_nested:
+                            event['cp_id'] = cp_id_nested
+                            event['engine_id'] = cp_id_nested
+                            print(f"[CENTRAL] ⚠️  Fixed: Added cp_id={cp_id_nested} from nested data")
+                        else:
+                            print(f"[CENTRAL] ❌ ERROR: Cannot publish CP_INFO without cp_id!")
+                            return
+                else:
+                    # Verificar que cp_id también está en el nivel raíz del event
+                    if 'cp_id' not in event or event['cp_id'] != cp_id_in_data:
+                        event['cp_id'] = cp_id_in_data
+                        if 'engine_id' not in event:
+                            event['engine_id'] = cp_id_in_data
+            
             # Enviar al topic central_events para que Monitor lo reciba
             self.producer.send(KAFKA_TOPIC_PRODUCE, event)
             self.producer.flush()
-            print(f"[CENTRAL] 📤 Evento {event_type} publicado a {KAFKA_TOPIC_PRODUCE}")
+            
+            # Log más detallado para CP_INFO
+            if event_type == 'CP_INFO':
+                cp_id_log = event.get('cp_id', 'UNKNOWN')
+                print(f"[CENTRAL] 📤 CP_INFO publicado a {KAFKA_TOPIC_PRODUCE} - cp_id={cp_id_log}")
+            else:
+                print(f"[CENTRAL] 📤 Evento {event_type} publicado a {KAFKA_TOPIC_PRODUCE}")
         except Exception as e:
             print(f"[CENTRAL] ⚠️ Error publicando evento {event_type}: {e}")
             import traceback
@@ -246,13 +278,21 @@ class EV_CentralWS:
             if not tariff or tariff == 0:
                 tariff = 0.30
             
+            # ⚠️ CRÍTICO: Asegurar que cp_id está presente y es correcto
+            if not cp_id or not isinstance(cp_id, str):
+                print(f"[CENTRAL] ❌ ERROR: Invalid cp_id when publishing CP_INFO: {cp_id}")
+                return
+            
             # Publicar evento CP_INFO al Monitor con TODA la información necesaria
             # Incluir tanto en 'data' como en el nivel raíz para asegurar que el Monitor lo reciba
-            self.publish_event('CP_INFO', {
+            # ⚠️ IMPORTANTE: cp_id debe estar en el nivel raíz para que el Monitor pueda filtrar correctamente
+            event_data = {
                 'action': 'cp_info_update',
-                'cp_id': cp_id,
+                'cp_id': cp_id,  # ⚠️ CRÍTICO: Debe estar en nivel raíz para filtrado temprano
+                'engine_id': cp_id,  # También incluir engine_id como fallback
                 'data': {
                     'cp_id': cp_id,
+                    'engine_id': cp_id,
                     'location': location,
                     'localizacion': location,
                     'max_power_kw': float(max_power),
@@ -271,7 +311,15 @@ class EV_CentralWS:
                 'max_kw': float(max_power),
                 'tariff_per_kwh': float(tariff),
                 'tarifa_kwh': float(tariff)
-            })
+            }
+            
+            # ⚠️ VERIFICACIÓN FINAL: Asegurar que cp_id está presente antes de enviar
+            if 'cp_id' not in event_data or event_data['cp_id'] != cp_id:
+                print(f"[CENTRAL] ❌ ERROR: cp_id mismatch in event_data! cp_id={cp_id}, event_data['cp_id']={event_data.get('cp_id')}")
+                event_data['cp_id'] = cp_id
+                event_data['engine_id'] = cp_id
+            
+            self.publish_event('CP_INFO', event_data)
             print(f"[CENTRAL] 📡 CP_INFO enviado al Monitor - CP: {cp_id}, Location: {location}, Status: {status}, Max Power: {max_power} kW, Tariff: €{tariff}/kWh")
         except Exception as e:
             print(f"[CENTRAL] ⚠️ Error publicando info del CP {cp_id} al Monitor: {e}")

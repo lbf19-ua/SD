@@ -197,21 +197,36 @@ class EV_CP_Engine:
             self._last_status_change_publish = current_time
         
         try:
+            # ⚠️ CRÍTICO: Asegurar que SIEMPRE incluimos cp_id y engine_id en TODOS los eventos
+            # Esto permite que el Monitor filtre correctamente eventos de otros CPs
             event = {
                 'message_id': generate_message_id(),
                 'event_type': event_type,
-                'cp_id': self.cp_id,
-                'engine_id': self.cp_id,
+                'cp_id': self.cp_id,  # ⚠️ SIEMPRE incluir cp_id para filtrado en Monitor
+                'engine_id': self.cp_id,  # ⚠️ También incluir engine_id como fallback
                 'timestamp': current_timestamp()
             }
             
             if data:
+                # Si data ya tiene cp_id o engine_id, asegurar que coinciden con self.cp_id
+                # Esto previene errores donde se envía un evento con cp_id incorrecto
+                if 'cp_id' in data and data['cp_id'] != self.cp_id:
+                    print(f"[{self.cp_id}] ⚠️  Warning: data contains cp_id={data['cp_id']} but self.cp_id={self.cp_id}, using self.cp_id")
+                    data['cp_id'] = self.cp_id
+                if 'engine_id' in data and data['engine_id'] != self.cp_id:
+                    data['engine_id'] = self.cp_id
                 event.update(data)
+            
+            # ⚠️ VERIFICACIÓN FINAL: Asegurar que cp_id y engine_id están correctos
+            if event.get('cp_id') != self.cp_id or event.get('engine_id') != self.cp_id:
+                print(f"[{self.cp_id}] ❌ ERROR: Event cp_id mismatch! event.cp_id={event.get('cp_id')}, self.cp_id={self.cp_id}")
+                event['cp_id'] = self.cp_id
+                event['engine_id'] = self.cp_id
             
             self.producer.send(KAFKA_TOPICS['cp_events'], event)
             self.producer.flush()
             
-            print(f"[{self.cp_id}] 📤 Published event: {event_type}")
+            print(f"[{self.cp_id}] 📤 Published event: {event_type} (cp_id: {event.get('cp_id')})")
             
         except Exception as e:
             print(f"[{self.cp_id}] ❌ Error publishing event: {e}")
@@ -433,6 +448,14 @@ class EV_CP_Engine:
         
         self.health_server_thread = threading.Thread(target=health_server, daemon=True)
         self.health_server_thread.start()
+        
+        # Esperar un poco a que el thread arranque
+        time.sleep(0.5)
+        
+        # Verificar que el thread está corriendo
+        if not self.health_server_thread.is_alive():
+            print(f"[{self.cp_id}] ❌ ERROR: Health server thread failed to start!")
+            raise RuntimeError("Health server thread failed to start")
     
     def start_charging_simulation(self, user_id, username):
         """
@@ -922,8 +945,18 @@ class EV_CP_Engine:
         # 3. Iniciar servidor de health checks
         self.start_health_check_server()
         
-        # Esperar un poco a que el health server arranque
-        time.sleep(1)
+        # Esperar a que el health server arranque y verificar que está escuchando
+        max_wait = 5  # Esperar hasta 5 segundos
+        wait_interval = 0.5  # Verificar cada 0.5 segundos
+        waited = 0
+        while not self.health_server_running and waited < max_wait:
+            time.sleep(wait_interval)
+            waited += wait_interval
+        
+        if not self.health_server_running:
+            print(f"[{self.cp_id}] ⚠️  Warning: Health server may not be ready after {waited}s")
+        else:
+            print(f"[{self.cp_id}] ✅ Health server verified running after {waited:.1f}s")
         
         print(f"\n[{self.cp_id}] ✅ All systems operational")
         print(f"[{self.cp_id}] 🔋 Ready to charge vehicles\n")
