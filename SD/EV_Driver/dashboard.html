@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🚗 EV Driver Dashboard</title>
+    <title>EV Driver Dashboard</title>
     <style>
         * {
             margin: 0;
@@ -234,7 +234,7 @@
 </head>
 <body>
     <div class="container">
-        <h1>🚗 EV Driver Dashboard</h1>
+    <h1>EV Driver Dashboard</h1>
         <p class="subtitle">Sistema de Carga de Vehículos Eléctricos</p>
 
         <!-- Connection Status -->
@@ -261,25 +261,25 @@
 
             <div class="info-grid">
                 <div class="info-box">
-                    <label>👤 Usuario</label>
+                    <label>Usuario</label>
                     <div class="value" id="userDisplay">-</div>
                 </div>
                 <div class="info-box">
-                    <label>💰 Balance</label>
+                    <label>Balance</label>
                     <div class="value" id="balance">€0.00</div>
                 </div>
                 <div class="info-box">
-                    <label>⚡ Energía Cargada</label>
+                    <label>Energía Cargada</label>
                     <div class="value" id="energy">0.0 kWh</div>
                 </div>
                 <div class="info-box">
-                    <label>💵 Costo Actual</label>
+                    <label>Costo Actual</label>
                     <div class="value" id="cost">€0.00</div>
                 </div>
             </div>
 
             <div class="info-box">
-                <label>📍 Punto de Carga</label>
+                <label>Punto de Carga</label>
                 <div class="value" id="chargingPoint">-</div>
             </div>
 
@@ -300,7 +300,7 @@
 
             <!-- Batch from file -->
             <div class="info-box" style="margin-top: 20px;">
-                <label>📄 Procesar archivo de servicios (uno por línea: CP_001, CP_002, ...)</label>
+                <label>Procesar archivo de servicios (uno por línea: CP_001, CP_002, ...)</label>
                 <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                     <input type="file" id="servicesFile" accept=".txt" />
                     <div>
@@ -314,7 +314,7 @@
 
             <!-- Event Log -->
             <div class="event-log">
-                <h3>📋 Registro de Eventos</h3>
+                <h3>Registro de Eventos</h3>
                 <div id="eventLog"></div>
             </div>
         </div>
@@ -479,7 +479,7 @@
                     return; 
                 }
                 
-                addEvent(`📄 Procesando archivo: ${cpIds.length} servicios`);
+                addEvent(`Procesando archivo: ${cpIds.length} servicios`);
                 
                 const message = {
                     type: 'batch_charging',
@@ -518,12 +518,12 @@
                         if (data.active_session) {
                             sessionData.charging = true;
                             sessionData.cp_id = data.active_session.cp_id;
-                            document.getElementById('chargingStatus').textContent = 'CARGANDO ⚡';
+                            document.getElementById('chargingStatus').textContent = 'CARGANDO';
                             document.getElementById('chargingPoint').textContent = data.active_session.cp_id;
                             document.getElementById('startBtn').classList.add('hidden');
                             document.getElementById('stopBtn').classList.remove('hidden');
                             document.getElementById('progressSection').classList.remove('hidden');
-                            addEvent(`🔄 Sesión activa restaurada en ${data.active_session.cp_id}`);
+                            addEvent(`Sesion activa restaurada en ${data.active_session.cp_id}`);
                         }
                     } else {
                         alert('Login failed: ' + data.message);
@@ -532,7 +532,7 @@
 
                 case 'charging_pending':
                     document.getElementById('chargingStatus').textContent = 'ESPERANDO AUTORIZACIÓN...';
-                    addEvent('⏳ ' + (data.message || 'Esperando autorización...'));
+                    addEvent((data.message || 'Esperando autorización...'));
                     break;
                 
                 case 'charging_started':
@@ -544,7 +544,7 @@
                     
                     sessionData.charging = true;
                     sessionData.cp_id = data.cp_id;
-                    document.getElementById('chargingStatus').textContent = 'CARGANDO ⚡';
+                    document.getElementById('chargingStatus').textContent = 'CARGANDO';
                     document.getElementById('chargingPoint').textContent = data.cp_id;
                     
                     // Ocultar botón de inicio y mostrar de detención
@@ -582,7 +582,7 @@
                     }
                     
                     sessionData.charging = false;
-                    document.getElementById('chargingStatus').textContent = 'COMPLETADO ✓';
+                    document.getElementById('chargingStatus').textContent = 'COMPLETADO';
                     document.getElementById('startBtn').classList.remove('hidden');
                     document.getElementById('stopBtn').classList.add('hidden');
                     document.getElementById('balance').textContent = `€${data.new_balance.toFixed(2)}`;
@@ -594,21 +594,21 @@
                     break;
                 
                 case 'error_simulated':
-                    addEvent(`⚠️ Error simulado en ${data.cp_id}: ${data.error_type}`);
+                    addEvent(`Error simulado en ${data.cp_id}: ${data.error_type}`);
                     refreshCPs();
                     break;
                 
                 case 'error_fixed':
-                    addEvent(`✅ Error corregido en ${data.cp_id}`);
+                    addEvent(`Error corregido en ${data.cp_id}`);
                     refreshCPs();
                     break;
                 
-                // 🆕 EVENTOS DE ERROR DE CP DESDE CENTRAL
+                    // EVENTOS DE ERROR DE CP DESDE CENTRAL
                 case 'cp_error':
                     // Si el usuario está cargando en este CP, mostrar error
                     if (sessionData.cp_id === data.cp_id) {
-                        document.getElementById('chargingStatus').textContent = '❌ ERROR EN CP';
-                        addEvent(`⚠️ ${data.message}`);
+                        document.getElementById('chargingStatus').textContent = 'ERROR EN CP';
+                        addEvent(`${data.message}`);
                         alert(`Error en tu punto de carga: ${data.message}\nLa carga debe detenerse.`);
                         
                         // Mostrar botón de inicio, ocultar botón de detener
@@ -620,12 +620,12 @@
                         sessionData.cp_id = null;
                     } else if (data.username && data.username === currentUser) {
                         // Si el error es para este usuario pero no está cargando
-                        addEvent(`⚠️ ${data.message}`);
+                        addEvent(`${data.message}`);
                     }
                     break;
                 
                 case 'cp_fixed':
-                    addEvent(`✅ ${data.message}`);
+                    addEvent(`${data.message}`);
                     break;
                 
                 case 'all_cps_status':
@@ -633,21 +633,21 @@
                     break;
 
                 case 'batch_started':
-                    addEvent(`🧪 Lote iniciado: ${data.total} elementos`);
+                    addEvent(`Lote iniciado: ${data.total} elementos`);
                     break;
 
                 case 'batch_progress':
                     if (data.status === 'started') {
-                        addEvent(`▶️ [${data.index}] Inicio en ${data.cp_id} (sesión ${data.session_id})`);
+                        addEvent(`[${data.index}] Inicio en ${data.cp_id} (sesión ${data.session_id})`);
                     } else if (data.status === 'stopped') {
-                        addEvent(`⏹️ [${data.index}] Fin en ${data.cp_id} | ${Number(data.energy||0).toFixed(2)} kWh | €${Number(data.total_cost||0).toFixed(2)}`);
+                        addEvent(`[${data.index}] Fin en ${data.cp_id} | ${Number(data.energy||0).toFixed(2)} kWh | €${Number(data.total_cost||0).toFixed(2)}`);
                     } else if (data.status === 'skipped') {
-                        addEvent(`⏭️ [${data.index}] Omitido ${data.cp_id}: ${data.reason}`);
+                        addEvent(`[${data.index}] Omitido ${data.cp_id}: ${data.reason}`);
                     }
                     break;
 
                 case 'batch_complete':
-                    addEvent('✅ Lote completado');
+                    addEvent('Lote completado');
                     break;
 
                 case 'charging_ticket':
@@ -666,7 +666,7 @@
                         ? `${durationMin} min ${durationSecRem} s`
                         : `${durationSecRem} s`;
                     
-                    const ticketMessage = `🎫 TICKET DE CARGA\n\n` +
+                    const ticketMessage = `TICKET DE CARGA\n\n` +
                         `Punto de Carga: ${data.cp_id}\n` +
                         `Energía: ${Number(data.energy_kwh || 0).toFixed(2)} kWh\n` +
                         `Duración: ${durationStr}\n` +
@@ -681,12 +681,12 @@
                     }
                     
                     // Mostrar ticket en el registro de eventos
-                    addEvent(`🎫 Ticket: ${Number(data.energy_kwh || 0).toFixed(2)} kWh - €${Number(data.cost || 0).toFixed(2)}`);
+                    addEvent(`Ticket: ${Number(data.energy_kwh || 0).toFixed(2)} kWh - €${Number(data.cost || 0).toFixed(2)}`);
                     
                     // Limpiar estado de carga
                     sessionData.charging = false;
                     sessionData.cp_id = null;
-                    document.getElementById('chargingStatus').textContent = 'COMPLETADO ✓';
+                    document.getElementById('chargingStatus').textContent = 'COMPLETADO';
                     document.getElementById('startBtn').classList.remove('hidden');
                     document.getElementById('stopBtn').classList.add('hidden');
                     document.getElementById('progressSection').classList.add('hidden');
@@ -698,7 +698,7 @@
 
                 case 'error':
                     alert('Error: ' + data.message);
-                    addEvent('❌ ' + data.message);
+                    addEvent('ERROR: ' + data.message);
                     
                     // Re-habilitar botón de inicio si está deshabilitado
                     const startBtn2 = document.getElementById('startBtn');

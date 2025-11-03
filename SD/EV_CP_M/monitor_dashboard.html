@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>📊 Monitor - Puntos de Carga</title>
+    <title>Monitor - Puntos de Carga</title>
     <style>
         * {
             margin: 0;
@@ -352,7 +352,7 @@
 </head>
 <body>
     <div class="container">
-        <h1>📊 Monitor de Punto de Carga</h1>
+    <h1>Monitor de Punto de Carga</h1>
         <p class="subtitle" id="monitorSubtitle">Sistema de Monitoreo en Tiempo Real</p>
 
         <!-- Connection Status -->
@@ -376,7 +376,7 @@
 
         <!-- Health Status -->
         <div class="chart-container">
-            <h2>🏥 Estado del Sistema</h2>
+            <h2>Estado del Sistema</h2>
             <div id="healthStatus" class="empty-state">Cargando estado del sistema...</div>
         </div>
 
@@ -456,7 +456,7 @@
                 case 'fault_detected':
                     addAlert({
                         level: 'critical',
-                        message: `🔴 Fallo detectado en ${data.cp_id}`,
+                        message: `Fallo detectado en ${data.cp_id}`,
                         timestamp: new Date().toISOString()
                     });
                     break;
@@ -464,7 +464,7 @@
                 case 'cp_offline':
                     addAlert({
                         level: 'warning',
-                        message: `⚠️ Punto de carga ${data.cp_id} fuera de línea`,
+                        message: `ADVERTENCIA: Punto de carga ${data.cp_id} fuera de línea`,
                         timestamp: new Date().toISOString()
                     });
                     break;
@@ -500,7 +500,7 @@
             
             const statusLower = status.toLowerCase();
             
-            // ⚠️ FILTRAR estados que no son estados del CP (ej: 'READY', 'AUTHENTICATED', etc.)
+            // ATENCION: Filtrar estados que no son estados del CP (ej: 'READY', 'AUTHENTICATED', etc.)
             const validStatuses = ['available', 'charging', 'offline', 'fault', 'out_of_service'];
             if (validStatuses.includes(statusLower)) {
                 return statusLower;
@@ -538,12 +538,12 @@
                 // Rojo: averiado (conectado pero con error, no usable)
                 // Naranja: fuera de servicio (Central indica no disponible)
             
-            let statusIcon = '🟢';
+            let statusIcon = 'OK';
                 let statusText = 'Disponible';
             let dotColor = 'green';
 
                 if (normStatus === 'available' || normStatus === 'charging') {
-                    statusIcon = normStatus === 'charging' ? '⚡' : '🟢';
+                    statusIcon = normStatus === 'charging' ? 'CARGA' : 'OK';
                     statusText = normStatus === 'charging' ? 'Suministrando' : 'Disponible';
                 dotColor = 'green';
                 } else if (normStatus === 'offline') {
@@ -551,7 +551,7 @@
                 statusText = 'Desconectado';
                 dotColor = 'gray';
                 } else if (normStatus === 'fault') {
-                statusIcon = '❌';
+                statusIcon = 'ERROR';
                 statusText = 'Averiado';
                 dotColor = 'red';
                 } else if (normStatus === 'out_of_service') {
@@ -585,7 +585,7 @@
                         <div class="info-value" style="font-size: 1em;">${cp.location}</div>
                     </div>
                     <div class="info-item">
-                        <div class="info-label">⚡ Potencia Max</div>
+                        <div class="info-label">Potencia Max</div>
                         <div class="info-value">${cp.power_output} kW</div>
                     </div>
                     <div class="info-item">
@@ -593,7 +593,7 @@
                         <div class="info-value">€${cp.tariff}/kWh</div>
                     </div>
                     <div class="info-item">
-                        <div class="info-label">🔌 Potencia Actual</div>
+                        <div class="info-label">Potencia Actual</div>
                         <div class="info-value">${currentPower.toFixed(1)} kW</div>
                     </div>
                 </div>
@@ -612,7 +612,7 @@
                         <span class="metric-value">${uptime}</span>
                     </div>
                     <div class="metric-row">
-                        <span class="metric-label">📊 Sesiones hoy:</span>
+                        <span class="metric-label">Sesiones hoy:</span>
                         <span class="metric-value">${cp.sessions_today || 0}</span>
                     </div>
                 </div>
@@ -678,18 +678,18 @@
             const failures = health.consecutive_failures || 0;
 
             let statusColor = '#28a745'; // Verde por defecto
-            let statusText = '✅ Operativo';
+            let statusText = 'Operativo';
             if (status === 'KO' || status === 'TIMEOUT' || status === 'CONNECTION_ERROR') {
                 statusColor = failures >= 3 ? '#dc3545' : '#ffc107'; // Rojo si >= 3 fallos, amarillo si < 3
                 if (status === 'KO') {
-                    statusText = failures >= 3 ? '🔴 Fallos consecutivos (3+)' : `⚠️ Fallos: ${failures}/3`;
+                    statusText = failures >= 3 ? 'FALLOS CONSECUTIVOS (3+)' : `ADVERTENCIA: Fallos: ${failures}/3`;
                 } else if (status === 'TIMEOUT') {
-                    statusText = failures >= 3 ? '🔴 Timeouts consecutivos (3+)' : `⚠️ Timeouts: ${failures}/3`;
+                    statusText = failures >= 3 ? 'TIMEOUTS CONSECUTIVOS (3+)' : `ADVERTENCIA: Timeouts: ${failures}/3`;
                 } else {
-                    statusText = failures >= 3 ? '🔴 Error de conexión (3+)' : `⚠️ Errores: ${failures}/3`;
+                    statusText = failures >= 3 ? 'ERROR DE CONEXION (3+)' : `ADVERTENCIA: Errores: ${failures}/3`;
                 }
             } else if (status === 'OK') {
-                statusText = '✅ Saludable';
+                statusText = 'Saludable';
             }
 
             healthDiv.innerHTML = `
@@ -709,7 +709,7 @@
                 </div>
                 ${failures > 0 ? `
                     <div style="margin-top: 15px; padding: 15px; background: #fff3cd; border-radius: 10px; border-left: 4px solid #ffc107;">
-                        <strong>⚠️ Advertencia:</strong> ${failures} fallo(s) consecutivo(s) detectado(s). 
+                        <strong>ADVERTENCIA:</strong> ${failures} fallo(s) consecutivo(s) detectado(s). 
                         ${failures >= 3 ? 'Se ha reportado a Central.' : `Se reportará a Central tras 3 fallos consecutivos.`}
                     </div>
                 ` : ''}
