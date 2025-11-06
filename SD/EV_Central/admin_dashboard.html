@@ -568,11 +568,13 @@
                 case 'kafka_event':
                     // Evento genérico de Kafka - mostrar en el stream
                     const icon = {
-                        'DRIVER_LOGIN': '👤',
+                        'DRIVER_LOGIN': '',
                         'CHARGING_REQUEST': 'SOLIC',
                         'CHARGING_STARTED': 'CARGA',
                         'CHARGING_STOPPED': 'PARADA',
-                        'CP_STATUS_UPDATE': 'ESTADO'
+                        'CP_STATUS_UPDATE': 'ESTADO',
+                        // Añadidos para evitar prefijos "undefined"
+                        'charging_progress': ''
                     }[data.event_type];
                     addEventLog(`${icon} ${data.message}`);
                     break;

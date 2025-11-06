@@ -96,6 +96,9 @@ class EV_CP_Engine:
         # Lock para thread safety
         self.lock = threading.Lock()
         
+        # Timestamp de inicio para filtrar eventos antiguos
+        self.start_time = time.time()
+        
         print(f"\n{'='*80}")
         print(f"   EV CHARGING POINT ENGINE - {self.cp_id}")
         print(f"{'='*80}")
@@ -126,16 +129,18 @@ class EV_CP_Engine:
                 
                 # Consumidor para recibir comandos de Central
                 print(f"[{self.cp_id}]  Initializing consumer...")
-                # Consumer sin api_version explícito (auto-detección)
-                # Usar group_id único para evitar leer mensajes antiguos al reiniciar
-                import time as time_module
-                unique_group_id = f'engine_group_{self.cp_id}_{int(time_module.time())}'
+                # ⚠️ CRÍTICO: Usar group_id ESTABLE (sin timestamp) para que el Engine pueda
+                # leer mensajes que llegaron durante su inicialización. Si usamos timestamp,
+                # el Engine se pierde comandos que Central envió mientras se estaba conectando.
+                # Usar 'earliest' asegura que no perdemos comandos críticos como charging_started.
+                stable_group_id = f'engine_group_{self.cp_id}'
                 self.consumer = KafkaConsumer(
                     KAFKA_TOPICS['central_events'],
                     bootstrap_servers=self.kafka_broker,
                     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                    auto_offset_reset='latest',  # Solo leer mensajes nuevos después de conectarse
-                    group_id=unique_group_id,  # Group ID único por inicio
+                    auto_offset_reset='earliest',  # Leer desde el inicio si no hay offset guardado
+                    group_id=stable_group_id,  # Group ID estable por CP (sin timestamp)
+                    enable_auto_commit=True,  # Guardar progreso automáticamente
                     request_timeout_ms=30000,
                     session_timeout_ms=10000
                     # ⚠️ NO usar consumer_timeout_ms - esto causaba que el loop terminara después de 5s sin mensajes
@@ -272,23 +277,24 @@ class EV_CP_Engine:
         # Marcar que ya nos registramos para evitar re-registros
         self._registered = True
         
-        # Cambiar a estado available ANTES de enviar el registro
-        # Esto evita enviar dos eventos separados
+        # Mantener estado inicial 'offline' hasta que el Monitor confirme salud
+        # (Nuevo comportamiento requerido: Central no debe marcar 'available' sin verificación de Monitor)
         import time
         with self.lock:
-            if self.status == 'offline':
+            if self.status != 'offline':
+                # Forzar coherencia: durante el registro inicial, el estado debe ser 'offline'
                 self.previous_status = self.status
-                self.status = 'available'
-                print(f"[{self.cp_id}]  Status change: {self.previous_status} → available")
+                self.status = 'offline'
+            print(f"[{self.cp_id}]  Initial state reported to Central: offline")
         
         # ⚠️ REGISTRAR timestamp del registro para evitar cp_status_change subsecuentes
         self._registration_time = time.time()
         
-        # Enviar UN SOLO evento CP_REGISTRATION con toda la información incluido el estado
-        # Central lo registrará directamente como 'available' sin necesidad de cp_status_change
+        # Enviar UN SOLO evento CP_REGISTRATION con estado 'offline'
+        # Central lo registrará como 'offline' hasta que el Monitor confirme salud
         self.publish_event('CP_REGISTRATION', {
             'action': 'connect',
-            'status': 'available',  # Incluir estado directamente en el registro
+            'status': 'offline',
             'data': {
                 'location': self.location,
                 'localizacion': self.location,
@@ -297,12 +303,12 @@ class EV_CP_Engine:
                 'tarifa_kwh': self.tariff_per_kwh,
                 'tariff_per_kwh': self.tariff_per_kwh,
                 'price_eur_kwh': self.tariff_per_kwh,
-                'status': 'available',  # También en data para compatibilidad
-                'estado': 'available'
+                'status': 'offline',
+                'estado': 'offline'
             }
         })
         
-        print(f"[{self.cp_id}]  Registration request sent to Central (status: available)")
+        print(f"[{self.cp_id}]  Registration request sent to Central (status: offline)")
     
     def start_health_check_server(self):
         """
@@ -512,6 +518,18 @@ class EV_CP_Engine:
                     event_type = event.get('event_type', '')
                     action = event.get('action', '')
                     
+                    # Filtrar eventos antiguos (anteriores al inicio de este Engine)
+                    event_timestamp = event.get('timestamp')
+                    if event_timestamp:
+                        try:
+                            event_time = float(event_timestamp)
+                            # Solo procesar eventos generados después de que el Engine inició (con margen de 5s)
+                            if event_time < (self.start_time - 5):
+                                print(f"[{self.cp_id}]   Ignorando evento antiguo: {event_type or action} (timestamp: {event_time})")
+                                continue
+                        except (ValueError, TypeError):
+                            pass  # Si no se puede parsear el timestamp, procesarlo de todas formas
+                    
                     # Filtrar solo eventos relevantes para este CP
                     event_cp_id = event.get('cp_id')
                     
@@ -546,10 +564,11 @@ class EV_CP_Engine:
                             user_id = event.get('user_id')
                             
                             with self.lock:
-                                if self.status not in ['available', 'reserved']:
-                                    print(f"[{self.cp_id}]   Cannot start charging: status is {self.status}")
+                                # Permitir inicio aunque el estado todavía esté 'offline' justo tras el arranque.
+                                # Solo bloquear si el CP está realmente no operativo.
+                                if self.status in ['fault', 'out_of_service']:
+                                    print(f"[{self.cp_id}]   Cannot start charging: CP not operational (status: {self.status})")
                                     continue
-                                
                                 # Crear sesión
                                 self.current_session = {
                                     'username': username,

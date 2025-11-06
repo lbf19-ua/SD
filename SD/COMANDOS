@@ -1,0 +1,37 @@
+# instancia engine
+docker run -d --name sd-cp-engine-333 --network ev-network -p 5133:5100 -e CP_ID=CP_333 -e LOCATION="San Blas" -e HEALTH_PORT=5100 -e KAFKA_BROKER=192.168.25.1:9092 -e PYTHONUNBUFFERED=1 -v "${PWD}\ev_charging.db:/app/ev_charging.db" -v "${PWD}\network_config.py:/app/network_config.py" -v "${PWD}\database.py:/app/database.py" -v "${PWD}\event_utils.py:/app/event_utils.py" --restart unless-stopped sd-ev-cp-engine-001 python -u EV_CP_E.py --no-cli --cp-id CP_333 --location "San Blas" --health-port 5100 --kafka-broker 192.168.25.1:9092
+
+#instancia monitor
+docker run -d --name ev-cp-monitor-333 --network ev-network -p 5533:5500 -e CP_ID=CP_333 -e ENGINE_HOST=sd-cp-engine-333 -e ENGINE_PORT=5100 -e MONITOR_PORT=5500 -e KAFKA_BROKER=192.168.25.1:9092 -e PYTHONUNBUFFERED=1 -v "${PWD}\ev_charging.db:/app/ev_charging.db:ro" -v "${PWD}\network_config.py:/app/network_config.py:ro" -v "${PWD}\database.py:/app/database.py:ro" -v "${PWD}\event_utils.py:/app/event_utils.py:ro" -v "${PWD}\EV_CP_M\monitor_dashboard.html:/app/monitor_dashboard.html:ro" --restart unless-stopped sd-ev-cp-monitor-001 python -u EV_CP_M_WebSocket.py --cp-id CP_333 --engine-host sd-cp-engine-333 --engine-port 5100 --monitor-port 5500 --kafka-broker 192.168.25.1:9092
+
+#instancia driver
+docker run -d --name sd-driver-007 `
+--network ev-network `
+-p 8007:8001 `
+-e DRIVER_PORT=8001 `
+-e DRIVER_ID=Driver_WS_007 `
+-e KAFKA_BROKER=192.168.25.1:9092 `
+-e PYTHONUNBUFFERED=1 `
+-v "$(Get-Location)\ev_charging.db:/app/ev_charging.db" `
+-v "$(Get-Location)\network_config.py:/app/network_config.py" `
+-v "$(Get-Location)\database.py:/app/database.py" `
+-v "$(Get-Location)\event_utils.py:/app/event_utils.py" `
+--restart unless-stopped `
+sd-ev-driver `
+python -u EV_Driver_WebSocket.py --port 8001 --driver-id Driver_WS_007 --kafka-broker 192.168.1.235:9092
+
+# logs
+docker logs ev-central -f
+
+# borrar contenedor de instancia, sin esto no se me hacia bien el down y no paraba el docker
+docker ps -a -f "name=sd-cp-engine|ev-cp-monitor" --format "{{.ID}}\t{{.Names}}\t{{.Status}}"
+docker rm -f 
+
+# probar tumbar monitor
+cd SD
+docker-compose -f docker-compose.pc3.yml stop ev-cp-monitor-001
+
+# este funciona bien
+docker-compose -f docker-compose.pc3.yml kill ev-cp-monitor-002
+
+docker-compose -f docker-compose.pc3.yml start ev-cp-monitor-002

@@ -387,7 +387,7 @@ def get_available_charging_points():
     cursor.execute("""
         SELECT cp_id, localizacion, max_kw, tarifa_kwh
         FROM charging_points
-        WHERE estado IN ('available', 'offline') AND active = 1
+        WHERE estado = 'available' AND active = 1
     """)
     
     rows = cursor.fetchall()
@@ -556,7 +556,7 @@ def find_and_reserve_available_cp(max_attempts: int = 10) -> str:
             # Buscar un CP disponible que NO haya sido reservado
             cursor.execute("""
                 SELECT cp_id FROM charging_points
-                WHERE estado IN ('available', 'offline')
+                WHERE estado = 'available'
                 AND active = 1
                 AND cp_id NOT IN (
                     SELECT DISTINCT cp_id FROM charging_sesiones WHERE estado = 'active'
@@ -577,7 +577,7 @@ def find_and_reserve_available_cp(max_attempts: int = 10) -> str:
                 UPDATE charging_points
                 SET estado = 'reserved'
                 WHERE cp_id = ? 
-                AND estado IN ('available', 'offline')
+                AND estado = 'available'
                 AND active = 1
             """, (cp_id,))
             
@@ -616,7 +616,7 @@ def reserve_charging_point(cp_id: str, timeout_seconds: int = 5) -> bool:
             UPDATE charging_points
             SET estado = 'reserved'
             WHERE cp_id = ? 
-            AND estado IN ('available', 'offline')
+            AND estado = 'available'
             AND active = 1
         """, (cp_id,))
         
@@ -702,7 +702,7 @@ def create_charging_session(user_id: int, cp_id: str, correlation_id: str = None
 # Busca la sesión activa con ese id, calcula el coste según coste = energia_kwh * tarifa_kwh del CP
 # Actualiza la sesión con end_time actual, energia_kwh, coste y estado = 'completed'
 # Resta el coste del balance del usuario y pone el estado = 'available' y devuelve un resumen de la carga
-def end_charging_sesion(sesion_id: int, energia_kwh: float) -> dict:
+def end_charging_sesion(sesion_id: int, energia_kwh: float, cp_status_after: str = 'available') -> dict:
     """
     Finaliza una sesión de carga, calcula el costo y actualiza el balance del usuario.
     Retorna dict con sesion_id, coste, y updated_balance.
@@ -738,11 +738,12 @@ def end_charging_sesion(sesion_id: int, energia_kwh: float) -> dict:
         WHERE id = ?
     """, (coste, sesion['user_id']))
     
+    # Permitir mantener el CP en 'offline' u otro estado si se especifica
     cursor.execute("""
         UPDATE charging_points
-        SET estado = 'available'
+        SET estado = ?
         WHERE cp_id = ?
-    """, (sesion['cp_id'],))
+    """, (cp_status_after, sesion['cp_id']))
     
     cursor.execute("SELECT balance FROM usuarios WHERE id = ?", (sesion['user_id'],))
     new_balance = cursor.fetchone()['balance']
@@ -756,6 +757,60 @@ def end_charging_sesion(sesion_id: int, energia_kwh: float) -> dict:
         'energia_kwh': energia_kwh,
         'updated_balance': new_balance
     }
+
+
+def cancel_charging_session(sesion_id: int, set_cp_status: str | None = None) -> dict | None:
+    """
+    Cancela una sesión activa sin cobrar ni modificar balance.
+    - Marca la sesión como 'terminated' y establece end_time.
+    - No descuenta balance del usuario.
+    - Si set_cp_status está definido, actualiza el estado del CP a ese valor (p.ej. 'offline').
+    Retorna dict con información mínima o None si no existe.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT s.id, s.user_id, s.cp_id, s.start_time
+            FROM charging_sesiones s
+            WHERE s.id = ? AND s.estado = 'active'
+        """, (sesion_id,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return None
+        sesion = dict(row)
+
+        end_time = datetime.now().timestamp()
+        # Cerrar sesión como terminada sin coste
+        cursor.execute("""
+            UPDATE charging_sesiones
+            SET end_time = ?, estado = 'terminated'
+            WHERE id = ?
+        """, (end_time, sesion_id))
+
+        # Actualizar estado del CP si se especifica
+        if set_cp_status:
+            cursor.execute("""
+                UPDATE charging_points
+                SET estado = ?
+                WHERE cp_id = ?
+            """, (set_cp_status, sesion['cp_id']))
+
+        conn.commit()
+        return {
+            'sesion_id': sesion_id,
+            'cp_id': sesion['cp_id'],
+            'user_id': sesion['user_id'],
+            'end_time': end_time,
+            'estado': 'terminated'
+        }
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] ERROR canceling session {sesion_id}: {e}")
+        return None
+    finally:
+        conn.close()
 
 
 # Devuelve la sesión activa más reciente para un usuario, si es que existe.

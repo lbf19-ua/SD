@@ -5,6 +5,7 @@ import json
 import threading
 import time
 import argparse
+import signal
 from pathlib import Path
 from datetime import datetime, timedelta
 import random
@@ -56,6 +57,7 @@ class SharedState:
         }
         self.tcp_monitor_task = None  # Task de monitoreo TCP
         self.lock = threading.Lock()
+        self.shutting_down = False  # Flag para shutdown limpio
 
 shared_state = SharedState()
 
@@ -157,11 +159,11 @@ class EV_MonitorWS:
             # Marcar como autenticado ANTES de enviar (para evitar re-envío si falla el envío)
             self._authenticated = True
             
-            # Enviar mensaje de autenticación a Central vía Kafka (solo una vez)
-            auth_event = {
+            # Enviar evento de conexión a Central vía Kafka
+            connect_event = {
                 'message_id': generate_message_id(),
-                'event_type': 'MONITOR_AUTH',
-                'action': 'authenticate',
+                'event_type': 'MONITOR_CONNECTED',
+                'action': 'monitor_connected',
                 'cp_id': self.cp_id,
                 'monitor_id': f'MONITOR-{self.cp_id}',
                 'engine_host': self.engine_host,
@@ -170,19 +172,39 @@ class EV_MonitorWS:
                 'timestamp': current_timestamp()
             }
             
-            print(f"[MONITOR-{self.cp_id}] 📤 Sending authentication event to topic '{KAFKA_TOPIC_PRODUCE}'...")
-            future = self.producer.send(KAFKA_TOPIC_PRODUCE, auth_event)
+            print(f"[MONITOR-{self.cp_id}] 📤 Sending MONITOR_CONNECTED event to topic '{KAFKA_TOPIC_PRODUCE}'...")
+            future = self.producer.send(KAFKA_TOPIC_PRODUCE, connect_event)
             # Esperar confirmación del envío
             record_metadata = future.get(timeout=10)
             self.producer.flush(timeout=5)
-            print(f"[MONITOR-{self.cp_id}] ✅ Authentication sent to Central (topic: {record_metadata.topic}, partition: {record_metadata.partition})")
+            print(f"[MONITOR-{self.cp_id}] ✅ MONITOR_CONNECTED sent to Central (topic: {record_metadata.topic}, partition: {record_metadata.partition})")
             print(f"[MONITOR-{self.cp_id}] ✅ Monitor validated and ready to monitor {self.cp_id}")
         except Exception as e:
-            print(f"[MONITOR-{self.cp_id}] ❌ Authentication failed: {e}")
+            print(f"[MONITOR-{self.cp_id}] ❌ Connection event failed: {e}")
             import traceback
             traceback.print_exc()
             # Si falla, permitir reintentar
             self._authenticated = False
+    
+    def send_disconnect_event(self):
+        """Envía evento de desconexión al cerrar limpiamente"""
+        if not self.producer:
+            return
+        try:
+            disconnect_event = {
+                'message_id': generate_message_id(),
+                'event_type': 'MONITOR_DISCONNECTED',
+                'action': 'monitor_disconnected',
+                'cp_id': self.cp_id,
+                'monitor_id': f'MONITOR-{self.cp_id}',
+                'timestamp': current_timestamp(),
+                'reason': 'clean_shutdown'
+            }
+            self.producer.send(KAFKA_TOPIC_PRODUCE, disconnect_event)
+            self.producer.flush(timeout=3)
+            print(f"[MONITOR-{self.cp_id}] 📤 MONITOR_DISCONNECTED sent to Central")
+        except Exception as e:
+            print(f"[MONITOR-{self.cp_id}] ⚠️ Error sending disconnect event: {e}")
 
     def initialize_metrics(self):
         """Inicializa métricas simuladas para el CP monitoreado"""
@@ -400,6 +422,25 @@ async def websocket_handler_http(request):
                         await ws.send_str(json.dumps({
                             'type': 'monitor_data',
                             'data': monitor_data
+                        }))
+                    
+                    elif msg_type == 'simulate_disconnect':
+                        # Simulación de desconexión desde el dashboard
+                        clean_shutdown = data.get('clean_shutdown', False)
+                        
+                        if clean_shutdown:
+                            print(f"[MONITOR-{monitor_instance.cp_id}] 🧪 SIMULACIÓN: Cierre limpio iniciado desde dashboard")
+                            # Enviar evento de desconexión limpia a Central
+                            monitor_instance.send_disconnect_event()
+                            print(f"[MONITOR-{monitor_instance.cp_id}] ✅ MONITOR_DISCONNECTED enviado")
+                        else:
+                            print(f"[MONITOR-{monitor_instance.cp_id}] 🧪 SIMULACIÓN: Caída abrupta (sin enviar evento)")
+                        
+                        # Confirmar al dashboard
+                        await ws.send_str(json.dumps({
+                            'type': 'simulation_ack',
+                            'clean_shutdown': clean_shutdown,
+                            'message': 'Simulación ejecutada correctamente'
                         }))
                         
                 except json.JSONDecodeError:
@@ -1140,6 +1181,7 @@ async def tcp_health_check():
                 # Procesar respuesta
                 if response == "OK":
                     # ✅ Engine responde OK
+                    prev_status = shared_state.health_status.get('last_status')
                     if consecutive_failures > 0:
                         print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Recovered (was {consecutive_failures} failures)")
                         alert = monitor_instance.add_alert(
@@ -1157,6 +1199,39 @@ async def tcp_health_check():
                         'last_check': time.time(),
                         'last_status': 'OK'
                     }
+
+                    # 🆕 Notificar a Central que el Engine está sano para que marque el CP como 'available'
+                    try:
+                        if monitor_instance.producer:
+                            # Solo publicar transición a OK (para evitar spam)
+                            if prev_status != 'OK':
+                                event = {
+                                    'message_id': generate_message_id(),
+                                    'event_type': 'ENGINE_HEALTH_OK',
+                                    'action': 'report_engine_ok',
+                                    'cp_id': monitor_instance.cp_id,
+                                    'status': 'available',
+                                    'timestamp': current_timestamp(),
+                                    'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                                }
+                                monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
+                                monitor_instance.producer.flush()
+                                print(f"[MONITOR-{monitor_instance.cp_id}] 📤 ENGINE_HEALTH_OK publicado para {monitor_instance.cp_id}")
+                            
+                            # 💓 Enviar heartbeat periódico a Central (cada segundo mientras OK)
+                            heartbeat_event = {
+                                'message_id': generate_message_id(),
+                                'event_type': 'MONITOR_HEARTBEAT',
+                                'action': 'monitor_heartbeat',
+                                'cp_id': monitor_instance.cp_id,
+                                'status': 'available',
+                                'timestamp': current_timestamp(),
+                                'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                            }
+                            monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, heartbeat_event)
+                            # No hacer flush para cada heartbeat (reduce latencia)
+                    except Exception as e:
+                        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Error publicando ENGINE_HEALTH_OK: {e}")
                 
                 elif response == "KO":
                     # ❌ Engine responde KO
@@ -1396,6 +1471,16 @@ async def main():
     except Exception as e:
         print(f"\n❌ Error starting server: {e}")
 
+def signal_handler(sig, frame):
+    """Handler para señales de sistema (Ctrl+C, etc.)"""
+    print(f"\n\n[MONITOR] 🛑 Señal recibida ({signal.Signals(sig).name}) - Cerrando limpiamente...")
+    shared_state.shutting_down = True
+    if 'monitor_instance' in globals():
+        monitor_instance.send_disconnect_event()
+        print(f"[MONITOR] ✅ MONITOR_DISCONNECTED enviado a Central")
+    print(f"[MONITOR] 👋 Monitor cerrado correctamente\n")
+    sys.exit(0)
+
 if __name__ == "__main__":
     # ========================================================================
     # ARGUMENTOS DE LÍNEA DE COMANDOS
@@ -1449,12 +1534,26 @@ if __name__ == "__main__":
         kafka_broker=args.kafka_broker
     )
     
+    # ========================================================================
+    # REGISTRAR HANDLER DE SEÑALES PARA CIERRE LIMPIO
+    # ========================================================================
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     # Iniciar servidor
     try:
+        print(f"\n[MONITOR-{args.cp_id}] 💡 Presiona Ctrl+C para cerrar limpiamente (enviará MONITOR_DISCONNECTED)")
+        print(f"[MONITOR-{args.cp_id}] 💡 O cierra la terminal para simular caída abrupta\n")
         asyncio.run(main())
     except KeyboardInterrupt:
-        print(f"\n\n[MONITOR-{args.cp_id}] 🛑 Server stopped by user")
+        print(f"\n\n[MONITOR-{args.cp_id}] 🛑 Ctrl+C detectado - Cerrando limpiamente...")
+        shared_state.shutting_down = True
+        monitor_instance.send_disconnect_event()
+        print(f"[MONITOR-{args.cp_id}] ✅ MONITOR_DISCONNECTED enviado a Central")
+        print(f"[MONITOR-{args.cp_id}] 👋 Monitor cerrado correctamente\n")
     except Exception as e:
         print(f"\n❌ Fatal error: {e}")
+        shared_state.shutting_down = True
+        monitor_instance.send_disconnect_event()
         import traceback
         traceback.print_exc()
