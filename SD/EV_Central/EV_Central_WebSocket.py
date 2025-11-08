@@ -2797,42 +2797,37 @@ async def main():
         return
     
     # Verificar base de datos
-    # En Docker, la BD está en /app/ev_charging.db
+    # En Docker, la BD está en /app/ev_charging.db; en local puede estar en el directorio actual
     db_path = Path('/app/ev_charging.db')
     if not db_path.exists():
-        # Intentar también en el directorio actual
         db_path = Path('ev_charging.db')
-        if not db_path.exists():
-            print(" Database not found. Please run: python init_db.py")
-            return
-    else:
-        # Requisito: al iniciar Central TODO debe estar apagado
-        try:
-            # Actualizar timestamp de inicio para filtrar eventos antiguos
-            shared_state.central_start_time = time.time()
-            print(f"[CENTRAL] Timestamp de inicio de Central: {shared_state.central_start_time}")
-            
-            # 1) Terminar cualquier sesión activa que haya quedado de ejecuciones anteriores
-            if hasattr(db, 'terminate_all_active_sessions'):
-                sess, cps = db.terminate_all_active_sessions(mark_cp_offline=True)
-                print(f"[CENTRAL] Inicio: sesiones activas terminadas: {sess}, CPs marcados offline: {cps}")
-            # 2) Marcar TODOS los CPs como 'offline' al iniciar Central
-            # Esto asegura que Central no asume que los CPs están conectados hasta que se registren
-            updated = db.set_all_cps_status_offline() if hasattr(db, 'set_all_cps_status_offline') else 0
-            if updated > 0:
-                print(f"[CENTRAL] {updated} CP(s) marcado(s) como 'offline' al inicio - esperando registro de Engines")
-            else:
-                print(f"[CENTRAL] No hay CPs en BD o ya están marcados como offline")
 
-            # 3) Habilitar solo CP_001 y CP_002 como 'available' al inicio
-            try:
-                for fixed_cp in ['CP_001', 'CP_002']:
-                    db.update_charging_point_status(fixed_cp, 'available')
-                print(f"[CENTRAL] Inicialización: CP_001 y CP_002 marcados como 'available'; el resto 'offline'")
-            except Exception as e:
-                print(f"[CENTRAL] No se pudieron marcar CP_001/CP_002 como disponibles: {e}")
-        except Exception as e:
-            print(f"[CENTRAL] No se pudo limpiar estado al inicio: {e}")
+    if not db_path.exists():
+        print(" Database not found. Please run: python init_db.py")
+        return
+
+    # Requisito: al iniciar Central TODO debe estar apagado
+    try:
+        # Actualizar timestamp de inicio para filtrar eventos antiguos
+        shared_state.central_start_time = time.time()
+        print(f"[CENTRAL] Timestamp de inicio de Central: {shared_state.central_start_time}")
+        
+        # 1) Terminar cualquier sesión activa que haya quedado de ejecuciones anteriores
+        if hasattr(db, 'terminate_all_active_sessions'):
+            sess, cps = db.terminate_all_active_sessions(mark_cp_offline=True)
+            print(f"[CENTRAL] Inicio: sesiones activas terminadas: {sess}, CPs marcados offline: {cps}")
+        # 2) Marcar TODOS los CPs como 'offline' al iniciar Central
+        # Esto asegura que Central no asume que los CPs están conectados hasta que se registren
+        updated = db.set_all_cps_status_offline() if hasattr(db, 'set_all_cps_status_offline') else 0
+        if updated > 0:
+            print(f"[CENTRAL] {updated} CP(s) marcado(s) como 'offline' al inicio - esperando registro de Engines")
+        else:
+            print(f"[CENTRAL] No hay CPs en BD o ya están marcados como offline")
+
+        # 3) No habilitar ningún CP hasta que cada Engine se registre explícitamente
+        print("[CENTRAL] Todos los CP permanecerán 'offline' hasta recibir registro de sus Engines")
+    except Exception as e:
+        print(f"[CENTRAL] No se pudo limpiar estado al inicio: {e}")
     
     try:
         # Crear aplicación web que maneje tanto HTTP como WebSocket
