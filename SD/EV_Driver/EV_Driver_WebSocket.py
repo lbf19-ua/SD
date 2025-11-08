@@ -1724,6 +1724,7 @@ async def process_notifications():
                     'cp_id': cp_id,
                     'energy_kwh': round(energy_kwh, 2),
                     'cost': round(cost, 2),
+                    'duration_sec': int(duration_sec),
                     'duration': duration_display,
                     'reason': reason,
                     'message': f'🎫 Ticket de carga: {energy_kwh:.2f} kWh por €{cost:.2f}'
