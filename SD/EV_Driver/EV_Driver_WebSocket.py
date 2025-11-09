@@ -746,14 +746,11 @@ async def websocket_handler(websocket, path):
                         data.get('username'),
                         data.get('password')
                     )
-                    
                     if result['success']:
                         username = result['user']['username']
-                        
-                        # Si hay sesión activa, restaurarla en el shared_state
+                        # Restaurar sesión activa si existe
                         if result.get('active_session'):
                             session = result['active_session']
-                            # Usar tariff por defecto (no tenemos acceso a BD)
                             with shared_state.lock:
                                 shared_state.charging_sessions[username] = {
                                     'username': username,
@@ -762,20 +759,32 @@ async def websocket_handler(websocket, path):
                                     'start_time': session.get('start_time', time.time()),
                                     'energy': 0.0,
                                     'cost': 0.0,
-                                    'tariff': 0.30  # Tariff por defecto
+                                    'tariff': 0.30
                                 }
-                        
                         response = {
                             'type': 'login_response',
                             'success': True,
                             'user': result['user']
                         }
-                        
-                        # Incluir sesión activa si existe
                         if result.get('active_session'):
                             response['active_session'] = result['active_session']
-                        
                         await websocket.send(json.dumps(response))
+                        # Publicar DRIVER_CONNECTED y solicitar snapshot
+                        try:
+                            driver_instance.producer.send(KAFKA_TOPIC_PRODUCE, {
+                                'event_type': 'DRIVER_CONNECTED',
+                                'username': username,
+                                'timestamp': time.time()
+                            })
+                            driver_instance.producer.send(KAFKA_TOPIC_PRODUCE, {
+                                'event_type': 'REQUEST_ACTIVE_SESSIONS',
+                                'username': username,
+                                'timestamp': time.time()
+                            })
+                            driver_instance.producer.flush()
+                            print(f"[DRIVER] ▶️ DRIVER_CONNECTED y REQUEST_ACTIVE_SESSIONS enviados (websockets) para {username}")
+                        except Exception as e:
+                            print(f"[DRIVER] Error enviando DRIVER_CONNECTED/REQUEST_ACTIVE_SESSIONS: {e}")
                     else:
                         await websocket.send(json.dumps({
                             'type': 'login_response',
@@ -1074,7 +1083,25 @@ async def websocket_handler(websocket, path):
     except Exception as e:
         print(f"[WS] ❌ Error handling websocket message: {e}")
     finally:
-        shared_state.connected_clients.remove(websocket)
+        if websocket in shared_state.connected_clients:
+            shared_state.connected_clients.remove(websocket)
+        # Intentar publicar DRIVER_DISCONNECTED
+        try:
+            username = None
+            for client_ws, uname in list(shared_state.client_users.items()):
+                if client_ws == websocket:
+                    username = uname
+                    break
+            if username and driver_instance and driver_instance.producer:
+                driver_instance.producer.send(KAFKA_TOPIC_PRODUCE, {
+                    'event_type': 'DRIVER_DISCONNECTED',
+                    'username': username,
+                    'timestamp': time.time()
+                })
+                driver_instance.producer.flush()
+                print(f"[DRIVER] ▶️ DRIVER_DISCONNECTED publicado (websockets) para {username}")
+        except Exception as e:
+            print(f"[DRIVER] Error publicando DRIVER_DISCONNECTED: {e}")
 
 async def websocket_handler_http(request):
     """Manejador de WebSocket para aiohttp"""
@@ -1094,19 +1121,14 @@ async def websocket_handler_http(request):
                     msg_type = data.get('type')
                     
                     if msg_type == 'login':
-                        # Autenticar usuario
                         result = driver_instance.authenticate_user(
                             data.get('username'),
                             data.get('password')
                         )
-                        
                         if result['success']:
                             username = result['user']['username']
-                            
-                            # Si hay sesión activa, restaurarla en el shared_state
                             if result.get('active_session'):
                                 session = result['active_session']
-                                # Usar tariff por defecto (no tenemos acceso a BD)
                                 with shared_state.lock:
                                     shared_state.charging_sessions[username] = {
                                         'username': username,
@@ -1115,20 +1137,32 @@ async def websocket_handler_http(request):
                                         'start_time': session['start_time'],
                                         'energy': 0.0,
                                         'cost': 0.0,
-                                        'tariff': 0.30  # Tariff por defecto
+                                        'tariff': 0.30
                                     }
-                            
                             response = {
                                 'type': 'login_response',
                                 'success': True,
                                 'user': result['user']
                             }
-                            
-                            # Incluir sesión activa si existe
                             if result.get('active_session'):
                                 response['active_session'] = result['active_session']
-                            
                             await ws.send_str(json.dumps(response))
+                            # Publicar DRIVER_CONNECTED y solicitar snapshot
+                            try:
+                                driver_instance.producer.send(KAFKA_TOPIC_PRODUCE, {
+                                    'event_type': 'DRIVER_CONNECTED',
+                                    'username': username,
+                                    'timestamp': time.time()
+                                })
+                                driver_instance.producer.send(KAFKA_TOPIC_PRODUCE, {
+                                    'event_type': 'REQUEST_ACTIVE_SESSIONS',
+                                    'username': username,
+                                    'timestamp': time.time()
+                                })
+                                driver_instance.producer.flush()
+                                print(f"[DRIVER] ▶️ DRIVER_CONNECTED y REQUEST_ACTIVE_SESSIONS enviados (aiohttp) para {username}")
+                            except Exception as e:
+                                print(f"[DRIVER] Error enviando DRIVER_CONNECTED/REQUEST_ACTIVE_SESSIONS (aiohttp): {e}")
                         else:
                             await ws.send_str(json.dumps({
                                 'type': 'login_response',
@@ -1149,24 +1183,7 @@ async def websocket_handler_http(request):
                                     if client_id in shared_state.pending_authorizations:
                                         shared_state.pending_authorizations[client_id]['websocket'] = ws
                                         print(f"[WS] 💾 Websocket guardado para client_id={client_id}, user={username}")
-                                    else:
-                                        print(f"[WS] ⚠️ client_id={client_id} no existe en pending_authorizations")
-                                
-                                await ws.send_str(json.dumps({
-                                    'type': 'charging_pending',
-                                    'message': 'Esperando autorización de Central...'
-                                }))
-                            else:
-                                # Respuesta directa (no debería pasar con el nuevo flujo)
-                                await ws.send_str(json.dumps({
-                                    'type': 'error',
-                                    'message': result.get('message', 'Error en el flujo de autorización')
-                                }))
-                        else:
-                            await ws.send_str(json.dumps({
-                                'type': 'error',
-                                'message': result.get('message', 'Failed to start charging')
-                            }))
+                                    # (Snapshot disconnect logic eliminado: se maneja en finally del handler)
                     
                     elif msg_type == 'stop_charging':
                         # Detener carga

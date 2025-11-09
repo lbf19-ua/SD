@@ -52,6 +52,23 @@ class SharedState:
         # Seguimiento de latidos del Monitor por CP
         self.last_monitor_seen = {}  # {cp_id: timestamp}
         self.monitor_timeout_seconds = 5.0  # Timeout de 5 segundos para detectar Monitor caído
+        # Sesiones cerradas recientemente para ignorar charging_progress tardíos
+        # {session_id: timestamp_cierre}
+        self.recently_closed_sessions = {}
+        # TTL para ignorar eventos tardíos (segundos)
+        self.closed_session_ttl = 600.0  # aumentado desde 10s para suprimir progresos tardíos tras kill
+        # Último timestamp de charging_progress por CP para detectar inactividad del Engine
+        self.last_progress_per_cp = {}  # {cp_id: timestamp}
+        # Umbral de inactividad del Engine (segundos) durante 'charging' antes de cerrar sesión
+        try:
+            self.engine_inactivity_threshold = float(os.environ.get('ENGINE_INACTIVITY_THRESHOLD', '8.0'))
+        except Exception:
+            self.engine_inactivity_threshold = 8.0
+        # Sesiones ya notificadas como interrumpidas (para no spamear CHARGING_INTERRUPTED)
+        self.interrupted_notified_sessions = set()  # {session_id}
+        # Marca temporal de fallos de Engine reportados/observados por CP
+        self.engine_failure_seen_at = {}  # {cp_id: timestamp}
+    
 
 shared_state = SharedState()
 
@@ -90,7 +107,6 @@ class EV_CentralWS:
                     continue
                 else:
                     print(f"[CENTRAL] Failed to connect to Kafka after {max_retries} attempts (bootstrap={self.kafka_broker})")
-    
     def ensure_producer(self):
         """Asegura que el producer esté disponible, reintentando si es necesario"""
         if self.producer is None:
@@ -387,7 +403,7 @@ class EV_CentralWS:
         # La BD usa 'max_kw', convertir a 'max_power_kw'
         max_power = cp_row.get('max_kw') or cp_row.get('max_power_kw')
         if not max_power:
-            max_power = 22.0
+            return False
         
         # Extraer tarifa
         # La BD usa 'tarifa_kwh', convertir a 'tariff_per_kwh'
@@ -780,14 +796,19 @@ async def websocket_handler_http(request):
                         # Corregir error en un punto de carga
                         cp_id = data.get('cp_id')
                         
-                        # Cambiar estado a available
-                        db.update_charging_point_status(cp_id, 'available')
+                        # Cambiar estado a available SOLO si es CP_001..CP_004
+                        allowed_cps = {'CP_001','CP_002','CP_003','CP_004'}
+                        if cp_id in allowed_cps:
+                            db.update_charging_point_status(cp_id, 'available')
+                        else:
+                            # Para otros, mantener/desviar a offline
+                            db.update_charging_point_status(cp_id, 'offline')
                         
                         # PUBLICAR EVENTO EN KAFKA para notificar al Driver
                         central_instance.publish_event('CP_ERROR_FIXED', {
                             'cp_id': cp_id,
-                            'new_status': 'available',
-                            'message': f'Error corregido en {cp_id}'
+                            'new_status': 'available' if cp_id in {'CP_001','CP_002','CP_003','CP_004'} else 'offline',
+                            'message': f'Error corregido en {cp_id} (disponible solo si CP_001..CP_004)'
                         })
                         print(f"[CENTRAL] Publicado CP_ERROR_FIXED en Kafka para {cp_id}")
                         
@@ -923,7 +944,10 @@ async def websocket_handler_http(request):
                                 cp_id_item = cp.get('cp_id') or cp.get('id')
                                 if cp_id_item:
                                     # Cambiar a available
-                                    db.update_charging_point_status(cp_id_item, 'available')
+                                    if cp_id_item in {'CP_001','CP_002','CP_003','CP_004'}:
+                                        db.update_charging_point_status(cp_id_item, 'available')
+                                    else:
+                                        db.update_charging_point_status(cp_id_item, 'offline')
                                     
                                     # Publicar comando vía Kafka al CP_E
                                     central_instance.publish_event('CP_RESUME', {
@@ -944,8 +968,11 @@ async def websocket_handler_http(request):
                             # Reanudar CP específico
                             print(f"[CENTRAL] Reanudando CP {cp_id}...")
                             
-                            # Cambiar estado a available
-                            db.update_charging_point_status(cp_id, 'available')
+                            # Cambiar estado a available SOLO para CP_001..CP_004
+                            if cp_id in {'CP_001','CP_002','CP_003','CP_004'}:
+                                db.update_charging_point_status(cp_id, 'available')
+                            else:
+                                db.update_charging_point_status(cp_id, 'offline')
                             
                             # Publicar comando vía Kafka al CP_E
                             central_instance.publish_event('CP_RESUME', {
@@ -961,7 +988,7 @@ async def websocket_handler_http(request):
                             
                             await ws.send_str(json.dumps({
                                 'type': 'resume_cp_success',
-                                'message': f'CP {cp_id} reanudado'
+                                'message': f'CP {cp_id} reanudado (disponible solo si CP_001..CP_004)'
                             }))
                         
                         # Broadcast a todos
@@ -1128,53 +1155,70 @@ async def monitor_timeout_checker():
                     # Finalizar sesión activa si existe
                     conn = db.get_connection()
                     cur = conn.cursor()
-                    cur.execute("""
-                        SELECT s.id, s.user_id, s.energia_kwh, u.nombre as username
+                    cur.execute(
+                        """
+                        SELECT s.id, s.user_id, s.energia_kwh, s.start_time, u.nombre as username
                         FROM charging_sesiones s
                         JOIN usuarios u ON s.user_id = u.id
                         WHERE s.cp_id = ? AND s.estado = 'active'
-                    """, (cp_id,))
+                        ORDER BY s.start_time DESC
+                        LIMIT 1
+                        """,
+                        (cp_id,),
+                    )
                     active_session = cur.fetchone()
-                    
                     if active_session:
                         session_dict = dict(active_session)
                         session_id = session_dict['id']
                         username = session_dict['username']
                         energia = session_dict.get('energia_kwh', 0.0) or 0.0
-                    
+                        start_time = session_dict.get('start_time')  # epoch seconds
+
                         # Finalizar sesión cobrando lo consumido y mantener CP en offline
                         result = db.end_charging_sesion(session_id, energia, cp_status_after='offline')
                         cost = result.get('coste', 0.0) if result else 0.0
-                        print(f"[CENTRAL] Sesión {session_id} finalizada por timeout de Monitor - Usuario: {username}, Energía: {energia:.2f} kWh, Coste: €{cost:.2f}")
-                        # Registrar en event_log el motivo
+                        # Calcular duración real de la sesión (antes mostraba 0 en tickets forzados)
+                        duration_sec = 0
+                        if start_time:
+                            try:
+                                duration_sec = int(time.time() - float(start_time))
+                            except Exception:
+                                duration_sec = 0
+                        print(f"[CENTRAL] Sesión {session_id} finalizada por timeout de Monitor - Usuario: {username}, Energía: {energia:.2f} kWh, Coste: €{cost:.2f}, Duración: {duration_sec}s")
+
+                        # Publicar evento explícito de parada para que cualquier UI detenga contadores locales
                         try:
-                            db.log_event(
-                                correlacion_id=None,
-                                mensaje_id=generate_message_id(),
-                                tipo_evento='CHARGE_ENDED',
-                                component='EV_Central',
-                                detalles={
-                                    'session_id': session_id,
-                                    'cp_id': cp_id,
-                                    'username': username,
-                                    'end_reason': 'monitor_failure',
-                                    'sub_reason': 'monitor_timeout',
-                                    'energy_kwh': energia,
-                                    'cost': cost
-                                }
-                            )
-                        except Exception:
-                            pass
-                        
-                        # Notificar al driver
+                            central_instance.publish_event('charging_stopped', {
+                                'action': 'charging_stopped',
+                                'cp_id': cp_id,
+                                'username': username,
+                                'energy_kwh': energia,
+                                'cost': cost,
+                                'forced': True,
+                                'reason': 'monitor_timeout'
+                            })
+                        except Exception as e:
+                            print(f"[CENTRAL] Error publicando charging_stopped forzado tras timeout monitor: {e}")
+
+                        # Notificar ticket final
                         central_instance.publish_event('CHARGING_TICKET', {
                             'username': username,
                             'cp_id': cp_id,
                             'energy_kwh': energia,
                             'cost': cost,
+                            'duration_sec': duration_sec,
                             'reason': 'monitor_timeout',
                             'message': f'El Monitor del CP dejó de responder (sin heartbeat por {elapsed:.1f}s)'
                         })
+                        try:
+                            shared_state.recently_closed_sessions[session_id] = time.time()
+                        except Exception:
+                            pass
+                        # Forzar refresh estado en panel Monitor/Driver
+                        try:
+                            central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                        except Exception:
+                            pass
                     
                     conn.close()
                     
@@ -1185,6 +1229,122 @@ async def monitor_timeout_checker():
                 print(f"[CENTRAL] Error procesando timeout de Monitor para {cp_id}: {e}")
                 import traceback
                 traceback.print_exc()
+
+async def engine_inactivity_checker():
+    """Detecta inactividad del Engine: CP en 'charging' sin charging_progress reciente."""
+    print("[CENTRAL] Engine inactivity checker iniciado")
+    while True:
+        await asyncio.sleep(3)
+        now = time.time()
+        try:
+            cps = db.get_all_charging_points() if hasattr(db, 'get_all_charging_points') else []
+            for cp in cps:
+                cp_id = cp.get('cp_id') or cp.get('id')
+                estado = cp.get('estado') or cp.get('status')
+                if estado != 'charging':
+                    continue
+                last_prog = shared_state.last_progress_per_cp.get(cp_id, 0)
+                if last_prog == 0:
+                    continue
+                silence = now - last_prog
+                if silence >= shared_state.engine_inactivity_threshold:
+                    # Si el Monitor sigue vivo para este CP, NO cerrar sesión: marcar 'fault' y notificar interrupción
+                    last_hb = shared_state.last_monitor_seen.get(cp_id, 0)
+                    # Usar una ventana de gracia amplia para considerar vivo al Monitor
+                    hb_grace = max(shared_state.monitor_timeout_seconds * 3.0, 15.0)
+                    monitor_alive = (last_hb > 0) and ((now - last_hb) <= hb_grace)
+                    if monitor_alive:
+                        try:
+                            # Obtener sesión activa
+                            conn_e = db.get_connection()
+                            cur_e = conn_e.cursor()
+                            cur_e.execute("""
+                                SELECT s.id, s.user_id, s.energia_kwh, s.start_time, u.nombre as username
+                                FROM charging_sesiones s
+                                JOIN usuarios u ON s.user_id = u.id
+                                WHERE s.cp_id = ? AND s.estado = 'active'
+                                ORDER BY s.start_time DESC
+                                LIMIT 1
+                            """, (cp_id,))
+                            row_e = cur_e.fetchone()
+                            conn_e.close()
+                            if row_e:
+                                session_id_e = row_e['id']
+                                if session_id_e not in shared_state.interrupted_notified_sessions:
+                                    energia_e = (row_e['energia_kwh'] or 0.0)
+                                    username_e = row_e.get('username') or ''
+                                    # Marcar CP como 'fault' si no lo está
+                                    try:
+                                        cp_row_cur = db.get_charging_point(cp_id)
+                                        prev = (cp_row_cur.get('estado') or cp_row_cur.get('status')) if cp_row_cur else None
+                                        if prev != 'fault':
+                                            db.update_charging_point_status(cp_id, 'fault')
+                                            central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                                    except Exception:
+                                        pass
+                                    # Notificar interrupción (sin cerrar sesión)
+                                    central_instance.publish_event('CHARGING_INTERRUPTED', {
+                                        'cp_id': cp_id,
+                                        'session_id': session_id_e,
+                                        'username': username_e,
+                                        'partial_energy_kwh': energia_e,
+                                        'reason': 'engine_inactivity_with_monitor',
+                                        'message': f'Sin progreso {silence:.1f}s con Monitor activo. Sesión interrumpida, esperando recuperación.'
+                                    })
+                                    shared_state.interrupted_notified_sessions.add(session_id_e)
+                                    print(f"[CENTRAL] Inactividad con Monitor vivo en {cp_id}: marcado 'fault' y notificado CHARGING_INTERRUPTED (sesión {session_id_e})")
+                            # Evitar reprocesar inmediatamente este CP
+                            shared_state.last_progress_per_cp[cp_id] = 0
+                            continue
+                        except Exception as e:
+                            print(f"[CENTRAL] Error gestionando inactividad con Monitor vivo en {cp_id}: {e}")
+                    # Si el Monitor NO está vivo (o no hay heartbeat reciente), cerrar sesión y marcar offline
+                    print(f"[CENTRAL] Inactividad Engine detectada en {cp_id} sin Monitor activo ({silence:.1f}s) → marcar fault e interrumpir (no ticket inmediato)")
+                    try:
+                        # Marcar fault en lugar de offline para mantener semántica de avería
+                        db.update_charging_point_status(cp_id, 'fault')
+                        central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                        conn_e = db.get_connection()
+                        cur_e = conn_e.cursor()
+                        cur_e.execute("""
+                            SELECT s.id, s.user_id, s.energia_kwh, s.start_time, u.nombre as username
+                            FROM charging_sesiones s
+                            JOIN usuarios u ON s.user_id = u.id
+                            WHERE s.cp_id = ? AND s.estado = 'active'
+                            ORDER BY s.start_time DESC
+                            LIMIT 1
+                        """, (cp_id,))
+                        row_e = cur_e.fetchone()
+                        conn_e.close()
+                        if row_e:
+                            session_id_e = row_e['id']
+                            energia_e = (row_e['energia_kwh'] or 0.0)
+                            username_e = row_e.get('username') or ''
+                            if session_id_e not in shared_state.interrupted_notified_sessions:
+                                central_instance.publish_event('CHARGING_INTERRUPTED', {
+                                    'cp_id': cp_id,
+                                    'session_id': session_id_e,
+                                    'username': username_e,
+                                    'partial_energy_kwh': energia_e,
+                                    'reason': 'engine_inactivity_no_monitor',
+                                    'message': f'El Engine dejó de enviar progreso ({silence:.1f}s) y no hay Monitor activo. Sesión en pausa.'
+                                })
+                                shared_state.interrupted_notified_sessions.add(session_id_e)
+                            # Registrar evento explícito de error
+                            central_instance.publish_event('CP_ENGINE_ERROR', {
+                                'cp_id': cp_id,
+                                'session_id': session_id_e,
+                                'username': username_e,
+                                'partial_energy_kwh': energia_e,
+                                'message': 'Engine inactivo sin monitor. Estado marcado como averiado. Sin ticket todavía.'
+                            })
+                        shared_state.last_progress_per_cp[cp_id] = 0
+                    except Exception as e:
+                        print(f"[CENTRAL] Error manejando inactividad Engine (sin monitor) en {cp_id}: {e}")
+        except Exception as e:
+            print(f"[CENTRAL] Error en engine_inactivity_checker: {e}")
+            import traceback
+            traceback.print_exc()
 
 async def broadcast_updates():
     """Broadcast actualizaciones periódicas a todos los clientes"""
@@ -1416,6 +1576,93 @@ async def kafka_listener():
                                         print(f"[CENTRAL] Driver {username} desconectado")
                                 except Exception as e:
                                     print(f"[CENTRAL] Error procesando DRIVER_DISCONNECTED: {e}")
+
+                            # ====================================================================
+                            # REQUEST_ACTIVE_SESSIONS: Driver solicita snapshot tras reconexión
+                            # ====================================================================
+                            if et == 'REQUEST_ACTIVE_SESSIONS':
+                                try:
+                                    username = event.get('username')
+                                    if not username:
+                                        print("[CENTRAL] REQUEST_ACTIVE_SESSIONS sin username")
+                                        continue
+                                    user = db.get_user_by_username(username)
+                                    if not user:
+                                        print(f"[CENTRAL] Usuario {username} no encontrado en snapshot")
+                                        continue
+                                    user_id = user.get('id')
+                                    # Obtener sesión activa (sin energia/coste, hacemos query extendida)
+                                    conn_snap = db.get_connection()
+                                    cur_snap = conn_snap.cursor()
+                                    cur_snap.execute("""
+                                        SELECT id, cp_id, start_time, energia_kwh, coste, estado, end_time
+                                        FROM charging_sesiones
+                                        WHERE user_id = ?
+                                        ORDER BY start_time DESC
+                                        LIMIT 5
+                                    """, (user_id,))
+                                    rows = cur_snap.fetchall()
+                                    conn_snap.close()
+                                    sessions_payload = []
+                                    now_ts = time.time()
+                                    for r in rows:
+                                        sid = r['id']
+                                        cp_id_row = r['cp_id']
+                                        estado_row = r['estado']
+                                        energia = r['energia_kwh'] or 0.0
+                                        coste = r['coste'] or 0.0
+                                        end_time = r['end_time']
+                                        # Estado CP
+                                        cp_row = db.get_charging_point(cp_id_row) if hasattr(db,'get_charging_point') else None
+                                        cp_status_row = None
+                                        if cp_row:
+                                            cp_status_row = cp_row.get('estado') or cp_row.get('status')
+                                        # Interrumpida por fallo Engine?
+                                        fail_ts = getattr(shared_state, 'engine_failure_seen_at', {}).get(cp_id_row, 0)
+                                        last_hb = shared_state.last_monitor_seen.get(cp_id_row, 0)
+                                        hb_grace = max(shared_state.monitor_timeout_seconds * 3.0, 15.0)
+                                        monitor_alive = last_hb > 0 and (now_ts - last_hb) <= hb_grace
+                                        engine_fail_recent = fail_ts > 0 and (now_ts - fail_ts) <= 60 and monitor_alive
+                                        interrupted = engine_fail_recent and estado_row == 'active' and cp_status_row == 'fault'
+                                        # Clasificar tipo de snapshot
+                                        if estado_row == 'active':
+                                            sess_state = 'fault' if cp_status_row == 'fault' else 'active'
+                                            ticket_pending = interrupted  # Mientras falla el Engine no habrá ticket final
+                                            sessions_payload.append({
+                                                'session_id': sid,
+                                                'cp_id': cp_id_row,
+                                                'session_state': sess_state,
+                                                'energy_kwh': energia,
+                                                'cost': coste,
+                                                'interrupted': interrupted,
+                                                'engine_fail_recent': engine_fail_recent,
+                                                'ticket_pending': ticket_pending,
+                                                'start_time': r['start_time']
+                                            })
+                                        elif estado_row == 'completed':
+                                            # Solo incluir completadas recientes (<15 min) para resumen diferido
+                                            if end_time and (now_ts - end_time) <= 900:
+                                                duration_sec = end_time - r['start_time'] if end_time else 0
+                                                sessions_payload.append({
+                                                    'session_id': sid,
+                                                    'cp_id': cp_id_row,
+                                                    'session_state': 'ended',
+                                                    'energy_kwh': energia,
+                                                    'cost': coste,
+                                                    'duration_sec': duration_sec,
+                                                    'ticket_pending': False,
+                                                    'start_time': r['start_time'],
+                                                    'end_time': end_time
+                                                })
+                                    central_instance.publish_event('ACTIVE_SESSIONS_STATUS', {
+                                        'event_type': 'ACTIVE_SESSIONS_STATUS',
+                                        'username': username,
+                                        'sessions': sessions_payload,
+                                        'timestamp': time.time()
+                                    })
+                                    print(f"[CENTRAL] Snapshot sesiones enviado a {username}: {len(sessions_payload)} elementos")
+                                except Exception as e:
+                                    print(f"[CENTRAL] Error procesando REQUEST_ACTIVE_SESSIONS: {e}")
                             
                             # ====================================================================
                             # REQUISITO b) Autorización de suministros - procesar aquí (no en broadcast)
@@ -1984,10 +2231,24 @@ async def broadcast_kafka_event(event):
             try:
                 # Registrar heartbeat implícito
                 shared_state.last_monitor_seen[cp_id_ok] = time.time()
-                # Cambiar estado del CP a 'available' en BD
-                db.update_charging_point_status(cp_id_ok, 'available')
-                print(f"[CENTRAL] Salud confirmada por Monitor para {cp_id_ok} → estado 'available'")
-                # Publicar CP_INFO al Monitor para refrescar paneles
+                # Consultar estado actual antes de forzar 'available'
+                current_status = None
+                try:
+                    current_status = db.get_charging_point_status(cp_id_ok)
+                except Exception:
+                    current_status = None
+                # Sólo permitir 'available' para CP_001..CP_004 y si NO está offline
+                allowed_cps = {'CP_001','CP_002','CP_003','CP_004'}
+                if cp_id_ok in allowed_cps and current_status != 'offline':
+                    db.update_charging_point_status(cp_id_ok, 'available')
+                    print(f"[CENTRAL] Salud confirmada para {cp_id_ok} → estado 'available' (permitido)")
+                else:
+                    # Mantener offline o estado actual para CP fuera del rango permitido
+                    if cp_id_ok not in allowed_cps:
+                        print(f"[CENTRAL] ENGINE_HEALTH_OK: {cp_id_ok} no está en lista permitida (1..4) → estado permanece '{current_status}'")
+                    else:
+                        print(f"[CENTRAL] ENGINE_HEALTH_OK ignorado: {cp_id_ok} permanece 'offline'")
+                # Publicar CP_INFO al Monitor para refrescar paneles (siempre para reflejar estado actual)
                 central_instance.publish_cp_info_to_monitor(cp_id_ok, force=True)
             except Exception as e:
                 print(f"[CENTRAL] Error procesando ENGINE_HEALTH_OK para {cp_id_ok}: {e}")
@@ -2038,7 +2299,8 @@ async def broadcast_kafka_event(event):
                     cp_existing = None
                 if cp_existing:
                     prev_status = cp_existing.get('estado') or cp_existing.get('status')
-                    if cp_id in ('CP_001', 'CP_002') and prev_status == 'available':
+                    # Mantener 'available' en re-registro para los 4 CP principales
+                    if cp_id in ('CP_001', 'CP_002', 'CP_003', 'CP_004') and prev_status == 'available':
                         estado = 'available'
                 print(f"[CENTRAL] Auto-reg CP on connect: cp_id={cp_id}, loc={localizacion}, max_kw={max_kw}, tarifa={tarifa_kwh}")
                 # Verificar si el CP ya existe antes de registrar (cp_existing calculado arriba)
@@ -2176,12 +2438,74 @@ async def broadcast_kafka_event(event):
                     central_instance.publish_cp_info_to_monitor(cp_id)
         
         elif action in ['charging_stopped']:
-            # Finalizar sesión de carga y liberar CP
+            # Finalizar sesión de carga y liberar CP (salvo que sea consecuencia de caída de Engine)
             username = event.get('username')
             user_id = event.get('user_id')
             energy_kwh = event.get('energy_kwh', 0)
-            
+            forced = event.get('forced')  # Parada forzosa (monitor timeout u otra causa)
+            reason = event.get('reason') or ('forced_stop' if forced else 'manual_stop')
+
             print(f"[CENTRAL] Procesando charging_stopped: user={username}, cp={cp_id}, energy={energy_kwh}")
+
+            # -----------------------------------------------------------------
+            # GUARD CLAUSE: Si el Engine ha caído recientemente con Monitor vivo,
+            # NO cerrar ni ticketear. Emitimos interrupción + error y, si procede,
+            # forzamos estado 'fault'. Evita comportarse como kill de Monitor.
+            # -----------------------------------------------------------------
+            recent_fail_ts = getattr(shared_state, 'engine_failure_seen_at', {}).get(cp_id, 0)
+            fail_age = time.time() - recent_fail_ts if recent_fail_ts else 9999
+            # ¿Monitor vivo?
+            last_hb_cs = shared_state.last_monitor_seen.get(cp_id, 0) if cp_id else 0
+            hb_grace_cs = max(shared_state.monitor_timeout_seconds * 3.0, 15.0)
+            monitor_alive_cs = last_hb_cs > 0 and (time.time() - last_hb_cs) <= hb_grace_cs
+            blocked_reasons = {'manual_stop', 'forced_stop', 'monitor_timeout'}
+            engine_fail_active = (cp_id and monitor_alive_cs and fail_age <= 60)
+            if engine_fail_active and reason not in blocked_reasons and not forced:
+                try:
+                    # Marcar CP como 'fault' si no lo está
+                    try:
+                        current_cp_status = db.get_charging_point_status(cp_id)
+                    except Exception:
+                        current_cp_status = None
+                    if current_cp_status != 'fault':
+                        db.update_charging_point_status(cp_id, 'fault')
+                        central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                    active_sessions_cf = db.get_active_sessions_for_cp(cp_id) if hasattr(db, 'get_active_sessions_for_cp') else []
+                    if not active_sessions_cf and hasattr(db, 'get_all_sessions'):
+                        all_sessions_cf = db.get_all_sessions()
+                        active_sessions_cf = [s for s in all_sessions_cf if s.get('cp_id') == cp_id and s.get('estado') == 'active']
+                    if active_sessions_cf:
+                        sess_cf = active_sessions_cf[0]
+                        sess_id_cf = sess_cf.get('id')
+                        energia_parcial_cf = sess_cf.get('energia_kwh') or 0.0
+                        user_id_cf = sess_cf.get('user_id')
+                        user_cf = db.get_user_by_id(user_id_cf) if hasattr(db, 'get_user_by_id') else None
+                        username_cf = username or (user_cf.get('username') if user_cf else '')
+                        if sess_id_cf not in getattr(shared_state, 'interrupted_notified_sessions', set()):
+                            central_instance.publish_event('CHARGING_INTERRUPTED', {
+                                'cp_id': cp_id,
+                                'session_id': sess_id_cf,
+                                'username': username_cf,
+                                'user_id': user_id_cf,
+                                'partial_energy_kwh': energia_parcial_cf,
+                                'reason': 'engine_failure_charging_stopped',
+                                'message': 'Interrupción por fallo de Engine. Sesión sigue abierta sin ticket.'
+                            })
+                            try:
+                                shared_state.interrupted_notified_sessions.add(sess_id_cf)
+                            except Exception:
+                                pass
+                        central_instance.publish_event('CP_ENGINE_ERROR', {
+                            'cp_id': cp_id,
+                            'session_id': sess_id_cf,
+                            'username': username_cf,
+                            'partial_energy_kwh': energia_parcial_cf,
+                            'message': 'Fallo de Engine detectado. Sesión sigue abierta sin ticket final.'
+                        })
+                        print(f"[CENTRAL] charging_stopped convertido en interrupción (ENGINE_FAILURE reciente) sesión={sess_id_cf}")
+                        return
+                except Exception as e:
+                    print(f"[CENTRAL] Error en guard clause engine_fail_active en charging_stopped: {e}")
             
             # ENVIAR COMANDO AL CP_E PARA QUE DETENGA LA CARGA
             if cp_id:
@@ -2190,9 +2514,101 @@ async def broadcast_kafka_event(event):
                     'cp_id': cp_id,
                     'username': username,
                     'user_id': user_id,
-                    'energy_kwh': energy_kwh
+                    'energy_kwh': energy_kwh,
+                    'forced': forced,
+                    'reason': reason
                 })
                 print(f"[CENTRAL] Comando charging_stopped enviado a CP_E {cp_id}")
+
+            # Si es parada forzosa, intentar cerrar inmediatamente la sesión activa por CP (aunque falte user_id)
+            if forced and cp_id:
+                try:
+                    conn_f = db.get_connection()
+                    cur_f = conn_f.cursor()
+                    cur_f.execute("""
+                        SELECT s.id, s.user_id, s.start_time, s.energia_kwh
+                        FROM charging_sesiones s
+                        WHERE s.cp_id = ? AND s.estado = 'active'
+                        ORDER BY s.start_time DESC
+                        LIMIT 1
+                    """, (cp_id,))
+                    row = cur_f.fetchone()
+                    conn_f.close()
+                    if row:
+                        session_id_f = row['id']
+                        user_id_f = row['user_id']
+                        start_time_f = row['start_time']
+                        # Usar la energía reportada si es mayor, si no la de la sesión
+                        energia_final = energy_kwh if energy_kwh >= (row['energia_kwh'] or 0) else (row['energia_kwh'] or 0)
+                        result_f = db.end_charging_sesion(session_id_f, energia_final, cp_status_after='offline')
+                        final_cost_f = result_f.get('coste', 0.0) if result_f else 0.0
+                        duration_sec_f = 0
+                        if start_time_f:
+                            try:
+                                duration_sec_f = int(time.time() - float(start_time_f))
+                            except Exception:
+                                duration_sec_f = 0
+                        # BLOQUEO: Si hubo fallo Engine reciente y monitor vivo, NO enviar ticket, solo marcar fault y error.
+                        recent_fail_forced = getattr(shared_state, 'engine_failure_seen_at', {}).get(cp_id, 0)
+                        last_hb_forced = shared_state.last_monitor_seen.get(cp_id, 0)
+                        hb_grace_forced = max(shared_state.monitor_timeout_seconds * 3.0, 15.0)
+                        monitor_alive_forced = last_hb_forced > 0 and (time.time() - last_hb_forced) <= hb_grace_forced
+                        fail_age_forced = time.time() - recent_fail_forced if recent_fail_forced else 9999
+                        engine_fail_path = monitor_alive_forced and fail_age_forced <= 60
+                        if engine_fail_path:
+                            # Mantener sesión abierta, estado fault, y emitir error (sin ticket)
+                            try:
+                                current_cp_status_f = db.get_charging_point_status(cp_id)
+                                if current_cp_status_f != 'fault':
+                                    db.update_charging_point_status(cp_id, 'fault')
+                                    central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                            except Exception:
+                                pass
+                            central_instance.publish_event('CP_ENGINE_ERROR', {
+                                'cp_id': cp_id,
+                                'session_id': session_id_f,
+                                'username': username,
+                                'partial_energy_kwh': energia_final,
+                                'message': 'Parada forzada mientras Engine caído. Sesión sigue abierta, sin ticket.'
+                            })
+                            # Notificación de interrupción (si no enviada)
+                            if session_id_f not in getattr(shared_state, 'interrupted_notified_sessions', set()):
+                                central_instance.publish_event('CHARGING_INTERRUPTED', {
+                                    'cp_id': cp_id,
+                                    'session_id': session_id_f,
+                                    'username': username,
+                                    'partial_energy_kwh': energia_final,
+                                    'reason': 'engine_failure_forced_stop',
+                                    'message': 'Stopped forzado durante fallo de Engine. Esperando recuperación.'
+                                })
+                                try:
+                                    shared_state.interrupted_notified_sessions.add(session_id_f)
+                                except Exception:
+                                    pass
+                            print(f"[CENTRAL] (FORZADA) Parada en fallo Engine: sesión {session_id_f} permanece abierta sin ticket")
+                        else:
+                            central_instance.publish_event('CHARGING_TICKET', {
+                            'username': username,
+                            'user_id': user_id_f,
+                            'cp_id': cp_id,
+                            'energy_kwh': energia_final,
+                            'cost': final_cost_f,
+                            'duration_sec': duration_sec_f,
+                            'reason': reason,
+                            'forced': True,
+                            'timestamp': time.time()
+                            })
+                            print(f"[CENTRAL] (FORZADA) Sesión {session_id_f} cerrada con ticket: energía={energia_final:.2f} kWh, coste=€{final_cost_f:.2f}, duración={duration_sec_f}s")
+                        # Marcar sesión como cerrada (ignorar progresos tardíos)
+                        try:
+                            shared_state.recently_closed_sessions[session_id_f] = time.time()
+                        except Exception:
+                            pass
+                        # Publicar CP_INFO para refrescar paneles tras liberación
+                        central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                        return  # Evitar flujo estándar (ya cerrado)
+                except Exception as e:
+                    print(f"[CENTRAL] Error cerrando sesión forzada por cp_id {cp_id}: {e}")
             
             # 1. Si no tenemos user_id, buscar por username
             if not user_id and username:
@@ -2224,7 +2640,45 @@ async def broadcast_kafka_event(event):
                                 print(f"[CENTRAL] Sesión {session_id} finalizada: {energy_kwh} kWh, coste=€{final_cost:.2f}")
                                 
                                 # ENVIAR TICKET FINAL AL CONDUCTOR (vía Kafka)
-                                central_instance.publish_event('CHARGING_TICKET', {
+                                # Bloqueo: si hubo fallo Engine reciente y monitor vivo, sustituir ticket por error y mantener sesión abierta
+                                recent_fail_manual = getattr(shared_state, 'engine_failure_seen_at', {}).get(cp_id, 0)
+                                last_hb_manual = shared_state.last_monitor_seen.get(cp_id, 0)
+                                hb_grace_manual = max(shared_state.monitor_timeout_seconds * 3.0, 15.0)
+                                monitor_alive_manual = last_hb_manual > 0 and (time.time() - last_hb_manual) <= hb_grace_manual
+                                fail_age_manual = time.time() - recent_fail_manual if recent_fail_manual else 9999
+                                engine_fail_path_manual = monitor_alive_manual and fail_age_manual <= 60
+                                if engine_fail_path_manual:
+                                    try:
+                                        current_cp_status_m = db.get_charging_point_status(cp_id)
+                                        if current_cp_status_m != 'fault':
+                                            db.update_charging_point_status(cp_id, 'fault')
+                                            central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                                    except Exception:
+                                        pass
+                                    central_instance.publish_event('CP_ENGINE_ERROR', {
+                                        'username': username,
+                                        'user_id': user_id,
+                                        'cp_id': cp_id,
+                                        'session_id': session_id,
+                                        'partial_energy_kwh': energy_kwh,
+                                        'message': 'Parada manual recibida durante fallo de Engine. Sesión sigue abierta sin ticket.'
+                                    })
+                                    if session_id not in getattr(shared_state,'interrupted_notified_sessions', set()):
+                                        central_instance.publish_event('CHARGING_INTERRUPTED', {
+                                            'cp_id': cp_id,
+                                            'session_id': session_id,
+                                            'username': username,
+                                            'partial_energy_kwh': energy_kwh,
+                                            'reason': 'engine_failure_manual_stop',
+                                            'message': 'Stop manual durante fallo de Engine. Esperando recuperación.'
+                                        })
+                                        try:
+                                            shared_state.interrupted_notified_sessions.add(session_id)
+                                        except Exception:
+                                            pass
+                                    print(f"[CENTRAL] Ticket suprimido por fallo Engine reciente en sesión {session_id}")
+                                else:
+                                    central_instance.publish_event('CHARGING_TICKET', {
                                     'username': username,
                                     'user_id': user_id,
                                     'cp_id': cp_id,
@@ -2233,8 +2687,13 @@ async def broadcast_kafka_event(event):
                                     'duration_sec': duration_sec,
                                     'reason': 'manual_stop',
                                     'timestamp': time.time()
-                                })
-                                print(f"[CENTRAL] Ticket enviado a conductor {username}")
+                                    })
+                                    print(f"[CENTRAL] Ticket enviado a conductor {username}")
+                                # Marcar sesión como cerrada para ignorar charging_progress tardíos
+                                try:
+                                    shared_state.recently_closed_sessions[session_id] = time.time()
+                                except Exception:
+                                    pass
                             else:
                                 print(f"[CENTRAL] Error finalizando sesión {session_id}")
                         
@@ -2243,25 +2702,31 @@ async def broadcast_kafka_event(event):
                         central_instance.publish_cp_info_to_monitor(cp_id)
                     else:
                         print(f"[CENTRAL] No se encontró sesión activa para user_id={user_id}")
-                        # Liberar el CP de todas formas
+                        # Liberar el CP solo si no está offline
                         if cp_id:
-                            db.update_charging_point_status(cp_id, 'available')
+                            current_status = db.get_charging_point_status(cp_id)
+                            if current_status != 'offline':
+                                db.update_charging_point_status(cp_id, 'available')
                             #  PUBLICAR CAMBIO DE ESTADO AL MONITOR
                             central_instance.publish_cp_info_to_monitor(cp_id)
                 else:
                     print(f"[CENTRAL] No se pudo obtener user_id para {username}")
-                    # Liberar el CP de todas formas
+                    # Liberar el CP solo si no está offline
                     if cp_id:
-                        db.update_charging_point_status(cp_id, 'available')
+                        current_status = db.get_charging_point_status(cp_id)
+                        if current_status != 'offline':
+                            db.update_charging_point_status(cp_id, 'available')
                         #  PUBLICAR CAMBIO DE ESTADO AL MONITOR
                         central_instance.publish_cp_info_to_monitor(cp_id)
             except Exception as e:
                 print(f"[CENTRAL] Error procesando charging_stopped: {e}")
                 import traceback
                 traceback.print_exc()
-                # Liberar el CP de todas formas
+                # Liberar el CP solo si no está offline
                 if cp_id:
-                    db.update_charging_point_status(cp_id, 'available')
+                    current_status = db.get_charging_point_status(cp_id)
+                    if current_status != 'offline':
+                        db.update_charging_point_status(cp_id, 'available')
                     #  PUBLICAR CAMBIO DE ESTADO AL MONITOR
                     central_instance.publish_cp_info_to_monitor(cp_id)
         
@@ -2293,13 +2758,17 @@ async def broadcast_kafka_event(event):
             except Exception as e:
                 print(f"[CENTRAL] Error cancelando sesión por timeout: {e}")
             
-            # Liberar el CP (cambiar a 'available')
+            # Liberar el CP (cambiar a 'available') salvo que esté 'offline'
             try:
-                    if cp_id:
+                if cp_id:
+                    current_status = db.get_charging_point_status(cp_id)
+                    if current_status != 'offline':
                         db.update_charging_point_status(cp_id, 'available')
                         print(f"[CENTRAL] CP {cp_id} liberado después de timeout")
-                        #  PUBLICAR CAMBIO DE ESTADO AL MONITOR
-                        central_instance.publish_cp_info_to_monitor(cp_id)
+                    else:
+                        print(f"[CENTRAL] charging_timeout: CP {cp_id} permanece 'offline' (monitor caído/timeout)")
+                    #  PUBLICAR CAMBIO/ESTADO AL MONITOR
+                    central_instance.publish_cp_info_to_monitor(cp_id)
             except Exception as e:
                 print(f"[CENTRAL] Error liberando CP {cp_id}: {e}")
         
@@ -2352,6 +2821,10 @@ async def broadcast_kafka_event(event):
                                     'timestamp': time.time()
                                 })
                                 print(f"[CENTRAL] Ticket enviado a conductor {username}")
+                                try:
+                                    shared_state.recently_closed_sessions[session_id] = time.time()
+                                except Exception:
+                                    pass
                             else:
                                 print(f"[CENTRAL] Error finalizando sesión {session_id}")
                         
@@ -2359,13 +2832,17 @@ async def broadcast_kafka_event(event):
                     else:
                         print(f"[CENTRAL] No se encontró sesión activa para user_id={user_id}")
                         if cp_id:
-                            db.update_charging_point_status(cp_id, 'available')
+                            current_status = db.get_charging_point_status(cp_id)
+                            if current_status != 'offline':
+                                db.update_charging_point_status(cp_id, 'available')
                             #  PUBLICAR CAMBIO DE ESTADO AL MONITOR
                             central_instance.publish_cp_info_to_monitor(cp_id)
                 else:
                     print(f"[CENTRAL] No se pudo obtener user_id para {username}")
                     if cp_id:
-                        db.update_charging_point_status(cp_id, 'available')
+                        current_status = db.get_charging_point_status(cp_id)
+                        if current_status != 'offline':
+                            db.update_charging_point_status(cp_id, 'available')
                         #  PUBLICAR CAMBIO DE ESTADO AL MONITOR
                         central_instance.publish_cp_info_to_monitor(cp_id)
             except Exception as e:
@@ -2373,7 +2850,9 @@ async def broadcast_kafka_event(event):
                 import traceback
                 traceback.print_exc()
                 if cp_id:
-                    db.update_charging_point_status(cp_id, 'available')
+                    current_status = db.get_charging_point_status(cp_id)
+                    if current_status != 'offline':
+                        db.update_charging_point_status(cp_id, 'available')
                     #  PUBLICAR CAMBIO DE ESTADO AL MONITOR
                     central_instance.publish_cp_info_to_monitor(cp_id)
         
@@ -2385,26 +2864,45 @@ async def broadcast_kafka_event(event):
             # porque el Engine envía actualizaciones cada segundo
             if not hasattr(shared_state, '_last_progress_update'):
                 shared_state._last_progress_update = {}  # {(username, cp_id): timestamp}
-            
+
             username = event.get('username')
             energy_kwh = event.get('energy_kwh', 0.0)
             cost = event.get('cost', 0.0)
-            
-            # Verificar throttling por usuario y CP
+            # Registrar timestamp de progreso para detección de inactividad
+            if cp_id:
+                shared_state.last_progress_per_cp[cp_id] = time.time()
+            # Ignorar progreso si el CP no está en 'charging' o si la sesión se cerró recientemente
+            try:
+                if cp_id:
+                    cp_row = db.get_charging_point(cp_id)
+                    cp_state = (cp_row.get('estado') or cp_row.get('status')) if cp_row else None
+                    # Aceptar progreso también cuando el CP está en 'fault' si la sesión sigue activa
+                    if cp_state and cp_state not in ('charging', 'fault'):
+                        if CENTRAL_VERBOSE:
+                            print(f"[CENTRAL] Ignorando charging_progress para {cp_id} en estado {cp_state}")
+                        return
+                if username:
+                    user = db.get_user_by_username(username)
+                    if user:
+                        user_id = user.get('id')
+                        session = db.get_active_sesion_for_user(user_id)
+                        if not session:
+                            return
+                        sid = session.get('id')
+                        closed_at = shared_state.recently_closed_sessions.get(sid)
+                        if closed_at and (current_time - closed_at) < getattr(shared_state, 'closed_session_ttl', 10.0):
+                            return
+            except Exception:
+                pass
+
             progress_key = (username or '', cp_id or '')
             last_update_time = shared_state._last_progress_update.get(progress_key, 0)
-            
-            # Solo actualizar si pasó al menos 0.5 segundos desde la última actualización
-            # Esto reduce el ruido en logs pero permite actualizaciones razonables
             if current_time - last_update_time < 0.5:
-                # Silenciar para no saturar logs, pero no es un error
-                pass  # Omitir actualización muy frecuente
+                pass
             else:
                 shared_state._last_progress_update[progress_key] = current_time
                 if CENTRAL_VERBOSE:
                     print(f"[CENTRAL] Progreso de carga: {username} → {energy_kwh:.2f} kWh, €{cost:.2f}")
-                
-                # Actualizar energía en la sesión activa de la BD
                 try:
                     if username:
                         user = db.get_user_by_username(username)
@@ -2413,7 +2911,6 @@ async def broadcast_kafka_event(event):
                             session = db.get_active_sesion_for_user(user_id)
                             if session:
                                 session_id = session.get('id')
-                                # Actualizar energia_kwh en la sesión
                                 conn = db.get_connection()
                                 cur = conn.cursor()
                                 cur.execute("""
@@ -2423,7 +2920,6 @@ async def broadcast_kafka_event(event):
                                 """, (energy_kwh, session_id))
                                 conn.commit()
                                 conn.close()
-                                # Solo imprimir cada 5 segundos para reducir ruido
                                 if int(current_time) % 5 == 0:
                                     print(f"[CENTRAL] Sesión {session_id} actualizada: {energy_kwh:.2f} kWh")
                 except Exception as e:
@@ -2500,8 +2996,186 @@ async def broadcast_kafka_event(event):
                         print(f"[CENTRAL] Ignorando cp_status_change a 'offline' para CP {cp_id} - acaba de registrarse como 'available' hace {time_since_reg:.1f}s")
                         print(f"[CENTRAL]    Esto previene que mensajes antiguos de Kafka o reinicios causen desconexión incorrecta")
                         return
+
+            # Recuperar lógica de interrupción: charging→offline + fallo reciente + monitor vivo => fault + CHARGING_INTERRUPTED
+            if status == 'offline':
+                now_ts2 = time.time()
+                last_fail_ts2 = getattr(shared_state, 'engine_failure_seen_at', {}).get(cp_id, 0)
+                last_hb2 = shared_state.last_monitor_seen.get(cp_id, 0)
+                hb_grace2 = max(shared_state.monitor_timeout_seconds * 3.0, 15.0)
+                monitor_alive2 = last_hb2 > 0 and (now_ts2 - last_hb2) <= hb_grace2
+                failure_recent2 = last_fail_ts2 > 0 and (now_ts2 - last_fail_ts2) <= 25.0
+                if monitor_alive2 and failure_recent2:
+                    print(f"[CENTRAL] DIAG: offline mientras charging con monitor vivo y fallo Engine reciente → fault. hb_age={(now_ts2 - last_hb2):.1f}s fail_age={(now_ts2 - last_fail_ts2):.1f}s")
+                    try:
+                        cp_row_cur = db.get_charging_point(cp_id)
+                        prev = (cp_row_cur.get('estado') or cp_row_cur.get('status')) if cp_row_cur else None
+                        if prev != 'fault':
+                            db.update_charging_point_status(cp_id, 'fault')
+                            central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                        # Sesión activa
+                        conn_it = db.get_connection()
+                        cur_it = conn_it.cursor()
+                        cur_it.execute("""
+                            SELECT s.id, s.user_id, s.energia_kwh, s.start_time, u.nombre as username
+                            FROM charging_sesiones s
+                            JOIN usuarios u ON s.user_id = u.id
+                            WHERE s.cp_id = ? AND s.estado = 'active'
+                            ORDER BY s.start_time DESC
+                            LIMIT 1
+                        """, (cp_id,))
+                        active_row = cur_it.fetchone()
+                        conn_it.close()
+                        if active_row:
+                            session_id_it = active_row['id']
+                            if session_id_it not in shared_state.interrupted_notified_sessions:
+                                energia_it = (active_row['energia_kwh'] or 0.0)
+                                username_it = active_row.get('username') or ''
+                                central_instance.publish_event('CHARGING_INTERRUPTED', {
+                                    'cp_id': cp_id,
+                                    'session_id': session_id_it,
+                                    'username': username_it,
+                                    'partial_energy_kwh': energia_it,
+                                    'reason': 'engine_failure_offline_transition',
+                                    'message': 'Engine caído pero monitor vivo. Sesión en pausa (fault) esperando recuperación.'
+                                })
+                                shared_state.interrupted_notified_sessions.add(session_id_it)
+                                print(f"[CENTRAL] charging→offline convertido a fault (interrupción) CP {cp_id} sesión {session_id_it}")
+                        return
+                    except Exception as e:
+                        print(f"[CENTRAL] Error aplicando interrupción charging→offline en {cp_id}: {e}")
+            if status == 'offline' and current_status == 'charging':
+                # NUEVO: No cerrar ni ticketear; marcar fault + interrupción + evento de error
+                # Solo aplica si el Monitor está vivo (si no, respetar 'offline')
+                try:
+                    last_hb_nc = shared_state.last_monitor_seen.get(cp_id, 0)
+                    hb_grace_nc = max(shared_state.monitor_timeout_seconds * 3.0, 15.0)
+                    monitor_alive_nc = last_hb_nc > 0 and (time.time() - last_hb_nc) <= hb_grace_nc
+                    if not monitor_alive_nc:
+                        # Monitor caído → mantener 'offline'
+                        print(f"[CENTRAL] DIAG: charging→offline sin correlación y monitor NO vivo → tratar como caída de monitor (offline pegajoso) cp={cp_id}")
+                        # Continuar a sincronización normal sin convertir a fault
+                    else:
+                        print(f"[CENTRAL] DIAG: charging→offline sin correlación con monitor vivo → reclasificar a fault (averiado) cp={cp_id}")
+                        # Marcar estado 'fault' si no lo está
+                        if current_status != 'fault':
+                            db.update_charging_point_status(cp_id, 'fault')
+                            central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                        # Recuperar sesión activa
+                        conn_t = db.get_connection()
+                        cur_t = conn_t.cursor()
+                        cur_t.execute("""
+                            SELECT s.id, s.user_id, s.energia_kwh, s.start_time, u.nombre as username
+                            FROM charging_sesiones s
+                            JOIN usuarios u ON s.user_id = u.id
+                            WHERE s.cp_id = ? AND s.estado = 'active'
+                            ORDER BY s.start_time DESC
+                            LIMIT 1
+                        """, (cp_id,))
+                        active_row = cur_t.fetchone()
+                        conn_t.close()
+                        if active_row:
+                            session_id_t = active_row['id']
+                            energia_t = (active_row['energia_kwh'] or 0.0)
+                            username_t = active_row.get('username') or ''
+                            # Notificar interrupción si no se notificó
+                            if session_id_t not in shared_state.interrupted_notified_sessions:
+                                central_instance.publish_event('CHARGING_INTERRUPTED', {
+                                    'cp_id': cp_id,
+                                    'session_id': session_id_t,
+                                    'username': username_t,
+                                    'partial_energy_kwh': energia_t,
+                                    'reason': 'engine_unreachable_no_correlation',
+                                    'message': 'El Engine del CP no responde. Sesión pausada (averiado) sin ticket final.'
+                                })
+                                shared_state.interrupted_notified_sessions.add(session_id_t)
+                            # Evento explícito de error de Engine inaccesible
+                            central_instance.publish_event('CP_ENGINE_ERROR', {
+                                'cp_id': cp_id,
+                                'session_id': session_id_t,
+                                'username': username_t,
+                                'partial_energy_kwh': energia_t,
+                                'message': 'El CP no puede conectar con su Engine. Estado marcado como averiado.'
+                            })
+                            print(f"[CENTRAL] charging→offline sin correlación convertido a fault + interrupción CP {cp_id} sesión {session_id_t}")
+                        return  # Importante: no continuar al flujo estándar (sin ticket)
+                except Exception as e:
+                    print(f"[CENTRAL] Error manejando charging→offline sin correlación en {cp_id}: {e}")
             
+            # -----------------------------------------------------------------
+            # FALLBACK OFFLINE→FAULT: Si llega un cp_status_change a 'offline' y
+            # hay sesión activa o progreso reciente pero no se aplicó la lógica
+            # anterior (retorno temprano), forzar estado 'fault'. Evita quedar
+            # simplemente 'offline' tras caída del Engine sin correlación clara.
+            # -----------------------------------------------------------------
+            if status == 'offline':
+                try:
+                    final_state_before_fb = db.get_charging_point_status(cp_id)
+                    if final_state_before_fb != 'fault':
+                        # Solo aplicar fallback si el Monitor está vivo
+                        last_hb_fb2 = shared_state.last_monitor_seen.get(cp_id, 0)
+                        hb_grace_fb2 = max(shared_state.monitor_timeout_seconds * 3.0, 15.0)
+                        monitor_alive_fb2 = last_hb_fb2 > 0 and (time.time() - last_hb_fb2) <= hb_grace_fb2
+                        if not monitor_alive_fb2:
+                            # Monitor caído/ausente → mantener 'offline'
+                            print(f"[CENTRAL] DIAG: FALLBACK offline→fault omitido (monitor NO vivo) cp={cp_id}")
+                            raise SystemExit  # salir del try interno sin aplicar fallback
+                        # ¿Sesión activa?
+                        active_fb = []
+                        if hasattr(db, 'get_active_sessions_for_cp'):
+                            active_fb = db.get_active_sessions_for_cp(cp_id) or []
+                        if not active_fb and hasattr(db, 'get_all_sessions'):
+                            all_fb = db.get_all_sessions()
+                            active_fb = [s for s in all_fb if s.get('cp_id') == cp_id and s.get('estado') == 'active']
+                        # ¿Progreso reciente?
+                        last_prog_fb = getattr(shared_state, 'last_progress_per_cp', {}).get(cp_id, 0)
+                        prog_age_fb = time.time() - last_prog_fb if last_prog_fb else 9999
+                        progress_recent_fb = prog_age_fb < (getattr(shared_state, 'engine_inactivity_threshold', 20.0) * 2.0)
+                        if active_fb or progress_recent_fb:
+                            db.update_charging_point_status(cp_id, 'fault')
+                            central_instance.publish_cp_info_to_monitor(cp_id, force=True)
+                            print(f"[CENTRAL] DIAG: FALLBACK aplicado offline→fault cp={cp_id} prog_age={prog_age_fb:.1f}s sesiones={len(active_fb)} monitor_alive=True")
+                            if active_fb:
+                                sess_fb = active_fb[0]
+                                sess_id_fb = sess_fb.get('id')
+                                energia_fb = sess_fb.get('energia_kwh') or 0.0
+                                user_id_fb = sess_fb.get('user_id')
+                                user_fb = db.get_user_by_id(user_id_fb) if hasattr(db, 'get_user_by_id') else None
+                                username_fb = user_fb.get('username') if user_fb else ''
+                                if sess_id_fb not in getattr(shared_state, 'interrupted_notified_sessions', set()):
+                                    central_instance.publish_event('CHARGING_INTERRUPTED', {
+                                        'cp_id': cp_id,
+                                        'session_id': sess_id_fb,
+                                        'username': username_fb,
+                                        'user_id': user_id_fb,
+                                        'partial_energy_kwh': energia_fb,
+                                        'reason': 'offline_fallback_fault',
+                                        'message': 'Estado offline forzado a averiado para mantener sesión en pausa.'
+                                    })
+                                    try:
+                                        shared_state.interrupted_notified_sessions.add(sess_id_fb)
+                                    except Exception:
+                                        pass
+                                central_instance.publish_event('CP_ENGINE_ERROR', {
+                                    'cp_id': cp_id,
+                                    'session_id': sess_id_fb,
+                                    'username': username_fb,
+                                    'partial_energy_kwh': energia_fb,
+                                    'message': 'Transición a offline sin correlación; marcado como averiado.'
+                                })
+                except SystemExit:
+                    pass
+                except Exception as e:
+                    print(f"[CENTRAL] Error en fallback offline→fault para {cp_id}: {e}")
+
             # Solo si el estado cambió realmente, actualizar BD
+            # PROTECCIÓN: Cuando un CP está 'offline' (p.ej., por kill/timeout del Monitor),
+            # ignorar cualquier intento de cambio de estado que no sea 'offline'.
+            # Esto hace que el estado 'offline' sea pegajoso (sticky) hasta que un flujo explícito lo cambie.
+            if current_status == 'offline' and status != 'offline':
+                print(f"[CENTRAL] Ignorando cp_status_change a '{status}' para CP {cp_id} - permanece 'offline' (monitor caído/timeout)")
+                return
+            
             print(f"[CENTRAL] Sincronizando estado BD: {cp_id} → {current_status} → {status} (cambio reportado por Engine)")
             db.update_charging_point_status(cp_id, status)
             
@@ -2520,94 +3194,153 @@ async def broadcast_kafka_event(event):
         # ========================================================================
         # Cuando el Monitor detecta que el Engine no responde (3+ timeouts),
         # notifica a Central para que cancele sesiones activas y libere el CP
-        elif event_type in ['ENGINE_FAILURE', 'ENGINE_OFFLINE'] or action in ['report_engine_failure', 'report_engine_offline']:
+    elif event_type in ['ENGINE_FAILURE'] or action in ['report_engine_failure']:
+            # Nuevo flujo: Engine cae pero Monitor sigue vivo y reporta fallo.
             failure_type = event.get('failure_type', 'unknown')
             consecutive_failures = event.get('consecutive_failures', 0)
-            
             print(f"[CENTRAL] ENGINE_FAILURE recibido: cp={cp_id}, type={failure_type}, failures={consecutive_failures}")
-            
-            # Cambiar estado del CP a 'offline' o 'fault'
-            new_status = 'offline' if event_type == 'ENGINE_OFFLINE' else 'fault'
-            
-            # PROTECCIÓN: Verificar si el estado ya está sincronizado para evitar procesamiento innecesario
+            # Registrar timestamp para correlación de charging→offline (una sola vez)
             try:
-                cp_current = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
-                current_status = cp_current.get('estado') or cp_current.get('status') if cp_current else None
-                
-                # Si el estado ya está sincronizado, solo procesar la cancelación de sesiones si es necesario
-                if current_status == new_status:
-                    print(f"[CENTRAL] Estado {new_status} para CP {cp_id} ya está sincronizado, omitiendo actualización de BD para evitar bucle")
-                    # NO publicar CP_INFO porque el estado ya está sincronizado
-                    # Solo procesar cancelación de sesiones si hay alguna activa
-                    # NO llamar a publish_cp_info_to_monitor aquí porque causaría bucle
-                else:
-                    # El estado cambió realmente, actualizar BD
-                    db.update_charging_point_status(cp_id, new_status)
-                    print(f"[CENTRAL] CP {cp_id} marcado como {new_status} (era {current_status})")
-                    #  PUBLICAR CAMBIO DE ESTADO AL MONITOR solo si el estado realmente cambió
-                    # NO usar force=True aquí para respetar throttling
+                shared_state.engine_failure_seen_at[cp_id] = time.time()
+            except Exception:
+                pass
+            # Marcar CP como 'fault' (Averiado) si no lo estaba
+            try:
+                cp_row = db.get_charging_point(cp_id) if hasattr(db, 'get_charging_point') else None
+                prev_state = (cp_row.get('estado') or cp_row.get('status')) if cp_row else None
+                if prev_state != 'fault':
+                    db.update_charging_point_status(cp_id, 'fault')
                     central_instance.publish_cp_info_to_monitor(cp_id)
+                    print(f"[CENTRAL] CP {cp_id} marcado como 'fault' (averiado)")
             except Exception as e:
-                print(f"[CENTRAL] Error verificando/actualizando estado del CP: {e}")
-            
-            # Buscar y cancelar sesión activa en este CP
+                print(f"[CENTRAL] Error marcando CP fault: {e}")
+            # Notificar interrupción al Driver si había sesión activa pero NO cerrarla aún (permitir datos finales posteriores)
             try:
-                # Buscar sesión activa en este CP
                 active_sessions = db.get_active_sessions_for_cp(cp_id) if hasattr(db, 'get_active_sessions_for_cp') else []
-                
                 if not active_sessions:
-                    # Fallback: buscar sesión activa más reciente
                     all_sessions = db.get_all_sessions() if hasattr(db, 'get_all_sessions') else []
                     active_sessions = [s for s in all_sessions if s.get('cp_id') == cp_id and s.get('estado') == 'active']
-                
                 for session in active_sessions:
                     session_id = session.get('id')
                     user_id = session.get('user_id')
-                    
-                    if session_id and user_id:
-                        # Obtener usuario
-                        user = db.get_user_by_id(user_id)
-                        if user:
-                            username = user.get('username')
-                            
-                            # Cancelar sesión (0 energía porque el CP falló)
-                            if hasattr(db, 'cancel_charging_session'):
-                                db.cancel_charging_session(session_id)
-                            else:
-                                db.end_charging_sesion(session_id, 0.0)
-                            
-                            print(f"[CENTRAL] Sesión {session_id} cancelada por ENGINE_FAILURE para usuario {username}")
-                            
-                            # Notificar al Driver vía Kafka para que cancele la sesión
-                            central_instance.publish_event('CP_ERROR_SIMULATED', {
-                                'cp_id': cp_id,
-                                'error_type': 'engine_failure',
-                                'message': f'El punto de carga {cp_id} no responde. La carga ha sido cancelada.',
-                                'username': username,
-                                'user_id': user_id
-                            })
-                            
-                            # También enviar evento específico de timeout para limpiar estado
-                            central_instance.publish_event('CHARGING_TIMEOUT', {
-                                'username': username,
-                                'user_id': user_id,
-                                'cp_id': cp_id,
-                                'reason': f'CP Engine no responde ({failure_type})',
-                                'timestamp': time.time()
-                            })
-                            
-                            print(f"[CENTRAL] Notificación de fallo enviada a Driver para usuario {username}")
+                    energia_parcial = session.get('energia_kwh') or 0.0
+                    user = db.get_user_by_id(user_id) if hasattr(db, 'get_user_by_id') else None
+                    username = user.get('username') if user else ''
+                    # Evento informativo al driver
+                    central_instance.publish_event('CHARGING_INTERRUPTED', {
+                        'cp_id': cp_id,
+                        'session_id': session_id,
+                        'username': username,
+                        'user_id': user_id,
+                        'partial_energy_kwh': energia_parcial,
+                        'reason': f'Engine fallo ({failure_type})',
+                        'message': f'La carga en {cp_id} se interrumpió. Esperando recuperación para datos finales.'
+                    })
+                    # Evento explícito de error del Engine
+                    central_instance.publish_event('CP_ENGINE_ERROR', {
+                        'cp_id': cp_id,
+                        'session_id': session_id,
+                        'username': username,
+                        'partial_energy_kwh': energia_parcial,
+                        'message': f'Engine falló ({failure_type}). Sesión sigue abierta sin ticket.'
+                    })
+                    print(f"[CENTRAL] Sesión {session_id} marcada como interrumpida (no cerrada) - energía parcial {energia_parcial:.2f} kWh")
             except Exception as e:
-                print(f"[CENTRAL] Error cancelando sesión por ENGINE_FAILURE: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"[CENTRAL] Error notificando interrupción de sesión en ENGINE_FAILURE: {e}")
+    elif event_type in ['ENGINE_OFFLINE'] or action in ['report_engine_offline']:
+            # Nuevo criterio: si el Monitor está vivo pero reporta ENGINE_OFFLINE,
+            # tratamos como interrupción: marcar 'fault', NO cerrar sesión, notificar al Driver.
+            print(f"[CENTRAL] ENGINE_OFFLINE recibido para {cp_id} → tratar como 'fault' e interrupción (sin cierre)")
+            try:
+                try:
+                    shared_state.engine_failure_seen_at[cp_id] = time.time()
+                except Exception:
+                    pass
+                db.update_charging_point_status(cp_id, 'fault')
+                central_instance.publish_cp_info_to_monitor(cp_id)
+            except Exception as e:
+                print(f"[CENTRAL] Error marcando CP fault tras ENGINE_OFFLINE: {e}")
+            # Notificar interrupción si hay sesión activa (sin cerrarla)
+            try:
+                active_sessions = db.get_active_sessions_for_cp(cp_id) if hasattr(db, 'get_active_sessions_for_cp') else []
+                if not active_sessions and hasattr(db, 'get_all_sessions'):
+                    all_sessions = db.get_all_sessions()
+                    active_sessions = [s for s in all_sessions if s.get('cp_id') == cp_id and s.get('estado') == 'active']
+                for session in active_sessions:
+                    session_id = session.get('id')
+                    if session_id in getattr(shared_state, 'interrupted_notified_sessions', set()):
+                        continue
+                    user_id = session.get('user_id')
+                    energia_parcial = session.get('energia_kwh') or 0.0
+                    user = db.get_user_by_id(user_id) if hasattr(db, 'get_user_by_id') else None
+                    username = user.get('username') if user else ''
+                    central_instance.publish_event('CHARGING_INTERRUPTED', {
+                        'cp_id': cp_id,
+                        'session_id': session_id,
+                        'username': username,
+                        'user_id': user_id,
+                        'partial_energy_kwh': energia_parcial,
+                        'reason': 'engine_offline_reported',
+                        'message': 'Engine reportado offline por el Monitor. Sesión interrumpida a la espera de recuperación.'
+                    })
+                    try:
+                        shared_state.interrupted_notified_sessions.add(session_id)
+                    except Exception:
+                        pass
+                    central_instance.publish_event('CP_ENGINE_ERROR', {
+                        'cp_id': cp_id,
+                        'session_id': session_id,
+                        'username': username,
+                        'partial_energy_kwh': energia_parcial,
+                        'message': 'Engine offline reportado. Sesión sigue abierta sin ticket.'
+                    })
+                    print(f"[CENTRAL] Sesión {session_id} interrumpida (ENGINE_OFFLINE reportado) en {cp_id}")
+            except Exception as e:
+                print(f"[CENTRAL] Error notificando interrupción tras ENGINE_OFFLINE: {e}")
+    elif event_type in ['ENGINE_RECOVERED'] or action in ['report_engine_recovered']:
+            # Engine se recupera y envía métricas finales
+            recovered_cp = event.get('cp_id')
+            final_energy = event.get('final_energy_kwh', 0.0)
+            final_cost = event.get('final_cost', 0.0)
+            final_duration = event.get('final_duration_sec', 0)
+            print(f"[CENTRAL] ENGINE_RECOVERED recibido: cp={recovered_cp}, energía final={final_energy:.2f} kWh")
+            try:
+                # Restaurar estado del CP (solo si estaba fault u offline)
+                current_state = db.get_charging_point_status(recovered_cp)
+                if current_state in ['fault', 'offline']:
+                    db.update_charging_point_status(recovered_cp, 'available')
+                    central_instance.publish_cp_info_to_monitor(recovered_cp)
+                # Finalizar sesión activa si quedó interrumpida
+                active_sessions = db.get_active_sessions_for_cp(recovered_cp) if hasattr(db, 'get_active_sessions_for_cp') else []
+                if not active_sessions:
+                    all_sessions = db.get_all_sessions() if hasattr(db, 'get_all_sessions') else []
+                    active_sessions = [s for s in all_sessions if s.get('cp_id') == recovered_cp and s.get('estado') == 'active']
+                for session in active_sessions:
+                    session_id = session.get('id')
+                    user_id = session.get('user_id')
+                    user = db.get_user_by_id(user_id) if hasattr(db, 'get_user_by_id') else None
+                    username = user.get('username') if user else ''
+                    result = db.end_charging_sesion(session_id, final_energy, cp_status_after='available')
+                    ticket_cost = result.get('coste', final_cost) if result else final_cost
+                    central_instance.publish_event('CHARGING_TICKET', {
+                        'username': username,
+                        'cp_id': recovered_cp,
+                        'energy_kwh': final_energy,
+                        'cost': ticket_cost,
+                        'duration_sec': final_duration,
+                        'reason': 'engine_recovered',
+                        'message': 'Sesión finalizada tras recuperación del Engine'
+                    })
+                    print(f"[CENTRAL] Sesión {session_id} finalizada tras recuperación de Engine en {recovered_cp}")
+            except Exception as e:
+                print(f"[CENTRAL] Error procesando ENGINE_RECOVERED para {recovered_cp}: {e}")
         
         # ========================================================================
         # AUTENTICACIÓN DEL MONITOR
         # ========================================================================
         # Al arrancar, el Monitor se conecta a Central para autenticarse
         # y validar que está operativo y preparado para prestar servicios
-        elif event_type == 'MONITOR_AUTH' or action == 'authenticate':
+    elif event_type == 'MONITOR_AUTH' or action == 'authenticate':
             monitor_id = event.get('monitor_id', f'MONITOR-{cp_id}')
             monitor_status = event.get('status', 'UNKNOWN')
             engine_host = event.get('engine_host', 'unknown')
@@ -2660,6 +3393,10 @@ async def broadcast_kafka_event(event):
             'username': event.get('username'),
             'cp_id': event.get('cp_id')
         })
+        # Inicializar timestamp de progreso para inactividad (marca comienzo)
+        cp_start_id = event.get('cp_id')
+        if cp_start_id:
+            shared_state.last_progress_per_cp[cp_start_id] = time.time()
     elif action == 'charging_stopped':
         message = json.dumps({
             'type': 'session_ended',
@@ -2814,18 +3551,28 @@ async def main():
         
         # 1) Terminar cualquier sesión activa que haya quedado de ejecuciones anteriores
         if hasattr(db, 'terminate_all_active_sessions'):
-            sess, cps = db.terminate_all_active_sessions(mark_cp_offline=True)
-            print(f"[CENTRAL] Inicio: sesiones activas terminadas: {sess}, CPs marcados offline: {cps}")
-        # 2) Marcar TODOS los CPs como 'offline' al iniciar Central
-        # Esto asegura que Central no asume que los CPs están conectados hasta que se registren
-        updated = db.set_all_cps_status_offline() if hasattr(db, 'set_all_cps_status_offline') else 0
-        if updated > 0:
-            print(f"[CENTRAL] {updated} CP(s) marcado(s) como 'offline' al inicio - esperando registro de Engines")
-        else:
-            print(f"[CENTRAL] No hay CPs en BD o ya están marcados como offline")
-
-        # 3) No habilitar ningún CP hasta que cada Engine se registre explícitamente
-        print("[CENTRAL] Todos los CP permanecerán 'offline' hasta recibir registro de sus Engines")
+            sess, cps = db.terminate_all_active_sessions(mark_cp_offline=False)
+            print(f"[CENTRAL] Inicio: sesiones activas terminadas: {sess}")
+        
+        # 2) Política de disponibilidad: solo CP_001..CP_004 pueden estar 'available'
+        try:
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            allowed = ('CP_001','CP_002','CP_003','CP_004')
+            # Poner en available los permitidos SIEMPRE
+            cursor.execute("UPDATE charging_points SET estado='available' WHERE cp_id IN ('CP_001','CP_002','CP_003','CP_004')")
+            allowed_changed = cursor.rowcount
+            # Forzar offline TODOS los otros CPs (cualquiera sea su estado previo)
+            cursor.execute("UPDATE charging_points SET estado='offline' WHERE cp_id NOT IN ('CP_001','CP_002','CP_003','CP_004')")
+            others_forced_offline = cursor.rowcount
+            conn.commit()
+            conn.close()
+            if allowed_changed > 0:
+                print(f"[CENTRAL] CP permitidos activados: {allowed_changed} marcados 'available' (solo 1..4)")
+            if others_forced_offline > 0:
+                print(f"[CENTRAL] Política aplicada: {others_forced_offline} CP(s) fuera de 1..4 forzados a 'offline'")
+        except Exception as e:
+            print(f"[CENTRAL] Error aplicando política de disponibilidad 1..4: {e}")
     except Exception as e:
         print(f"[CENTRAL] No se pudo limpiar estado al inicio: {e}")
     
@@ -2852,12 +3599,14 @@ async def main():
         
         # Iniciar monitor de timeouts de Monitores
         timeout_task = asyncio.create_task(monitor_timeout_checker())
+        # Iniciar checker de inactividad del Engine
+        engine_inact_task = asyncio.create_task(engine_inactivity_checker())
         
         print("\nAll services started successfully!")
         print(f"Open http://localhost:{SERVER_PORT} in your browser\n")
         
         # Mantener el servidor corriendo
-        await asyncio.gather(broadcast_task, kafka_task, timeout_task)
+        await asyncio.gather(broadcast_task, kafka_task, timeout_task, engine_inact_task)
         
     except Exception as e:
         print(f"\nError starting server: {e}")

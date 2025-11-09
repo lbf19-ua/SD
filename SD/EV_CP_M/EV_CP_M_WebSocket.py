@@ -1095,6 +1095,21 @@ async def tcp_health_check():
                             consecutive_failures = 0
                         await asyncio.sleep(5)  # Esperar más tiempo antes de reintentar
                     
+                    # Enviar heartbeat incluso en fallo para que Central sepa que el Monitor sigue vivo.
+                    try:
+                        if monitor_instance.producer:
+                            hb_event = {
+                                'message_id': generate_message_id(),
+                                'event_type': 'MONITOR_HEARTBEAT',
+                                'action': 'monitor_heartbeat',
+                                'cp_id': monitor_instance.cp_id,
+                                'status': 'available',  # Estado genérico; Central usa solo el timestamp para liveness
+                                'timestamp': current_timestamp(),
+                                'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                            }
+                            monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, hb_event)
+                    except Exception as _:
+                        pass
                     # Continuar al siguiente intento
                     continue
                 
@@ -1282,6 +1297,21 @@ async def tcp_health_check():
                         
                         # Reset contador después de reportar
                         consecutive_failures = 0
+                    # Heartbeat durante fallos para mantener monitor_alive en Central
+                    try:
+                        if monitor_instance.producer:
+                            hb_event = {
+                                'message_id': generate_message_id(),
+                                'event_type': 'MONITOR_HEARTBEAT',
+                                'action': 'monitor_heartbeat',
+                                'cp_id': monitor_instance.cp_id,
+                                'status': 'available',
+                                'timestamp': current_timestamp(),
+                                'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                            }
+                            monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, hb_event)
+                    except Exception as _:
+                        pass
                 
                 # Cerrar conexión de forma segura
                 try:
@@ -1345,6 +1375,21 @@ async def tcp_health_check():
                         last_reported_failure = current_time  # Marcar que se reportó
                     
                     consecutive_failures = 0
+                # Heartbeat en timeout de lectura
+                try:
+                    if monitor_instance.producer:
+                        hb_event = {
+                            'message_id': generate_message_id(),
+                            'event_type': 'MONITOR_HEARTBEAT',
+                            'action': 'monitor_heartbeat',
+                            'cp_id': monitor_instance.cp_id,
+                            'status': 'available',
+                            'timestamp': current_timestamp(),
+                            'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                        }
+                        monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, hb_event)
+                except Exception as _:
+                    pass
             
             except (ConnectionRefusedError, OSError) as e:
                 # Engine no está corriendo
@@ -1399,6 +1444,21 @@ async def tcp_health_check():
                         last_reported_failure = current_time  # Marcar que se reportó
                     
                     consecutive_failures = 0
+                # Heartbeat cuando el Engine está claramente offline para distinguir de monitor caído
+                try:
+                    if monitor_instance.producer:
+                        hb_event = {
+                            'message_id': generate_message_id(),
+                            'event_type': 'MONITOR_HEARTBEAT',
+                            'action': 'monitor_heartbeat',
+                            'cp_id': monitor_instance.cp_id,
+                            'status': 'available',
+                            'timestamp': current_timestamp(),
+                            'monitor_id': f'MONITOR-{monitor_instance.cp_id}'
+                        }
+                        monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, hb_event)
+                except Exception as _:
+                    pass
                     
                     # Esperar más tiempo si no podemos conectar
                     await asyncio.sleep(5)

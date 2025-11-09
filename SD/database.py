@@ -411,6 +411,28 @@ def get_all_charging_points():
     
     return [dict(row) for row in rows]
 
+# Obtiene el estado actual de un punto de carga
+def get_charging_point_status(cp_id: str) -> str | None:
+    """
+    Obtiene el estado actual de un punto de carga.
+    Retorna el estado ('available', 'offline', etc.) o None si no existe.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT estado
+            FROM charging_points
+            WHERE cp_id = ?
+        """, (cp_id,))
+        row = cursor.fetchone()
+        return row['estado'] if row else None
+    except Exception as e:
+        print(f"[DB] ERROR obteniendo estado CP {cp_id}: {e}")
+        return None
+    finally:
+        conn.close()
+
 # Actualiza el estado de un punto de carga e imprime un mensaje en caso de éxito o de fallo
 def update_charging_point_status(cp_id: str, new_status: str) -> bool:
     """
