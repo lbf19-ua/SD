@@ -645,6 +645,29 @@ class EV_CP_Engine:
                                 self.health_status = 'KO'
                     
                     # ============================================================
+                    # FALLO MANUAL DESDE CLI (cp_control.py)
+                    # ============================================================
+                    elif event_type == 'CP_FAULT' or action == 'fault':
+                        target_cp = event.get('cp_id')
+                        if target_cp == self.cp_id:
+                            print(f"[{self.cp_id}]  Fault command received from CLI/control script")
+                            
+                            # Detener sesión si está cargando
+                            with self.lock:
+                                if self.status == 'charging' and self.current_session:
+                                    print(f"[{self.cp_id}]   Interrupting active charging session due to fault")
+                                    self.stop_charging_flag.set()
+                                    
+                                    if self.charging_thread and self.charging_thread.is_alive():
+                                        self.charging_thread.join(timeout=2)
+                                    
+                                    self.current_session = None
+                            
+                            # Marcar fallo y health KO
+                            self.change_status('fault', 'Manual fault triggered via CLI')
+                            self.health_status = 'KO'
+                    
+                    # ============================================================
                     # REPARACIÓN (desde Admin)
                     # ============================================================
                     elif event_type == 'CP_ERROR_FIXED' or action == 'cp_error_fixed':

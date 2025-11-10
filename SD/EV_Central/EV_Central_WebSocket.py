@@ -796,19 +796,14 @@ async def websocket_handler_http(request):
                         # Corregir error en un punto de carga
                         cp_id = data.get('cp_id')
                         
-                        # Cambiar estado a available SOLO si es CP_001..CP_004
-                        allowed_cps = {'CP_001','CP_002','CP_003','CP_004'}
-                        if cp_id in allowed_cps:
-                            db.update_charging_point_status(cp_id, 'available')
-                        else:
-                            # Para otros, mantener/desviar a offline
-                            db.update_charging_point_status(cp_id, 'offline')
+                        # Cambiar estado a available para cualquier CP recuperado
+                        db.update_charging_point_status(cp_id, 'available')
                         
                         # PUBLICAR EVENTO EN KAFKA para notificar al Driver
                         central_instance.publish_event('CP_ERROR_FIXED', {
                             'cp_id': cp_id,
-                            'new_status': 'available' if cp_id in {'CP_001','CP_002','CP_003','CP_004'} else 'offline',
-                            'message': f'Error corregido en {cp_id} (disponible solo si CP_001..CP_004)'
+                            'new_status': 'available',
+                            'message': f'Error corregido en {cp_id}'
                         })
                         print(f"[CENTRAL] Publicado CP_ERROR_FIXED en Kafka para {cp_id}")
                         
@@ -2231,23 +2226,9 @@ async def broadcast_kafka_event(event):
             try:
                 # Registrar heartbeat implícito
                 shared_state.last_monitor_seen[cp_id_ok] = time.time()
-                # Consultar estado actual antes de forzar 'available'
-                current_status = None
-                try:
-                    current_status = db.get_charging_point_status(cp_id_ok)
-                except Exception:
-                    current_status = None
-                # Sólo permitir 'available' para CP_001..CP_004 y si NO está offline
-                allowed_cps = {'CP_001','CP_002','CP_003','CP_004'}
-                if cp_id_ok in allowed_cps and current_status != 'offline':
-                    db.update_charging_point_status(cp_id_ok, 'available')
-                    print(f"[CENTRAL] Salud confirmada para {cp_id_ok} → estado 'available' (permitido)")
-                else:
-                    # Mantener offline o estado actual para CP fuera del rango permitido
-                    if cp_id_ok not in allowed_cps:
-                        print(f"[CENTRAL] ENGINE_HEALTH_OK: {cp_id_ok} no está en lista permitida (1..4) → estado permanece '{current_status}'")
-                    else:
-                        print(f"[CENTRAL] ENGINE_HEALTH_OK ignorado: {cp_id_ok} permanece 'offline'")
+                # Marcar CP como disponible tras confirmar salud del Engine
+                db.update_charging_point_status(cp_id_ok, 'available')
+                print(f"[CENTRAL] Salud confirmada para {cp_id_ok} → estado 'available'")
                 # Publicar CP_INFO al Monitor para refrescar paneles (siempre para reflejar estado actual)
                 central_instance.publish_cp_info_to_monitor(cp_id_ok, force=True)
             except Exception as e:
