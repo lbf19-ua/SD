@@ -1,5 +1,5 @@
 # ============================================================================
-# Docker Compose para PC3 - Charging Points (3 Engines + 3 Monitors)
+# Docker Compose para PC3 - Charging Points (10 Engines + 10 Monitors)
 # ============================================================================
 # EJECUTAR SOLO EN PC3 (Charging Points)
 #
@@ -7,6 +7,13 @@
 #   - CP_001: Engine (5100) + Monitor (5500) ← supervisa Engine 5100
 #   - CP_002: Engine (5101) + Monitor (5501) ← supervisa Engine 5101  
 #   - CP_003: Engine (5102) + Monitor (5502) ← supervisa Engine 5102
+#   - CP_004: Engine (5103) + Monitor (5503) ← supervisa Engine 5103
+#   - CP_005: Engine (5104) + Monitor (5504) ← supervisa Engine 5104
+#   - CP_006: Engine (5105) + Monitor (5505) ← supervisa Engine 5105
+#   - CP_007: Engine (5106) + Monitor (5506) ← supervisa Engine 5106
+#   - CP_008: Engine (5107) + Monitor (5507) ← supervisa Engine 5107
+#   - CP_009: Engine (5108) + Monitor (5508) ← supervisa Engine 5108
+#   - CP_010: Engine (5109) + Monitor (5509) ← supervisa Engine 5109
 #
 # REQUISITOS PREVIOS (EJECUTAR EN ESTE ORDEN):
 #   1. PRIMERO: Desplegar PC2 en su ordenador:
@@ -23,8 +30,8 @@
 #        KAFKA_BROKER=192.168.1.XXX:9092  # IP real de PC2:9092
 #   5. Copiar ev_charging.db desde PC2
 #   6. Abrir puertos del firewall (PowerShell como admin):
-#      New-NetFirewallRule -DisplayName "EV Engines" -Direction Inbound -LocalPort 5100-5102 -Protocol TCP -Action Allow
-#      New-NetFirewallRule -DisplayName "EV Monitors" -Direction Inbound -LocalPort 5500-5502 -Protocol TCP -Action Allow
+#      New-NetFirewallRule -DisplayName "EV Engines" -Direction Inbound -LocalPort 5100-5109 -Protocol TCP -Action Allow
+#      New-NetFirewallRule -DisplayName "EV Monitors" -Direction Inbound -LocalPort 5500-5509 -Protocol TCP -Action Allow
 #
 # INICIAR:
 #   docker-compose -f docker-compose.pc3.yml up -d
@@ -291,6 +298,366 @@ services:
     restart: unless-stopped
     command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_004", "--engine-host", "ev-cp-engine-004", "--engine-port", "5103", "--monitor-port", "5503", "--kafka-broker", "${KAFKA_BROKER}"]
 
+  # ==========================================================================
+  # CP_005 - ENGINE
+  # ==========================================================================
+  ev-cp-engine-005:
+    build:
+      context: .
+      dockerfile: EV_CP_E/Dockerfile
+    container_name: ev-cp-engine-005
+    ports:
+      - "5104:5104"
+    environment:
+      - CP_ID=CP_005
+      - LOCATION=Parking Central
+      - MAX_POWER=60.0
+      - TARIFF=0.38
+      - HEALTH_PORT=5104
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+    networks:
+      - ev-network
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    command: ["python", "-u", "EV_CP_E.py", "--no-cli"]
+
+  # ==========================================================================
+  # CP_005 - MONITOR (supervisa Engine CP_005)
+  # ==========================================================================
+  ev-cp-monitor-005:
+    build:
+      context: .
+      dockerfile: EV_CP_M/Dockerfile
+    container_name: ev-cp-monitor-005
+    depends_on:
+      - ev-cp-engine-005
+    ports:
+      - "5504:5504"
+    environment:
+      - CP_ID=CP_005
+      - ENGINE_HOST=ev-cp-engine-005
+      - ENGINE_PORT=5104
+      - MONITOR_PORT=5504
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db:ro
+      - ./network_config.py:/app/network_config.py:ro
+      - ./database.py:/app/database.py:ro
+      - ./event_utils.py:/app/event_utils.py:ro
+      - ./EV_CP_M/monitor_dashboard.html:/app/monitor_dashboard.html:ro
+    networks:
+      - ev-network
+    restart: unless-stopped
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_005", "--engine-host", "ev-cp-engine-005", "--engine-port", "5104", "--monitor-port", "5504", "--kafka-broker", "${KAFKA_BROKER}"]
+
+  # ==========================================================================
+  # CP_006 - ENGINE
+  # ==========================================================================
+  ev-cp-engine-006:
+    build:
+      context: .
+      dockerfile: EV_CP_E/Dockerfile
+    container_name: ev-cp-engine-006
+    ports:
+      - "5105:5105"
+    environment:
+      - CP_ID=CP_006
+      - LOCATION=Parking Aeropuerto
+      - MAX_POWER=55.0
+      - TARIFF=0.36
+      - HEALTH_PORT=5105
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+    networks:
+      - ev-network
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    command: ["python", "-u", "EV_CP_E.py", "--no-cli"]
+
+  # ==========================================================================
+  # CP_006 - MONITOR (supervisa Engine CP_006)
+  # ==========================================================================
+  ev-cp-monitor-006:
+    build:
+      context: .
+      dockerfile: EV_CP_M/Dockerfile
+    container_name: ev-cp-monitor-006
+    depends_on:
+      - ev-cp-engine-006
+    ports:
+      - "5505:5505"
+    environment:
+      - CP_ID=CP_006
+      - ENGINE_HOST=ev-cp-engine-006
+      - ENGINE_PORT=5105
+      - MONITOR_PORT=5505
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db:ro
+      - ./network_config.py:/app/network_config.py:ro
+      - ./database.py:/app/database.py:ro
+      - ./event_utils.py:/app/event_utils.py:ro
+      - ./EV_CP_M/monitor_dashboard.html:/app/monitor_dashboard.html:ro
+    networks:
+      - ev-network
+    restart: unless-stopped
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_006", "--engine-host", "ev-cp-engine-006", "--engine-port", "5105", "--monitor-port", "5505", "--kafka-broker", "${KAFKA_BROKER}"]
+
+  # ==========================================================================
+  # CP_007 - ENGINE
+  # ==========================================================================
+  ev-cp-engine-007:
+    build:
+      context: .
+      dockerfile: EV_CP_E/Dockerfile
+    container_name: ev-cp-engine-007
+    ports:
+      - "5106:5106"
+    environment:
+      - CP_ID=CP_007
+      - LOCATION=Parking Universidad
+      - MAX_POWER=45.0
+      - TARIFF=0.34
+      - HEALTH_PORT=5106
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+    networks:
+      - ev-network
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    command: ["python", "-u", "EV_CP_E.py", "--no-cli"]
+
+  # ==========================================================================
+  # CP_007 - MONITOR (supervisa Engine CP_007)
+  # ==========================================================================
+  ev-cp-monitor-007:
+    build:
+      context: .
+      dockerfile: EV_CP_M/Dockerfile
+    container_name: ev-cp-monitor-007
+    depends_on:
+      - ev-cp-engine-007
+    ports:
+      - "5506:5506"
+    environment:
+      - CP_ID=CP_007
+      - ENGINE_HOST=ev-cp-engine-007
+      - ENGINE_PORT=5106
+      - MONITOR_PORT=5506
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db:ro
+      - ./network_config.py:/app/network_config.py:ro
+      - ./database.py:/app/database.py:ro
+      - ./event_utils.py:/app/event_utils.py:ro
+      - ./EV_CP_M/monitor_dashboard.html:/app/monitor_dashboard.html:ro
+    networks:
+      - ev-network
+    restart: unless-stopped
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_007", "--engine-host", "ev-cp-engine-007", "--engine-port", "5106", "--monitor-port", "5506", "--kafka-broker", "${KAFKA_BROKER}"]
+
+  # ==========================================================================
+  # CP_008 - ENGINE
+  # ==========================================================================
+  ev-cp-engine-008:
+    build:
+      context: .
+      dockerfile: EV_CP_E/Dockerfile
+    container_name: ev-cp-engine-008
+    ports:
+      - "5107:5107"
+    environment:
+      - CP_ID=CP_008
+      - LOCATION=Parking Estacion
+      - MAX_POWER=48.0
+      - TARIFF=0.37
+      - HEALTH_PORT=5107
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+    networks:
+      - ev-network
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    command: ["python", "-u", "EV_CP_E.py", "--no-cli"]
+
+  # ==========================================================================
+  # CP_008 - MONITOR (supervisa Engine CP_008)
+  # ==========================================================================
+  ev-cp-monitor-008:
+    build:
+      context: .
+      dockerfile: EV_CP_M/Dockerfile
+    container_name: ev-cp-monitor-008
+    depends_on:
+      - ev-cp-engine-008
+    ports:
+      - "5507:5507"
+    environment:
+      - CP_ID=CP_008
+      - ENGINE_HOST=ev-cp-engine-008
+      - ENGINE_PORT=5107
+      - MONITOR_PORT=5507
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db:ro
+      - ./network_config.py:/app/network_config.py:ro
+      - ./database.py:/app/database.py:ro
+      - ./event_utils.py:/app/event_utils.py:ro
+      - ./EV_CP_M/monitor_dashboard.html:/app/monitor_dashboard.html:ro
+    networks:
+      - ev-network
+    restart: unless-stopped
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_008", "--engine-host", "ev-cp-engine-008", "--engine-port", "5107", "--monitor-port", "5507", "--kafka-broker", "${KAFKA_BROKER}"]
+
+  # ==========================================================================
+  # CP_009 - ENGINE
+  # ==========================================================================
+  ev-cp-engine-009:
+    build:
+      context: .
+      dockerfile: EV_CP_E/Dockerfile
+    container_name: ev-cp-engine-009
+    ports:
+      - "5108:5108"
+    environment:
+      - CP_ID=CP_009
+      - LOCATION=Parking Centro Comercial
+      - MAX_POWER=52.0
+      - TARIFF=0.39
+      - HEALTH_PORT=5108
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+    networks:
+      - ev-network
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    command: ["python", "-u", "EV_CP_E.py", "--no-cli"]
+
+  # ==========================================================================
+  # CP_009 - MONITOR (supervisa Engine CP_009)
+  # ==========================================================================
+  ev-cp-monitor-009:
+    build:
+      context: .
+      dockerfile: EV_CP_M/Dockerfile
+    container_name: ev-cp-monitor-009
+    depends_on:
+      - ev-cp-engine-009
+    ports:
+      - "5508:5508"
+    environment:
+      - CP_ID=CP_009
+      - ENGINE_HOST=ev-cp-engine-009
+      - ENGINE_PORT=5108
+      - MONITOR_PORT=5508
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db:ro
+      - ./network_config.py:/app/network_config.py:ro
+      - ./database.py:/app/database.py:ro
+      - ./event_utils.py:/app/event_utils.py:ro
+      - ./EV_CP_M/monitor_dashboard.html:/app/monitor_dashboard.html:ro
+    networks:
+      - ev-network
+    restart: unless-stopped
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_009", "--engine-host", "ev-cp-engine-009", "--engine-port", "5108", "--monitor-port", "5508", "--kafka-broker", "${KAFKA_BROKER}"]
+
+  # ==========================================================================
+  # CP_010 - ENGINE
+  # ==========================================================================
+  ev-cp-engine-010:
+    build:
+      context: .
+      dockerfile: EV_CP_E/Dockerfile
+    container_name: ev-cp-engine-010
+    ports:
+      - "5109:5109"
+    environment:
+      - CP_ID=CP_010
+      - LOCATION=Parking Parque Empresarial
+      - MAX_POWER=65.0
+      - TARIFF=0.41
+      - HEALTH_PORT=5109
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db
+      - ./network_config.py:/app/network_config.py
+      - ./database.py:/app/database.py
+      - ./event_utils.py:/app/event_utils.py
+    networks:
+      - ev-network
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    command: ["python", "-u", "EV_CP_E.py", "--no-cli"]
+
+  # ==========================================================================
+  # CP_010 - MONITOR (supervisa Engine CP_010)
+  # ==========================================================================
+  ev-cp-monitor-010:
+    build:
+      context: .
+      dockerfile: EV_CP_M/Dockerfile
+    container_name: ev-cp-monitor-010
+    depends_on:
+      - ev-cp-engine-010
+    ports:
+      - "5509:5509"
+    environment:
+      - CP_ID=CP_010
+      - ENGINE_HOST=ev-cp-engine-010
+      - ENGINE_PORT=5109
+      - MONITOR_PORT=5509
+      - KAFKA_BROKER=${KAFKA_BROKER}  # OBLIGATORIO en .env: IP_PC2:9092
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ev_charging.db:/app/ev_charging.db:ro
+      - ./network_config.py:/app/network_config.py:ro
+      - ./database.py:/app/database.py:ro
+      - ./event_utils.py:/app/event_utils.py:ro
+      - ./EV_CP_M/monitor_dashboard.html:/app/monitor_dashboard.html:ro
+    networks:
+      - ev-network
+    restart: unless-stopped
+    command: ["python", "-u", "EV_CP_M_WebSocket.py", "--cp-id", "CP_010", "--engine-host", "ev-cp-engine-010", "--engine-port", "5109", "--monitor-port", "5509", "--kafka-broker", "${KAFKA_BROKER}"]
+
 # ==============================================================================
 # Redes
 # ==============================================================================
@@ -312,6 +679,12 @@ networks:
 # Monitor CP_002:   http://192.168.1.150:5501
 # Monitor CP_003:   http://192.168.1.150:5502
 # Monitor CP_004:   http://192.168.1.150:5503
+# Monitor CP_005:   http://192.168.1.150:5504
+# Monitor CP_006:   http://192.168.1.150:5505
+# Monitor CP_007:   http://192.168.1.150:5506
+# Monitor CP_008:   http://192.168.1.150:5507
+# Monitor CP_009:   http://192.168.1.150:5508
+# Monitor CP_010:  http://192.168.1.150:5509
 #
 # CLI Engines (desde host):
 #   Usar script cp_control.py para controlar los CPs:

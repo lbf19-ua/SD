@@ -722,7 +722,7 @@ class EV_CP_Engine:
                                 print(f"[{self.cp_id}]   No había sesión activa para desenchufar")
                     
                 except Exception as event_error:
-                    print(f"[{self.cp_id}]  ⚠️ Error procesando evento {event_type or action}: {event_error}")
+                    print(f"[{self.cp_id}]  Error procesando evento {event_type or action}: {event_error}")
                     import traceback
                     traceback.print_exc()
                     # Continuar con el siguiente mensaje en lugar de terminar
@@ -731,16 +731,16 @@ class EV_CP_Engine:
         except KeyboardInterrupt:
             print(f"\n[{self.cp_id}]   Interrupted by user")
         except Exception as e:
-            print(f"[{self.cp_id}]  ⚠️ Error crítico en command listener (reintentando en 5s): {e}")
+            print(f"[{self.cp_id}]  Error crítico en command listener (reintentando en 5s): {e}")
             import traceback
             traceback.print_exc()
             # ⚠️ CRÍTICO: Si hay un error crítico, esperar un poco y reintentar en lugar de terminar
             # Esto previene que Docker reinicie el contenedor constantemente
-            print(f"[{self.cp_id}]  ⏳ Esperando 5 segundos antes de reintentar...")
+            print(f"[{self.cp_id}]  Esperando 5 segundos antes de reintentar...")
             time.sleep(5)
             # Reintentar el loop si el Engine sigue corriendo
             if self.running:
-                print(f"[{self.cp_id}]  🔄 Reintentando escuchar comandos...")
+                print(f"[{self.cp_id}]  Reintentando escuchar comandos...")
                 self.listen_for_commands()  # Llamada recursiva para reintentar
     
     def simulate_plug_in(self):
@@ -821,7 +821,7 @@ class EV_CP_Engine:
         """
         def cli_loop():
             print(f"\n{'='*80}")
-            print(f"  🎮 INTERACTIVE CLI MENU - {self.cp_id}")
+            print(f"  INTERACTIVE CLI MENU - {self.cp_id}")
             print(f"{'='*80}")
             print("  Commands available:")
             print("    [P] Plug in    - Simulate vehicle connection")
@@ -941,7 +941,7 @@ class EV_CP_Engine:
             if hasattr(self, '_registration_time'):
                 time_since_reg = time.time() - self._registration_time
                 if time_since_reg < 30.0:  # Si se registró hace menos de 30 segundos
-                    print(f"[{self.cp_id}]  ⚠️ Shutdown dentro de {time_since_reg:.1f}s después del registro - NO enviando cp_status_change a 'offline'")
+                    print(f"[{self.cp_id}]  Shutdown dentro de {time_since_reg:.1f}s después del registro - NO enviando cp_status_change a 'offline'")
                     print(f"[{self.cp_id}]    Esto previene que Central marque el CP como 'offline' después de registrarse correctamente")
                     # Solo cambiar el estado interno, NO publicar evento
                     with self.lock:
@@ -965,12 +965,12 @@ class EV_CP_Engine:
         """
         # 1. Conectar a Kafka - reintentar indefinidamente si falla (para Docker)
         # Esto evita que el contenedor se reinicie constantemente
-        print(f"[{self.cp_id}] ⏳ Esperando conexión a Kafka...")
+        print(f"[{self.cp_id}] Esperando conexión a Kafka...")
         while not self.initialize_kafka():
-            print(f"[{self.cp_id}] ⚠️ No se pudo conectar a Kafka, reintentando en 10 segundos...")
+            print(f"[{self.cp_id}] No se pudo conectar a Kafka, reintentando en 10 segundos...")
             print(f"[{self.cp_id}]    Verificar que Kafka está corriendo en {self.kafka_broker}")
             time.sleep(10)  # Esperar 10 segundos antes de reintentar
-        print(f"[{self.cp_id}] ✅ Kafka conectado exitosamente")
+        print(f"[{self.cp_id}] Kafka conectado exitosamente")
         
         # 2. Auto-registrarse en Central
         self.auto_register()
@@ -990,8 +990,8 @@ class EV_CP_Engine:
         #   python EV_CP_E/cp_control.py CP_XXX --interactive
         cli_thread = None
         if hasattr(self, 'enable_cli') and self.enable_cli:
-            print(f"[{self.cp_id}] ⚠️ CLI menu activado en esta terminal")
-            print(f"[{self.cp_id}] ℹ️  Para usar el menú en terminal separada: python EV_CP_E/cp_control.py {self.cp_id} --interactive")
+            print(f"[{self.cp_id}] CLI menu activado en esta terminal")
+            print(f"[{self.cp_id}] Para usar el menú en terminal separada: python EV_CP_E/cp_control.py {self.cp_id} --interactive")
             cli_thread = self.start_cli_menu()
         
         # 5. Escuchar comandos (bloqueante)

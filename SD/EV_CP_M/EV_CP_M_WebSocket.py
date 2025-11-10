@@ -80,7 +80,7 @@ class EV_MonitorWS:
         self._authenticated = False  # Flag para evitar re-autenticación
         
         print(f"\n{'='*80}")
-        print(f"  🏥 EV MONITOR - Supervising {self.cp_id}")
+        print(f"  EV MONITOR - Supervising {self.cp_id}")
         print(f"{'='*80}")
         print(f"  Monitored CP:    {self.cp_id}")
         print(f"  Engine Host:     {self.engine_host}")
@@ -91,7 +91,7 @@ class EV_MonitorWS:
         # Inicializar Kafka - si falla, se reintentará en authenticate_with_central
         # No fallar si Kafka no está disponible inicialmente (para Docker)
         if not self.initialize_kafka():
-            print(f"[MONITOR-{self.cp_id}] ⚠️ Kafka no disponible inicialmente, se reintentará durante autenticación")
+            print(f"[MONITOR-{self.cp_id}] Kafka no disponible inicialmente, se reintentará durante autenticación")
         
         # Autenticación se reintentará si Kafka no está disponible
         self.authenticate_with_central()  # Solo se ejecuta una vez si tiene éxito
@@ -115,16 +115,16 @@ class EV_MonitorWS:
                 # En su lugar, solo verificamos que el producer esté configurado correctamente
                 # El flush() verificará que el producer funciona sin necesidad de enviar un mensaje
                 # Si hay un error, se lanzará una excepción en el siguiente send real
-                print(f"[MONITOR-{self.cp_id}] ✅ Kafka producer initialized and connected")
+                print(f"[MONITOR-{self.cp_id}] Kafka producer initialized and connected")
                 return True
             except Exception as e:
-                print(f"[MONITOR-{self.cp_id}] ⚠️  Attempt {attempt+1}/{max_retries} - Kafka connection failed: {e}")
+                print(f"[MONITOR-{self.cp_id}] Attempt {attempt+1}/{max_retries} - Kafka connection failed: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(2)
                     continue
                 else:
-                    print(f"[MONITOR-{self.cp_id}] ❌ Failed to connect to Kafka after {max_retries} attempts")
-                    print(f"[MONITOR-{self.cp_id}] 💡 Tip: Verificar que Kafka está corriendo y accesible en {self.kafka_broker}")
+                    print(f"[MONITOR-{self.cp_id}] Failed to connect to Kafka after {max_retries} attempts")
+                    print(f"[MONITOR-{self.cp_id}] Tip: Verificar que Kafka está corriendo y accesible en {self.kafka_broker}")
                     self.producer = None
                     return False
 
@@ -140,20 +140,20 @@ class EV_MonitorWS:
         """
         # ⚠️ PROTECCIÓN: Solo autenticarse una vez
         if hasattr(self, '_authenticated') and self._authenticated:
-            print(f"[MONITOR-{self.cp_id}] ⚠️ Already authenticated, skipping")
+            print(f"[MONITOR-{self.cp_id}] Already authenticated, skipping")
             return
         
-        print(f"[MONITOR-{self.cp_id}] 🔐 Authenticating with Central...")
+        print(f"[MONITOR-{self.cp_id}] Authenticating with Central...")
         
         # Esperar a que Kafka esté disponible - reintentar indefinidamente si falla (para Docker)
         # Esto evita que el contenedor se reinicie constantemente
         if not self.producer:
-            print(f"[MONITOR-{self.cp_id}] ⚠️  Kafka producer not initialized, waiting for Kafka...")
+            print(f"[MONITOR-{self.cp_id}] Kafka producer not initialized, waiting for Kafka...")
             while not self.initialize_kafka(max_retries=5):
-                print(f"[MONITOR-{self.cp_id}] ⚠️ No se pudo conectar a Kafka, reintentando en 10 segundos...")
+                print(f"[MONITOR-{self.cp_id}] No se pudo conectar a Kafka, reintentando en 10 segundos...")
                 print(f"[MONITOR-{self.cp_id}]    Verificar que Kafka está corriendo en {self.kafka_broker}")
                 time.sleep(10)  # Esperar 10 segundos antes de reintentar
-            print(f"[MONITOR-{self.cp_id}] ✅ Kafka conectado, procediendo con autenticación")
+            print(f"[MONITOR-{self.cp_id}] Kafka conectado, procediendo con autenticación")
         
         try:
             # Marcar como autenticado ANTES de enviar (para evitar re-envío si falla el envío)
@@ -172,15 +172,15 @@ class EV_MonitorWS:
                 'timestamp': current_timestamp()
             }
             
-            print(f"[MONITOR-{self.cp_id}] 📤 Sending MONITOR_CONNECTED event to topic '{KAFKA_TOPIC_PRODUCE}'...")
+            print(f"[MONITOR-{self.cp_id}] Sending MONITOR_CONNECTED event to topic '{KAFKA_TOPIC_PRODUCE}'...")
             future = self.producer.send(KAFKA_TOPIC_PRODUCE, connect_event)
             # Esperar confirmación del envío
             record_metadata = future.get(timeout=10)
             self.producer.flush(timeout=5)
-            print(f"[MONITOR-{self.cp_id}] ✅ MONITOR_CONNECTED sent to Central (topic: {record_metadata.topic}, partition: {record_metadata.partition})")
-            print(f"[MONITOR-{self.cp_id}] ✅ Monitor validated and ready to monitor {self.cp_id}")
+            print(f"[MONITOR-{self.cp_id}] MONITOR_CONNECTED sent to Central (topic: {record_metadata.topic}, partition: {record_metadata.partition})")
+            print(f"[MONITOR-{self.cp_id}] Monitor validated and ready to monitor {self.cp_id}")
         except Exception as e:
-            print(f"[MONITOR-{self.cp_id}] ❌ Connection event failed: {e}")
+            print(f"[MONITOR-{self.cp_id}] Connection event failed: {e}")
             import traceback
             traceback.print_exc()
             # Si falla, permitir reintentar
@@ -202,9 +202,9 @@ class EV_MonitorWS:
             }
             self.producer.send(KAFKA_TOPIC_PRODUCE, disconnect_event)
             self.producer.flush(timeout=3)
-            print(f"[MONITOR-{self.cp_id}] 📤 MONITOR_DISCONNECTED sent to Central")
+            print(f"[MONITOR-{self.cp_id}] MONITOR_DISCONNECTED sent to Central")
         except Exception as e:
-            print(f"[MONITOR-{self.cp_id}] ⚠️ Error sending disconnect event: {e}")
+            print(f"[MONITOR-{self.cp_id}] Error sending disconnect event: {e}")
 
     def initialize_metrics(self):
         """Inicializa métricas simuladas para el CP monitoreado"""
@@ -215,7 +215,7 @@ class EV_MonitorWS:
             'sessions_today': 0,
             'current_power': 0.0
         }
-        print(f"[MONITOR-{self.cp_id}] 📊 Metrics initialized for {self.cp_id}")
+        print(f"[MONITOR-{self.cp_id}] Metrics initialized for {self.cp_id}")
 
     def get_monitor_data(self):
         """
@@ -267,7 +267,7 @@ class EV_MonitorWS:
                     cp_status = raw_status_lower
                 else:
                     # Estado inválido, usar 'offline' por defecto
-                    print(f"[MONITOR-{self.cp_id}] ⚠️ Estado inválido en get_monitor_data: '{raw_status}', usando 'offline'")
+                    print(f"[MONITOR-{self.cp_id}] Estado inválido en get_monitor_data: '{raw_status}', usando 'offline'")
                     cp_status = 'offline'
             else:
                 cp_status = 'offline'
@@ -306,7 +306,7 @@ class EV_MonitorWS:
             }
             
         except Exception as e:
-            print(f"[MONITOR-{self.cp_id}] ❌ Error getting monitor data: {e}")
+            print(f"[MONITOR-{self.cp_id}] Error getting monitor data: {e}")
             import traceback
             traceback.print_exc()
             return {
@@ -395,7 +395,7 @@ async def websocket_handler(websocket, path):
     except websockets.exceptions.ConnectionClosed:
         pass
     except Exception as e:
-        print(f"[WS] ❌ Error handling websocket message: {e}")
+        print(f"[WS] Error handling websocket message: {e}")
     finally:
         shared_state.connected_clients.remove(websocket)
 
@@ -429,12 +429,12 @@ async def websocket_handler_http(request):
                         clean_shutdown = data.get('clean_shutdown', False)
                         
                         if clean_shutdown:
-                            print(f"[MONITOR-{monitor_instance.cp_id}] 🧪 SIMULACIÓN: Cierre limpio iniciado desde dashboard")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] SIMULACIÓN: Cierre limpio iniciado desde dashboard")
                             # Enviar evento de desconexión limpia a Central
                             monitor_instance.send_disconnect_event()
-                            print(f"[MONITOR-{monitor_instance.cp_id}] ✅ MONITOR_DISCONNECTED enviado")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] MONITOR_DISCONNECTED enviado")
                         else:
-                            print(f"[MONITOR-{monitor_instance.cp_id}] 🧪 SIMULACIÓN: Caída abrupta (sin enviar evento)")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] SIMULACIÓN: Caída abrupta (sin enviar evento)")
                         
                         # Confirmar al dashboard
                         await ws.send_str(json.dumps({
@@ -475,7 +475,7 @@ async def start_http_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', SERVER_PORT)
     await site.start()
-    print(f"[HTTP] 🌐 Server started on http://0.0.0.0:{SERVER_PORT}")
+    print(f"[HTTP] Server started on http://0.0.0.0:{SERVER_PORT}")
 
 async def broadcast_updates():
     """Broadcast actualizaciones periódicas a todos los clientes"""
@@ -519,9 +519,9 @@ async def kafka_listener():
         
         for attempt in range(max_retries):
             try:
-                print(f"[KAFKA] 🔌 Connecting consumer to Kafka at {kafka_broker_to_use}...")
-                print(f"[KAFKA] 📍 Monitor instance: {monitor_instance.cp_id if monitor_instance else 'None'}")
-                print(f"[KAFKA] 🔗 Using broker: {kafka_broker_to_use}")
+                print(f"[KAFKA] Connecting consumer to Kafka at {kafka_broker_to_use}...")
+                print(f"[KAFKA] Monitor instance: {monitor_instance.cp_id if monitor_instance else 'None'}")
+                print(f"[KAFKA] Using broker: {kafka_broker_to_use}")
                 # Usar cp_id de monitor_instance si está disponible, sino usar MONITORED_CP_ID global
                 cp_id_for_group = monitor_instance.cp_id if monitor_instance else MONITORED_CP_ID or 'default'
                 # ⚠️ IMPORTANTE: Usar group_id único y auto_offset_reset='latest' para evitar leer mensajes antiguos
@@ -539,8 +539,8 @@ async def kafka_listener():
                     consumer_timeout_ms=5000
                 )
                 
-                print(f"[KAFKA] ✅ Consumer connected, listening to {KAFKA_TOPICS_CONSUME}")
-                print(f"[KAFKA] 🔒 Consumer configured to ONLY read NEW messages (latest offset)")
+                print(f"[KAFKA] Consumer connected, listening to {KAFKA_TOPICS_CONSUME}")
+                print(f"[KAFKA] Consumer configured to ONLY read NEW messages (latest offset)")
                 
                 # ⚠️ CRÍTICO: Usar poll() en lugar de 'for message in consumer:' para mejor control
                 # 'for message in consumer:' puede leer offsets antiguos si el group_id no es único
@@ -560,7 +560,7 @@ async def kafka_listener():
                                         loop
                                     )
                     except Exception as poll_error:
-                        print(f"[KAFKA] ⚠️ Error en poll: {poll_error}")
+                        print(f"[KAFKA] Error en poll: {poll_error}")
                         import traceback
                         traceback.print_exc()
                         time.sleep(1)
@@ -568,14 +568,14 @@ async def kafka_listener():
                     
             except Exception as e:
                 import traceback
-                print(f"[KAFKA] ⚠️  Attempt {attempt+1}/{max_retries} - Consumer error: {e}")
-                print(f"[KAFKA] 📋 Error details: {traceback.format_exc()}")
+                print(f"[KAFKA] Attempt {attempt+1}/{max_retries} - Consumer error: {e}")
+                print(f"[KAFKA] Error details: {traceback.format_exc()}")
                 if attempt < max_retries - 1:
                     time.sleep(2)
                     continue
                 else:
-                    print(f"[KAFKA] ❌ Failed to connect consumer after {max_retries} attempts")
-                    print(f"[KAFKA] 💡 Verificar:")
+                    print(f"[KAFKA] Failed to connect consumer after {max_retries} attempts")
+                    print(f"[KAFKA] Verificar:")
                     print(f"[KAFKA]    1. Kafka está corriendo en {kafka_broker_to_use}")
                     print(f"[KAFKA]    2. Desde PC3, probar conectividad: telnet <IP_PC2> 9092")
                     print(f"[KAFKA]    3. Firewall permite tráfico en puerto 9092 de PC2")
@@ -631,7 +631,7 @@ async def process_kafka_event(event):
                 # Log ocasionalmente para debug (cada 10 eventos para no saturar)
                 import random
                 if random.random() < 0.1:  # 10% de probabilidad de loguear
-                    print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ CP_INFO de otro CP ignorado: cp_id={cp_id_str} (este Monitor supervisa {monitor_cp_id_str})")
+                    print(f"[MONITOR-{monitor_instance.cp_id}] CP_INFO de otro CP ignorado: cp_id={cp_id_str} (este Monitor supervisa {monitor_cp_id_str})")
             return
     
     # Si llegamos aquí, el evento es de nuestro CP O no tiene cp_id
@@ -647,7 +647,7 @@ async def process_kafka_event(event):
     # A partir de aquí, solo procesamos eventos de nuestro CP (cp_id == monitor_instance.cp_id)
     # Log solo eventos relevantes para este Monitor
     if event_type in ['CP_INFO', 'CP_REGISTRATION'] or 'cp_info' in action:
-        print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Evento recibido: type={event_type}, action={action}, cp_id={cp_id}")
+        print(f"[MONITOR-{monitor_instance.cp_id}] Evento recibido: type={event_type}, action={action}, cp_id={cp_id}")
     
     # ⚠️ IGNORAR eventos MONITOR_AUTH (no contienen información del CP)
     if event_type == 'MONITOR_AUTH':
@@ -659,7 +659,7 @@ async def process_kafka_event(event):
     # Central procesa CP_REGISTRATION y luego envía CP_INFO al Monitor
     # Si procesamos CP_REGISTRATION aquí, causamos bucles de actualizaciones
     if event_type == 'CP_REGISTRATION':
-        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Ignorando CP_REGISTRATION directo - Central enviará CP_INFO después")
+        print(f"[MONITOR-{monitor_instance.cp_id}] Ignorando CP_REGISTRATION directo - Central enviará CP_INFO después")
         return
     
     # ⚠️ VERIFICACIÓN FINAL: Asegurar que el cp_id coincide con nuestro CP
@@ -701,7 +701,7 @@ async def process_kafka_event(event):
                     existing_location = shared_state.cp_info.get(cp_id, {}).get('location') or shared_state.cp_info.get(cp_id, {}).get('localizacion')
                     cp_location = existing_location if existing_location and existing_location != 'Unknown' else 'Unknown'
                     if cp_location == 'Unknown':
-                        print(f"[MONITOR-{cp_id}] ⚠️ No se pudo extraer location del CP_INFO, usando 'Unknown'")
+                        print(f"[MONITOR-{cp_id}] No se pudo extraer location del CP_INFO, usando 'Unknown'")
                 
                 # Extraer estado: primero del data, luego del nivel raíz del evento
                 cp_status = (cp_data.get('status') or cp_data.get('estado') or 
@@ -715,7 +715,7 @@ async def process_kafka_event(event):
                         cp_status = cp_status_lower
                     else:
                         # Estado inválido: NO usar 'available' por defecto, mantener 'offline' o el último estado conocido
-                        print(f"[MONITOR-{cp_id}] ⚠️ Estado inválido recibido: '{cp_status}', manteniendo estado actual o usando 'offline'")
+                        print(f"[MONITOR-{cp_id}] Estado inválido recibido: '{cp_status}', manteniendo estado actual o usando 'offline'")
                         # Si ya hay un estado guardado, mantenerlo; si no, usar 'offline'
                         existing_status = shared_state.cp_info.get(cp_id, {}).get('status') or shared_state.cp_info.get(cp_id, {}).get('estado')
                         cp_status = existing_status if existing_status and existing_status.lower() in valid_statuses else 'offline'
@@ -765,16 +765,16 @@ async def process_kafka_event(event):
                 # Si es actualización inicial o hay cambios reales, procesar
                 if not is_initial_update and not (status_changed or location_changed or max_power_changed or tariff_changed):
                     # No hay cambios reales y no es inicial, ignorar este evento para evitar bucles
-                    print(f"[MONITOR-{cp_id}] ℹ️ CP_INFO sin cambios (status={cp_status}, location={cp_location}), omitiendo actualización para evitar bucle")
+                    print(f"[MONITOR-{cp_id}] CP_INFO sin cambios (status={cp_status}, location={cp_location}), omitiendo actualización para evitar bucle")
                     return
                 
-                print(f"[MONITOR-{cp_id}] ✅ Procesando CP_INFO: status={cp_status} (cambió: {status_changed}), location='{cp_location}' (cambió: {location_changed}), max_power={max_power}, tariff={tariff}")
-                print(f"[MONITOR-{cp_id}] 📍 Datos extraídos del evento - cp_data.location: '{cp_data.get('location')}', cp_data.localizacion: '{cp_data.get('localizacion')}', event.location: '{event.get('location')}', event.localizacion: '{event.get('localizacion')}'")
+                print(f"[MONITOR-{cp_id}] Procesando CP_INFO: status={cp_status} (cambió: {status_changed}), location='{cp_location}' (cambió: {location_changed}), max_power={max_power}, tariff={tariff}")
+                print(f"[MONITOR-{cp_id}] Datos extraídos del evento - cp_data.location: '{cp_data.get('location')}', cp_data.localizacion: '{cp_data.get('localizacion')}', event.location: '{event.get('location')}', event.localizacion: '{event.get('localizacion')}'")
                 # ⚠️ DEBUG: Mostrar todos los campos del evento para diagnosticar problemas
                 if cp_location == 'Unknown' or not cp_location:
-                    print(f"[MONITOR-{cp_id}] ⚠️ DEBUG: cp_location es '{cp_location}', verificando evento completo:")
-                    print(f"[MONITOR-{cp_id}] ⚠️ DEBUG: event.data keys: {list(cp_data.keys()) if isinstance(cp_data, dict) else 'NOT A DICT'}")
-                    print(f"[MONITOR-{cp_id}] ⚠️ DEBUG: event root keys: {list(event.keys())[:10]}...")  # Primeros 10 campos
+                    print(f"[MONITOR-{cp_id}] DEBUG: cp_location es '{cp_location}', verificando evento completo:")
+                    print(f"[MONITOR-{cp_id}] DEBUG: event.data keys: {list(cp_data.keys()) if isinstance(cp_data, dict) else 'NOT A DICT'}")
+                    print(f"[MONITOR-{cp_id}] DEBUG: event root keys: {list(event.keys())[:10]}...")  # Primeros 10 campos
                 
                 # Guardar en shared_state.cp_info solo si hay cambios
                 shared_state.cp_info[cp_id].update({
@@ -788,12 +788,12 @@ async def process_kafka_event(event):
                     'status': cp_status,
                     'estado': cp_status
                 })
-                print(f"[MONITOR-{cp_id}] 💾 CP_INFO actualizado en shared_state - location: '{cp_location}', status: {cp_status}")
+                print(f"[MONITOR-{cp_id}] CP_INFO actualizado en shared_state - location: '{cp_location}', status: {cp_status}")
                 # ⚠️ DEBUG: Si location es 'Unknown' o status es 'offline', verificar qué pasó
                 if cp_location == 'Unknown' or cp_location == '':
-                    print(f"[MONITOR-{cp_id}] ⚠️ ADVERTENCIA: Location sigue siendo 'Unknown' después de actualizar CP_INFO")
+                    print(f"[MONITOR-{cp_id}] ADVERTENCIA: Location sigue siendo 'Unknown' después de actualizar CP_INFO")
                 if cp_status == 'offline':
-                    print(f"[MONITOR-{cp_id}] ⚠️ ADVERTENCIA: Status es 'offline' - el Engine debería estar 'available' cuando está corriendo")
+                    print(f"[MONITOR-{cp_id}] ADVERTENCIA: Status es 'offline' - el Engine debería estar 'available' cuando está corriendo")
                 # No es necesario broadcast inmediato - el broadcast periódico lo hará cada 3 segundos
                 # await broadcast_monitor_data()  # Comentado para evitar saturación
             elif ('status' in event or 'estado' in event) and event_type != 'MONITOR_AUTH' and event_type != 'CP_REGISTRATION':
@@ -811,13 +811,13 @@ async def process_kafka_event(event):
                 current_stored_status = shared_state.cp_info[cp_id].get('status') or shared_state.cp_info[cp_id].get('estado')
                 if current_stored_status == new_status:
                     # Estado no cambió, ignorar para evitar bucles
-                    print(f"[MONITOR-{cp_id}] ℹ️ Estado {new_status} ya está sincronizado, omitiendo actualización para evitar bucle")
+                    print(f"[MONITOR-{cp_id}] Estado {new_status} ya está sincronizado, omitiendo actualización para evitar bucle")
                     return
                 
                 if new_status:
                     shared_state.cp_info[cp_id]['status'] = new_status
                     shared_state.cp_info[cp_id]['estado'] = new_status
-                    print(f"[MONITOR-{cp_id}] 📥 Estado actualizado desde Central: {current_stored_status} → {new_status}")
+                    print(f"[MONITOR-{cp_id}] Estado actualizado desde Central: {current_stored_status} → {new_status}")
                     # El broadcast periódico actualizará el dashboard automáticamente
     
     # ⚠️ VERIFICACIÓN ADICIONAL: Asegurar que cp_id coincide antes de procesar eventos de carga/errores
@@ -839,7 +839,7 @@ async def process_kafka_event(event):
         username = event.get('username')
         alert = monitor_instance.add_alert(
             'info',
-            f"✅ Carga iniciada en {cp_id} por {username}"
+            f"Carga iniciada en {cp_id} por {username}"
         )
         await broadcast_alert(alert)
         # Actualizar estado a 'charging'
@@ -853,7 +853,7 @@ async def process_kafka_event(event):
         energy = event.get('energy_kwh', 0)
         alert = monitor_instance.add_alert(
             'success',
-            f"⛔ Carga completada en {cp_id}: {energy:.2f} kWh"
+            f"Carga completada en {cp_id}: {energy:.2f} kWh"
         )
         await broadcast_alert(alert)
         # Actualizar estado a 'available'
@@ -865,7 +865,7 @@ async def process_kafka_event(event):
     elif action == 'fault_detected':
         alert = monitor_instance.add_alert(
             'critical',
-            f"🔴 Fallo detectado en {cp_id}"
+            f"Fallo detectado en {cp_id}"
         )
         await broadcast_alert(alert)
         # Actualizar estado a 'fault'
@@ -906,7 +906,7 @@ async def process_kafka_event(event):
     elif action == 'cp_error_fixed' or action == 'resume':
         alert = monitor_instance.add_alert(
             'success',
-            f"✅ Admin reparó {cp_id}, ahora disponible"
+            f"Admin reparó {cp_id}, ahora disponible"
         )
         await broadcast_alert(alert)
         # Actualizar estado a 'available'
@@ -999,17 +999,17 @@ async def tcp_health_check():
         'last_status': 'UNKNOWN'
     }
     
-    print(f"[MONITOR-{monitor_instance.cp_id}] 🏥 Starting TCP health monitoring")
-    print(f"[MONITOR-{monitor_instance.cp_id}]    Engine: {monitor_instance.engine_host}:{monitor_instance.engine_port}")
-    print(f"[MONITOR-{monitor_instance.cp_id}]    Frequency: Every 1 second")
+    print(f"[MONITOR-{monitor_instance.cp_id}] Starting TCP health monitoring")
+    print(f"[MONITOR-{monitor_instance.cp_id}] Engine: {monitor_instance.engine_host}:{monitor_instance.engine_port}")
+    print(f"[MONITOR-{monitor_instance.cp_id}] Frequency: Every 1 second")
     
     # ⚠️ IMPORTANTE: Esperar al inicio para que el Engine esté completamente listo
     # El Engine necesita tiempo para iniciar Kafka, registrarse y abrir el servidor TCP
     initial_wait_time = 15  # Aumentado a 15 segundos para dar más tiempo al Engine
-    print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Waiting {initial_wait_time}s for Engine to be ready...")
+    print(f"[MONITOR-{monitor_instance.cp_id}] Waiting {initial_wait_time}s for Engine to be ready...")
     
     # Intentar verificar que el Engine está disponible antes de empezar
-    print(f"[MONITOR-{monitor_instance.cp_id}] 🔍 Verifying Engine connectivity to {monitor_instance.engine_host}:{monitor_instance.engine_port}...")
+    print(f"[MONITOR-{monitor_instance.cp_id}] Verifying Engine connectivity to {monitor_instance.engine_host}:{monitor_instance.engine_port}...")
     await asyncio.sleep(initial_wait_time)
     
     # Intentar una conexión de prueba antes de empezar health checks continuos
@@ -1023,12 +1023,12 @@ async def tcp_health_check():
         test_response = await asyncio.wait_for(test_reader.readuntil(b'\n'), timeout=2.0)
         test_writer.close()
         await test_writer.wait_closed()
-        print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Engine connectivity verified! Response: {test_response.decode().strip()}")
+        print(f"[MONITOR-{monitor_instance.cp_id}] Engine connectivity verified! Response: {test_response.decode().strip()}")
     except Exception as test_error:
-        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️  Warning: Could not verify Engine connectivity: {test_error}")
-        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️  Will continue health checks anyway (Engine may still be starting)...")
+        print(f"[MONITOR-{monitor_instance.cp_id}] Warning: Could not verify Engine connectivity: {test_error}")
+        print(f"[MONITOR-{monitor_instance.cp_id}] Will continue health checks anyway (Engine may still be starting)...")
     
-    print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Starting continuous health checks")
+    print(f"[MONITOR-{monitor_instance.cp_id}] Starting continuous health checks")
     
     while True:
         try:
@@ -1052,7 +1052,7 @@ async def tcp_health_check():
                     consecutive_failures += 1
                     # Solo imprimir cada 3 fallos para reducir ruido
                     if consecutive_failures % 3 == 0 or consecutive_failures <= 3:
-                        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Connection timeout (failure {consecutive_failures}/3)")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] Connection timeout (failure {consecutive_failures}/3)")
                     shared_state.health_status = {
                         'consecutive_failures': consecutive_failures,
                         'last_check': time.time(),
@@ -1064,7 +1064,7 @@ async def tcp_health_check():
                         # ⚠️ PROTECCIÓN: No reportar fallos durante el período de gracia inicial (Engine puede estar iniciando)
                         time_since_start = time.time() - monitor_start_time
                         if time_since_start < startup_grace_period:
-                            print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
                             consecutive_failures = 0  # Reset durante grace period
                             await asyncio.sleep(1)
                             continue
@@ -1072,12 +1072,12 @@ async def tcp_health_check():
                         # ⚠️ PROTECCIÓN: No reportar el mismo fallo repetidamente (evitar bucle)
                         current_time = time.time()
                         if last_reported_failure and (current_time - last_reported_failure) < 60:  # No reportar más de una vez por minuto
-                            print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
                             consecutive_failures = 0  # Reset para evitar spam
                             await asyncio.sleep(5)  # Esperar más tiempo antes de reintentar
                             continue
                         
-                        print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Connection timeouts, reporting to Central")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] Connection timeouts, reporting to Central")
                         if monitor_instance.producer:
                             event = {
                                 'message_id': generate_message_id(),
@@ -1128,13 +1128,13 @@ async def tcp_health_check():
                     response = data.decode().strip()
                     # Solo imprimir si hay problema, no cada respuesta OK
                     if response != "OK":
-                        print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Received: {response}")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] Received: {response}")
                 except asyncio.IncompleteReadError as e:
                     # Si hay datos parciales, leerlos
                     partial = e.partial
                     if partial:
                         response = partial.decode().strip()
-                        print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Received (partial): {response}")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] Received (partial): {response}")
                     else:
                         # Intentar leer más datos
                         try:
@@ -1143,14 +1143,14 @@ async def tcp_health_check():
                                 timeout=1.0
                             )
                             response = data.decode().strip()
-                            print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Received (after partial): {response}")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] Received (after partial): {response}")
                         except Exception as e2:
-                            print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Error reading after partial: {e2}")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] Error reading after partial: {e2}")
                             raise asyncio.TimeoutError("Failed to read response")
                 except Exception as e:
                     error_msg = str(e) if e else type(e).__name__
                     error_type = type(e).__name__
-                    print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Error reading response: {error_msg} (type: {error_type})")
+                    print(f"[MONITOR-{monitor_instance.cp_id}] Error reading response: {error_msg} (type: {error_type})")
                     
                     # Intentar recuperar datos parciales antes de contar como timeout
                     partial_data = None
@@ -1176,18 +1176,18 @@ async def tcp_health_check():
                     if partial_data:
                         try:
                             response = partial_data.decode().strip()
-                            print(f"[MONITOR-{monitor_instance.cp_id}] 📨 Received (partial/error): '{response}'")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] Received (partial/error): '{response}'")
                             # Si la respuesta parcial es "OK" o "KO", es válida
                             if response in ['OK', 'KO']:
                                 # Continuar procesando con esta respuesta
                                 # NO lanzar TimeoutError - es un error de lectura pero tenemos la respuesta
-                                print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Recovered partial response: {response}")
+                                print(f"[MONITOR-{monitor_instance.cp_id}] Recovered partial response: {response}")
                                 # Continuar con el procesamiento normal de la respuesta
                             else:
                                 # Datos parciales no válidos - timeout real
                                 raise asyncio.TimeoutError(f"Failed to read response: {error_msg}")
                         except Exception as decode_error:
-                            print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Error decoding partial data: {decode_error}")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] Error decoding partial data: {decode_error}")
                             raise asyncio.TimeoutError(f"Failed to read response: {error_msg}")
                     else:
                         # No hay datos parciales - timeout real
@@ -1198,10 +1198,10 @@ async def tcp_health_check():
                     # ✅ Engine responde OK
                     prev_status = shared_state.health_status.get('last_status')
                     if consecutive_failures > 0:
-                        print(f"[MONITOR-{monitor_instance.cp_id}] ✅ Recovered (was {consecutive_failures} failures)")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] Recovered (was {consecutive_failures} failures)")
                         alert = monitor_instance.add_alert(
                             'success',
-                            f"✅ {monitor_instance.cp_id} recuperado tras {consecutive_failures} fallos"
+                            f"{monitor_instance.cp_id} recuperado tras {consecutive_failures} fallos"
                         )
                         await broadcast_alert(alert)
                         # Reset el timestamp del último fallo reportado cuando se recupera
@@ -1231,7 +1231,7 @@ async def tcp_health_check():
                                 }
                                 monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
                                 monitor_instance.producer.flush()
-                                print(f"[MONITOR-{monitor_instance.cp_id}] 📤 ENGINE_HEALTH_OK publicado para {monitor_instance.cp_id}")
+                                print(f"[MONITOR-{monitor_instance.cp_id}] ENGINE_HEALTH_OK publicado para {monitor_instance.cp_id}")
                             
                             # 💓 Enviar heartbeat periódico a Central (cada segundo mientras OK)
                             heartbeat_event = {
@@ -1246,12 +1246,12 @@ async def tcp_health_check():
                             monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, heartbeat_event)
                             # No hacer flush para cada heartbeat (reduce latencia)
                     except Exception as e:
-                        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Error publicando ENGINE_HEALTH_OK: {e}")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] Error publicando ENGINE_HEALTH_OK: {e}")
                 
                 elif response == "KO":
                     # ❌ Engine responde KO
                     consecutive_failures += 1
-                    print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Health check KO (failure {consecutive_failures}/3)")
+                    print(f"[MONITOR-{monitor_instance.cp_id}] Health check KO (failure {consecutive_failures}/3)")
                     
                     shared_state.health_status = {
                         'consecutive_failures': consecutive_failures,
@@ -1264,17 +1264,17 @@ async def tcp_health_check():
                         # ⚠️ PROTECCIÓN: No reportar el mismo fallo repetidamente (evitar bucle)
                         current_time = time.time()
                         if last_reported_failure and (current_time - last_reported_failure) < 60:  # No reportar más de una vez por minuto
-                            print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
                             consecutive_failures = 0  # Reset para evitar spam
                             await asyncio.sleep(2)
                             continue
                         
-                        print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 3+ consecutive failures, reporting to Central")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] 3+ consecutive failures, reporting to Central")
                         
                         # Añadir alerta crítica
                         alert = monitor_instance.add_alert(
                             'critical',
-                            f"🔴 {monitor_instance.cp_id} reporta 3+ fallos consecutivos (ENGINE_FAILURE)"
+                            f"{monitor_instance.cp_id} reporta 3+ fallos consecutivos (ENGINE_FAILURE)"
                         )
                         await broadcast_alert(alert)
                         
@@ -1292,7 +1292,7 @@ async def tcp_health_check():
                             }
                             monitor_instance.producer.send(KAFKA_TOPIC_PRODUCE, event)
                             monitor_instance.producer.flush()
-                            print(f"[MONITOR-{monitor_instance.cp_id}] 📤 ENGINE_FAILURE reported to Central")
+                            print(f"[MONITOR-{monitor_instance.cp_id}] ENGINE_FAILURE reported to Central")
                             last_reported_failure = current_time  # Marcar que se reportó
                         
                         # Reset contador después de reportar
@@ -1326,7 +1326,7 @@ async def tcp_health_check():
                 consecutive_failures += 1
                 # Solo imprimir cada 3 fallos para reducir ruido
                 if consecutive_failures % 3 == 0 or consecutive_failures <= 3:
-                    print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Timeout reading response (failure {consecutive_failures}/3)")
+                    print(f"[MONITOR-{monitor_instance.cp_id}] Timeout reading response (failure {consecutive_failures}/3)")
                 
                 shared_state.health_status = {
                     'consecutive_failures': consecutive_failures,
@@ -1338,7 +1338,7 @@ async def tcp_health_check():
                     # ⚠️ PROTECCIÓN: No reportar fallos durante el período de gracia inicial
                     time_since_start = time.time() - monitor_start_time
                     if time_since_start < startup_grace_period:
-                        print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
                         consecutive_failures = 0  # Reset durante grace period
                         await asyncio.sleep(2)
                         continue
@@ -1346,16 +1346,16 @@ async def tcp_health_check():
                     # ⚠️ PROTECCIÓN: No reportar el mismo fallo repetidamente (evitar bucle)
                     current_time = time.time()
                     if last_reported_failure and (current_time - last_reported_failure) < 60:  # No reportar más de una vez por minuto
-                        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] Fallo ya reportado recientemente, esperando antes de reportar de nuevo")
                         consecutive_failures = 0  # Reset para evitar spam
                         await asyncio.sleep(5)
                         continue
                     
-                    print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Connection timeouts, reporting to Central")
+                    print(f"[MONITOR-{monitor_instance.cp_id}] Connection timeouts, reporting to Central")
                     
                     alert = monitor_instance.add_alert(
                         'critical',
-                        f"🔴 {monitor_instance.cp_id} no responde (3+ timeouts)"
+                        f"{monitor_instance.cp_id} no responde (3+ timeouts)"
                     )
                     await broadcast_alert(alert)
                     
@@ -1396,7 +1396,7 @@ async def tcp_health_check():
                 consecutive_failures += 1
                 # Solo imprimir cada 3 fallos para reducir ruido
                 if consecutive_failures % 3 == 0 or consecutive_failures <= 3:
-                    print(f"[MONITOR-{monitor_instance.cp_id}] ❌ Cannot connect to Engine (failure {consecutive_failures}/3)")
+                    print(f"[MONITOR-{monitor_instance.cp_id}] Cannot connect to Engine (failure {consecutive_failures}/3)")
                 
                 shared_state.health_status = {
                     'consecutive_failures': consecutive_failures,
@@ -1408,7 +1408,7 @@ async def tcp_health_check():
                     # ⚠️ PROTECCIÓN: No reportar fallos durante el período de gracia inicial (Engine puede estar iniciando)
                     time_since_start = time.time() - monitor_start_time
                     if time_since_start < startup_grace_period:
-                        print(f"[MONITOR-{monitor_instance.cp_id}] ⏳ Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] Monitor inició hace {time_since_start:.1f}s, esperando a que Engine esté disponible (grace period: {startup_grace_period}s)")
                         consecutive_failures = 0  # Reset durante grace period
                         await asyncio.sleep(2)
                         continue
@@ -1416,16 +1416,16 @@ async def tcp_health_check():
                     # ⚠️ PROTECCIÓN: No reportar el mismo fallo repetidamente (evitar bucle)
                     current_time = time.time()
                     if last_reported_failure and (current_time - last_reported_failure) < 60:  # No reportar más de una vez por minuto
-                        print(f"[MONITOR-{monitor_instance.cp_id}] ⚠️ Engine offline ya reportado recientemente, esperando antes de reportar de nuevo")
+                        print(f"[MONITOR-{monitor_instance.cp_id}] Engine offline ya reportado recientemente, esperando antes de reportar de nuevo")
                         consecutive_failures = 0  # Reset para evitar spam
                         await asyncio.sleep(5)
                         continue
                     
-                    print(f"[MONITOR-{monitor_instance.cp_id}] 🚨 Engine offline, reporting to Central")
+                    print(f"[MONITOR-{monitor_instance.cp_id}] Engine offline, reporting to Central")
                     
                     alert = monitor_instance.add_alert(
                         'critical',
-                        f"🔴 {monitor_instance.cp_id} - Engine offline"
+                        f"{monitor_instance.cp_id} - Engine offline"
                     )
                     await broadcast_alert(alert)
                     
@@ -1464,10 +1464,10 @@ async def tcp_health_check():
                     await asyncio.sleep(5)
                     
         except asyncio.CancelledError:
-            print(f"[MONITOR-{monitor_instance.cp_id}] 🛑 TCP health monitoring stopped")
+            print(f"[MONITOR-{monitor_instance.cp_id}] TCP health monitoring stopped")
             break
         except Exception as e:
-            print(f"[MONITOR-{monitor_instance.cp_id}] ❌ Error in TCP health check: {e}")
+            print(f"[MONITOR-{monitor_instance.cp_id}] Error in TCP health check: {e}")
             await asyncio.sleep(1)
 
 
@@ -1482,14 +1482,14 @@ async def main():
     local_ip = get_local_ip()
     
     if not WS_AVAILABLE:
-        print("❌ ERROR: WebSocket dependencies not installed")
+        print("ERROR: WebSocket dependencies not installed")
         print("Run: pip install websockets aiohttp")
         return
     
     # Verificar base de datos (opcional, solo warning si no existe)
     db_path = Path('/app/ev_charging.db') if Path('/app/ev_charging.db').exists() else Path(__file__).parent.parent / 'ev_charging.db'
     if not db_path.exists():
-        print("⚠️  Database not found. Monitor will start anyway (read-only mode)")
+        print("Database not found. Monitor will start anyway (read-only mode)")
     
     try:
         # Crear aplicación web que maneje tanto HTTP como WebSocket
@@ -1505,13 +1505,13 @@ async def main():
         
         print(f"[HTTP] Dashboard server started on http://0.0.0.0:{SERVER_PORT}")
         print(f"[WS] WebSocket endpoint at ws://0.0.0.0:{SERVER_PORT}/ws")
-        print(f"\n✅ Access dashboard: http://localhost:{SERVER_PORT}")
-        print(f"✅ Access from network: http://{local_ip}:{SERVER_PORT}\n")
+        print(f"\nAccess dashboard: http://localhost:{SERVER_PORT}")
+        print(f"Access from network: http://{local_ip}:{SERVER_PORT}\n")
         
         # ========================================================================
         # ARQUITECTURA CORRECTA: Iniciar TCP health check para EL Engine asignado
         # ========================================================================
-        print(f"[MONITOR-{monitor_instance.cp_id}] 🏥 Starting TCP health monitoring...")
+        print(f"[MONITOR-{monitor_instance.cp_id}] Starting TCP health monitoring...")
         health_check_task = asyncio.create_task(tcp_health_check())
         
         # Iniciar broadcast de actualizaciones
@@ -1520,25 +1520,25 @@ async def main():
         # Iniciar listener de Kafka para recibir actualizaciones en tiempo real
         kafka_task = asyncio.create_task(kafka_listener())
         
-        print(f"\n✅ All services started successfully!")
-        print(f"🏥 TCP monitoring active for {monitor_instance.cp_id}")
-        print(f"🌐 Engine at {monitor_instance.engine_host}:{monitor_instance.engine_port}")
-        print(f"📡 Kafka listener active for real-time updates\n")
+        print(f"\nAll services started successfully!")
+        print(f"TCP monitoring active for {monitor_instance.cp_id}")
+        print(f"Engine at {monitor_instance.engine_host}:{monitor_instance.engine_port}")
+        print(f"Kafka listener active for real-time updates\n")
         
         # Mantener el servidor corriendo
         await asyncio.gather(broadcast_task, health_check_task, kafka_task)
         
     except Exception as e:
-        print(f"\n❌ Error starting server: {e}")
+        print(f"\nError starting server: {e}")
 
 def signal_handler(sig, frame):
     """Handler para señales de sistema (Ctrl+C, etc.)"""
-    print(f"\n\n[MONITOR] 🛑 Señal recibida ({signal.Signals(sig).name}) - Cerrando limpiamente...")
+    print(f"\n\n[MONITOR] Señal recibida ({signal.Signals(sig).name}) - Cerrando limpiamente...")
     shared_state.shutting_down = True
     if 'monitor_instance' in globals():
         monitor_instance.send_disconnect_event()
-        print(f"[MONITOR] ✅ MONITOR_DISCONNECTED enviado a Central")
-    print(f"[MONITOR] 👋 Monitor cerrado correctamente\n")
+        print(f"[MONITOR] MONITOR_DISCONNECTED enviado a Central")
+    print(f"[MONITOR] Monitor cerrado correctamente\n")
     sys.exit(0)
 
 if __name__ == "__main__":
@@ -1602,17 +1602,17 @@ if __name__ == "__main__":
     
     # Iniciar servidor
     try:
-        print(f"\n[MONITOR-{args.cp_id}] 💡 Presiona Ctrl+C para cerrar limpiamente (enviará MONITOR_DISCONNECTED)")
-        print(f"[MONITOR-{args.cp_id}] 💡 O cierra la terminal para simular caída abrupta\n")
+        print(f"\n[MONITOR-{args.cp_id}] Presiona Ctrl+C para cerrar limpiamente (enviará MONITOR_DISCONNECTED)")
+        print(f"[MONITOR-{args.cp_id}] O cierra la terminal para simular caída abrupta\n")
         asyncio.run(main())
     except KeyboardInterrupt:
-        print(f"\n\n[MONITOR-{args.cp_id}] 🛑 Ctrl+C detectado - Cerrando limpiamente...")
+        print(f"\n\n[MONITOR-{args.cp_id}] Ctrl+C detectado - Cerrando limpiamente...")
         shared_state.shutting_down = True
         monitor_instance.send_disconnect_event()
-        print(f"[MONITOR-{args.cp_id}] ✅ MONITOR_DISCONNECTED enviado a Central")
-        print(f"[MONITOR-{args.cp_id}] 👋 Monitor cerrado correctamente\n")
+        print(f"[MONITOR-{args.cp_id}] MONITOR_DISCONNECTED enviado a Central")
+        print(f"[MONITOR-{args.cp_id}] Monitor cerrado correctamente\n")
     except Exception as e:
-        print(f"\n❌ Fatal error: {e}")
+        print(f"\nFatal error: {e}")
         shared_state.shutting_down = True
         monitor_instance.send_disconnect_event()
         import traceback
